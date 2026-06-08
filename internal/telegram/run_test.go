@@ -47,13 +47,15 @@ func openRealStore(path string) (*session.FileStore, error) {
 // the final state. It is safe for concurrent use because edits arrive from the
 // ticker goroutine and the run goroutine.
 type fakeChat struct {
-	mu      sync.Mutex
-	nextID  int
-	texts   map[int]string // current text per message id
-	hasStop map[int]bool   // whether the message currently shows a Stop button
-	deleted map[int]bool
-	sent    []string // every Send'd text, in order
-	docs    []string // every SendDocument'd filename, in order
+	mu       sync.Mutex
+	nextID   int
+	texts    map[int]string // current text per message id
+	hasStop  map[int]bool   // whether the message currently shows a Stop button
+	deleted  map[int]bool
+	sent     []string // every Send'd text, in order
+	docs     []string // every SendDocument'd filename, in order
+	drafts   []string // every successful StreamDraft'd text, in order (live preview)
+	draftErr error    // when set, StreamDraft returns it (simulates no draft support)
 }
 
 func newFakeChat() *fakeChat {
@@ -80,6 +82,16 @@ func (f *fakeChat) Edit(_ context.Context, _ int64, messageID int, text, stopRun
 	defer f.mu.Unlock()
 	f.texts[messageID] = text
 	f.hasStop[messageID] = stopRunID != ""
+	return nil
+}
+
+func (f *fakeChat) StreamDraft(_ context.Context, _ int64, _ string, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.draftErr != nil {
+		return f.draftErr
+	}
+	f.drafts = append(f.drafts, text)
 	return nil
 }
 
@@ -321,6 +333,71 @@ func TestRunRendersProgressThenFinal(t *testing.T) {
 		text, stop := fc.snapshot(1)
 		return text == "final answer" && !stop
 	})
+}
+
+// TestRunStreamsProgressAsDraftThenClears asserts live progress is pushed via the
+// rate-limit-free draft preview (not by editing the anchor), and that the draft is
+// cleared when the answer is finalized into the anchor.
+func TestRunStreamsProgressAsDraftThenClears(t *testing.T) {
+	fc := newFakeChat()
+	fr := &fakeRunner{events: []claude.Event{
+		{Type: claude.SystemInit, SessionID: "s1"},
+		{Type: claude.ToolUse, Tool: "Bash"},
+		{Type: claude.Result, Result: &claude.RunResult{Text: "final answer", SessionID: "s1"}},
+	}}
+	svc, d := newTestService(t, fr, fc)
+	defer d.Close()
+
+	svc.Handle(context.Background(), 100, 100, 1, "hello")
+
+	waitUntil(t, func() bool {
+		text, stop := fc.snapshot(1)
+		return text == "final answer" && !stop
+	})
+
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	// The anchor was sent as the fixed Stop-bearing anchor text — progress did NOT
+	// ride it (it streams as drafts).
+	if len(fc.sent) == 0 || !strings.Contains(fc.sent[0], "Working") {
+		t.Fatalf("anchor not sent as the Working anchor; sent=%v", fc.sent)
+	}
+	// Live progress streamed via at least one draft preview...
+	if len(fc.drafts) == 0 || !strings.Contains(fc.drafts[0], "Working") {
+		t.Fatalf("progress not streamed as a draft; drafts=%v", fc.drafts)
+	}
+	// ...and the draft is cleared (empty) once the answer is finalized.
+	if last := fc.drafts[len(fc.drafts)-1]; last != "" {
+		t.Fatalf("draft not cleared on finish; last draft = %q", last)
+	}
+}
+
+// TestRunFallsBackToEditsWhenDraftFails asserts that if draft streaming is
+// unsupported (StreamDraft errors), the run still delivers the answer by editing
+// the anchor — nothing is lost and no draft is recorded.
+func TestRunFallsBackToEditsWhenDraftFails(t *testing.T) {
+	fc := newFakeChat()
+	fc.draftErr = errors.New("drafts unsupported")
+	fr := &fakeRunner{events: []claude.Event{
+		{Type: claude.ToolUse, Tool: "Bash"},
+		{Type: claude.Result, Result: &claude.RunResult{Text: "final answer"}},
+	}}
+	svc, d := newTestService(t, fr, fc)
+	defer d.Close()
+
+	svc.Handle(context.Background(), 100, 100, 1, "hello")
+
+	// Despite drafts failing, the answer still lands — delivered by editing the anchor.
+	waitUntil(t, func() bool {
+		text, stop := fc.snapshot(1)
+		return text == "final answer" && !stop
+	})
+
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if len(fc.drafts) != 0 {
+		t.Fatalf("no draft should succeed in fallback mode; got %v", fc.drafts)
+	}
 }
 
 func TestRunChunksLongFinal(t *testing.T) {

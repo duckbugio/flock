@@ -65,6 +65,20 @@ func (c *botChat) Edit(ctx context.Context, chatID int64, messageID int, text, s
 	return err
 }
 
+// StreamDraft streams text as an ephemeral live preview keyed by draftID (repeated
+// calls update the same preview; an empty text clears it). It is rate-limit-free
+// relative to EditMessageText, so it carries the live run progress while the answer
+// is persisted with Send/Edit. A draft can't hold an inline keyboard, which is why
+// the Stop button rides a separate anchor message.
+func (c *botChat) StreamDraft(ctx context.Context, chatID int64, draftID, text string) error {
+	_, err := c.b.SendMessageDraft(ctx, &bot.SendMessageDraftParams{
+		ChatID:  chatID,
+		DraftID: draftID,
+		Text:    text,
+	})
+	return err
+}
+
 // isParseError reports whether err is Telegram rejecting our parse_mode markup
 // (a 400 "can't parse entities"). Only such errors warrant the plain-text retry;
 // a transport/Not-Found error would fail identically, so retrying it risks a

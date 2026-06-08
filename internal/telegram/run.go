@@ -29,6 +29,11 @@ import (
 // during a silent tool call (§7.2).
 const tickInterval = 2 * time.Second
 
+// anchorText is the persistent message sent at the start of a run. It carries the
+// Stop button (which an ephemeral draft can't) and is later edited into the final
+// answer; the live progress streams separately as a draft.
+const anchorText = "⏳ Working…"
+
 // stopCallbackPrefix is the inline-button callback_data prefix carrying the run
 // id so a Stop press maps back to the right in-flight run.
 const stopCallbackPrefix = "stop:"
@@ -43,6 +48,12 @@ type chat interface {
 	// Edit updates an existing message's text (and Stop markup, when stopRunID
 	// is non-empty; empty clears the markup). asMarkdown behaves as for Send.
 	Edit(ctx context.Context, chatID int64, messageID int, text string, stopRunID string, asMarkdown bool) error
+	// StreamDraft streams text as an ephemeral live "draft" preview keyed by
+	// draftID: repeated calls update the same preview (rate-limit-free, unlike
+	// Edit) and an empty text clears it. Used for live run progress; the answer is
+	// persisted with Send/Edit. Returns an error when the chat can't stream a draft,
+	// so the caller can fall back to editing a normal message.
+	StreamDraft(ctx context.Context, chatID int64, draftID string, text string) error
 	// Delete removes a message; failures are non-fatal to the caller.
 	Delete(ctx context.Context, chatID int64, messageID int) error
 	// SendDocument uploads a file to the chat as a Telegram document. The data is
@@ -308,10 +319,13 @@ func (s *Service) run(ctx context.Context, chatID, userID int64, prompt string, 
 	start := s.nowFunc()
 	prog := tgui.NewProgress(func() time.Duration { return s.nowFunc().Sub(start) }, 0)
 
-	progressMsgID, err := s.chat.Send(ctx, chatID, prog.Frame(), runID, false)
+	// The anchor: a persistent message that carries the Stop button (a draft can't)
+	// and is later edited into the final answer. It stays static while live progress
+	// streams as a draft; only the fallback path (no draft support) edits it.
+	progressMsgID, err := s.chat.Send(ctx, chatID, anchorText, runID, false)
 	if err != nil {
-		// Without a progress message we can still deliver the result; keep going.
-		s.log.Error("send initial progress", "error", err)
+		// Without an anchor we can still deliver the result; keep going.
+		s.log.Error("send anchor message", "error", err)
 		progressMsgID = 0
 	}
 
@@ -319,26 +333,49 @@ func (s *Service) run(ctx context.Context, chatID, userID int64, prompt string, 
 	defer ticker.Stop()
 
 	var (
-		lastSent       = prog.Frame()
+		lastSent       string
 		throttledUntil time.Time
+		// draftStreaming holds while we push live progress as an ephemeral draft (the
+		// rate-limit-free path). The first failed StreamDraft flips it off and the run
+		// falls back to editing the anchor for its remainder.
+		draftStreaming = progressMsgID != 0
 		finalResult    *claude.RunResult
 		finalErr       error
 	)
 
-	editFrame := func() {
+	// Seed the live preview immediately so it appears without waiting for a tick.
+	if draftStreaming {
+		if err := s.chat.StreamDraft(ctx, chatID, runID, prog.Frame()); err != nil {
+			draftStreaming = false
+			s.log.Debug("draft streaming unsupported; falling back to edits", "error", err)
+		} else {
+			lastSent = prog.Frame()
+		}
+	}
+
+	// render pushes the current progress frame: as a rate-limit-free draft preview
+	// while draftStreaming holds, else by editing the anchor (rate-limit aware).
+	render := func() {
 		if progressMsgID == 0 {
 			return
 		}
-		// While Telegram has us rate-limited, skip edits rather than hammer the
-		// throttled endpoint — that only prolongs the back-off and can starve the
-		// final answer's delivery budget.
-		if !throttledUntil.IsZero() && s.nowFunc().Before(throttledUntil) {
+		frame := prog.Frame()
+		if frame == lastSent {
 			return
 		}
-		frame := prog.Frame()
-		// Only edit when content changed since the last successful edit, to stay
-		// within Telegram's edit rate limits.
-		if frame == lastSent {
+		if draftStreaming {
+			if err := s.chat.StreamDraft(ctx, chatID, runID, frame); err != nil {
+				// Drafts unsupported here: edit the anchor for the rest of the run.
+				draftStreaming = false
+				s.log.Debug("draft stream failed; falling back to edits", "error", err)
+			} else {
+				lastSent = frame
+				return
+			}
+		}
+		// Fallback: edit the anchor. Skip while rate-limited so we don't hammer the
+		// throttled endpoint (which prolongs the back-off and starves final delivery).
+		if !throttledUntil.IsZero() && s.nowFunc().Before(throttledUntil) {
 			return
 		}
 		if err := s.chat.Edit(ctx, chatID, progressMsgID, frame, runID, false); err != nil {
@@ -357,7 +394,7 @@ loop:
 		case <-ticker.C:
 			// Re-render on the wall clock even if no event arrived, so the counter
 			// advances during a silent tool call.
-			editFrame()
+			render()
 
 		case ev, ok := <-events:
 			if !ok {
@@ -393,7 +430,7 @@ loop:
 	// case their NEXT request is denied (the crossing request still ran).
 	s.recordCost(userID, finalResult)
 
-	s.finish(ctx, chatID, progressMsgID, finalResult, finalErr, ctx.Err())
+	s.finish(ctx, chatID, progressMsgID, runID, finalResult, finalErr, ctx.Err())
 }
 
 // recordCost accumulates a completed run's USD cost onto userID's running total
@@ -427,10 +464,13 @@ func (s *Service) storeSession(chatID int64, sessionID string) {
 
 // finish renders the terminal message and replaces the progress message with it
 // (chunked when the answer exceeds the Telegram size limit).
-func (s *Service) finish(ctx context.Context, chatID int64, progressMsgID int, res *claude.RunResult, runErr, ctxErr error) {
+func (s *Service) finish(ctx context.Context, chatID int64, progressMsgID int, runID string, res *claude.RunResult, runErr, ctxErr error) {
 	// Use a background context for delivery: the run ctx may be cancelled by Stop
 	// or shutdown, but the final message should still reach the user.
 	deliverCtx := context.WithoutCancel(ctx)
+	// Clear the live draft preview (empty text) so it doesn't linger beside the
+	// persisted answer. Best-effort; harmless if no draft was ever streamed.
+	_ = s.chat.StreamDraft(deliverCtx, chatID, runID, "")
 	var text string
 	switch {
 	case ctxErr != nil && res == nil && runErr == nil:
