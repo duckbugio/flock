@@ -30,7 +30,8 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 
 # --- Runtime stage ------------------------------------------------------------
 # node:22 supplies Node (for the `claude` CLI). Add git/ripgrep/ffmpeg (the CLI
-# shells out to them) + the Docker CLI (talks to the optional dind sidecar).
+# shells out to them), the GitHub CLI (`gh`, for PR creation on github.com) + the
+# Docker CLI (talks to the optional dind sidecar).
 FROM node:22-bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -43,8 +44,11 @@ RUN set -eux; \
     curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc; \
     chmod a+r /etc/apt/keyrings/docker.asc; \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list; \
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg; \
+    chmod 0644 /etc/apt/keyrings/githubcli-archive-keyring.gpg; \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list; \
     apt-get update; \
-    apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin; \
+    apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin gh; \
     npm install -g @anthropic-ai/claude-code; \
     npm cache clean --force; \
     apt-get clean; rm -rf /var/lib/apt/lists/*
