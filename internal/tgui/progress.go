@@ -33,6 +33,10 @@ const (
 // a progress frame is always a single Telegram message with ~596 runes of
 // headroom for markup/encoding slack; Frame() drops oldest ring lines (and, in the
 // extreme, hard-truncates the most recent line) to honor it.
+//
+// The budget is measured on the markdown SOURCE runes; the live frame is rendered
+// via MarkdownToHTML, which only adds tags/escapes, so the VISIBLE length (all
+// Telegram's 4096 limit counts) is <= source length. The limit therefore still holds.
 const frameBudgetMax = 3500
 
 // Activity-line prefixes: a thought balloon for the model's text, a wrench for a

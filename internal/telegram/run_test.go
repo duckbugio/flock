@@ -55,6 +55,7 @@ type fakeChat struct {
 	sent     []string // every Send'd text, in order
 	docs     []string // every SendDocument'd filename, in order
 	drafts   []string // every successful StreamDraft'd text, in order (live preview)
+	draftMD  []bool   // asMarkdown flag for each successful StreamDraft, parallel to drafts
 	draftErr error    // when set, StreamDraft returns it (simulates no draft support)
 	editErr  error    // when set, Edit returns it (e.g. a 429 to exercise throttling)
 	edits    int      // count of Edit calls (progress + final), for the throttle test
@@ -98,13 +99,14 @@ func (f *fakeChat) editCount() int {
 	return f.edits
 }
 
-func (f *fakeChat) StreamDraft(_ context.Context, _ int64, _ string, text string) error {
+func (f *fakeChat) StreamDraft(_ context.Context, _ int64, _ string, text string, asMarkdown bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.draftErr != nil {
 		return f.draftErr
 	}
 	f.drafts = append(f.drafts, text)
+	f.draftMD = append(f.draftMD, asMarkdown)
 	return nil
 }
 
@@ -379,9 +381,18 @@ func TestRunStreamsProgressAsDraftThenClears(t *testing.T) {
 	if len(fc.drafts) == 0 || !strings.Contains(fc.drafts[0], "Working") {
 		t.Fatalf("progress not streamed as a draft; drafts=%v", fc.drafts)
 	}
+	// ...rendered as markdown/HTML so `code` and **bold** don't show as raw text.
+	if !fc.draftMD[0] {
+		t.Fatalf("progress draft not pushed with asMarkdown=true; draftMD=%v", fc.draftMD)
+	}
 	// ...and the draft is cleared (empty) once the answer is finalized.
-	if last := fc.drafts[len(fc.drafts)-1]; last != "" {
-		t.Fatalf("draft not cleared on finish; last draft = %q", last)
+	last := len(fc.drafts) - 1
+	if fc.drafts[last] != "" {
+		t.Fatalf("draft not cleared on finish; last draft = %q", fc.drafts[last])
+	}
+	// The clear is plain (no formatting) — empty text carries no markdown.
+	if fc.draftMD[last] {
+		t.Fatalf("draft clear should be plain (asMarkdown=false); draftMD=%v", fc.draftMD)
 	}
 }
 

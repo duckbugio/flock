@@ -61,9 +61,10 @@ type chat interface {
 	// StreamDraft streams text as an ephemeral live "draft" preview keyed by
 	// draftID: repeated calls update the same preview (rate-limit-free, unlike
 	// Edit) and an empty text clears it. Used for live run progress; the answer is
-	// persisted with Send/Edit. Returns an error when the chat can't stream a draft,
+	// persisted with Send/Edit. asMarkdown behaves as for Send/Edit (ignored when
+	// text is empty). Returns an error when the chat can't stream a draft,
 	// so the caller can fall back to editing a normal message.
-	StreamDraft(ctx context.Context, chatID int64, draftID string, text string) error
+	StreamDraft(ctx context.Context, chatID int64, draftID string, text string, asMarkdown bool) error
 	// Delete removes a message; failures are non-fatal to the caller.
 	Delete(ctx context.Context, chatID int64, messageID int) error
 	// SendDocument uploads a file to the chat as a Telegram document. The data is
@@ -359,7 +360,7 @@ func (s *Service) run(ctx context.Context, chatID, userID int64, prompt string, 
 
 	// Seed the live preview immediately so it appears without waiting for a tick.
 	if draftStreaming {
-		if err := s.chat.StreamDraft(ctx, chatID, runID, prog.Frame()); err != nil {
+		if err := s.chat.StreamDraft(ctx, chatID, runID, prog.Frame(), true); err != nil {
 			draftStreaming = false
 			s.log.Debug("draft streaming unsupported; falling back to edits", "error", err)
 		} else {
@@ -378,7 +379,7 @@ func (s *Service) run(ctx context.Context, chatID, userID int64, prompt string, 
 			return
 		}
 		if draftStreaming {
-			if err := s.chat.StreamDraft(ctx, chatID, runID, frame); err != nil {
+			if err := s.chat.StreamDraft(ctx, chatID, runID, frame, true); err != nil {
 				// Drafts unsupported here: edit the anchor for the rest of the run.
 				draftStreaming = false
 				s.log.Debug("draft stream failed; falling back to edits", "error", err)
@@ -398,7 +399,7 @@ func (s *Service) run(ctx context.Context, chatID, userID int64, prompt string, 
 		if !lastEditAt.IsZero() && s.nowFunc().Sub(lastEditAt) < minEditInterval {
 			return
 		}
-		if err := s.chat.Edit(ctx, chatID, progressMsgID, frame, runID, false); err != nil {
+		if err := s.chat.Edit(ctx, chatID, progressMsgID, frame, runID, true); err != nil {
 			if d, ok := retryAfter(err); ok {
 				throttledUntil = s.nowFunc().Add(d)
 			}
@@ -495,7 +496,7 @@ func (s *Service) finish(ctx context.Context, chatID int64, progressMsgID int, r
 	deliverCtx := context.WithoutCancel(ctx)
 	// Clear the live draft preview (empty text) so it doesn't linger beside the
 	// persisted answer. Best-effort; harmless if no draft was ever streamed.
-	_ = s.chat.StreamDraft(deliverCtx, chatID, runID, "")
+	_ = s.chat.StreamDraft(deliverCtx, chatID, runID, "", false)
 	var text string
 	switch {
 	case ctxErr != nil && res == nil && runErr == nil:
