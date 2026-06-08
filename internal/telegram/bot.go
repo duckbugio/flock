@@ -69,13 +69,27 @@ func (c *botChat) Edit(ctx context.Context, chatID int64, messageID int, text, s
 // calls update the same preview; an empty text clears it). It is rate-limit-free
 // relative to EditMessageText, so it carries the live run progress while the answer
 // is persisted with Send/Edit. A draft can't hold an inline keyboard, which is why
-// the Stop button rides a separate anchor message.
-func (c *botChat) StreamDraft(ctx context.Context, chatID int64, draftID, text string) error {
-	_, err := c.b.SendMessageDraft(ctx, &bot.SendMessageDraftParams{
+// the Stop button rides a separate anchor message. asMarkdown behaves as for
+// Send/Edit (HTML render with a plain-text fallback on a parse error); it is ignored
+// when text is empty (the clear call).
+func (c *botChat) StreamDraft(ctx context.Context, chatID int64, draftID, text string, asMarkdown bool) error {
+	params := &bot.SendMessageDraftParams{
 		ChatID:  chatID,
 		DraftID: draftID,
 		Text:    text,
-	})
+	}
+	if asMarkdown && text != "" {
+		params.Text = tgui.MarkdownToHTML(text)
+		params.ParseMode = models.ParseModeHTML
+	}
+	_, err := c.b.SendMessageDraft(ctx, params)
+	if err != nil && asMarkdown && text != "" && isParseError(err) {
+		// Telegram rejected our HTML markup: resend the ORIGINAL text as plain so a
+		// formatting glitch never costs the user the live preview.
+		params.Text = text
+		params.ParseMode = ""
+		_, err = c.b.SendMessageDraft(ctx, params)
+	}
 	return err
 }
 

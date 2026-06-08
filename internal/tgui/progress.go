@@ -17,10 +17,27 @@ import (
 // defaultRingSize is how many recent activity lines the progress frame shows.
 const defaultRingSize = 5
 
-// activitySnippetMax bounds the TEXT of a single rendered activity line so a long
-// tool input or thought can't blow up the frame, while still showing enough to
-// read. The line's emoji prefix is added on top of this budget.
-const activitySnippetMax = 240
+// These bound the TEXT of rendered activity lines (the emoji prefix is added on
+// top of each budget) so a long tool input or thought can't blow up the frame,
+// while still showing enough to read. The cap is POSITIONAL: the most recent ring
+// line gets the larger recentSnippetMax so the current activity is readable, and
+// older lines get the tighter olderSnippetMax since they are just context. The
+// caps are applied at Frame() assembly time, not when the line is stored.
+const (
+	recentSnippetMax = 800
+	olderSnippetMax  = 400
+)
+
+// frameBudgetMax bounds the WHOLE assembled frame (header + blank + ring lines)
+// in runes. It stays comfortably below TelegramMaxMessage (4096, see chunk.go) so
+// a progress frame is always a single Telegram message with ~596 runes of
+// headroom for markup/encoding slack; Frame() drops oldest ring lines (and, in the
+// extreme, hard-truncates the most recent line) to honor it.
+//
+// The budget is measured on the markdown SOURCE runes; the live frame is rendered
+// via MarkdownToHTML, which only adds tags/escapes, so the VISIBLE length (all
+// Telegram's 4096 limit counts) is <= source length. The limit therefore still holds.
+const frameBudgetMax = 3500
 
 // Activity-line prefixes: a thought balloon for the model's text, a wrench for a
 // tool call.
@@ -74,7 +91,10 @@ func (p *Progress) Observe(e claude.Event) bool {
 }
 
 // activityLine renders the one-line activity summary for an event, or false if
-// the event contributes no visible activity.
+// the event contributes no visible activity. The TEXT is capped at a generous
+// upper bound (recentSnippetMax) when stored — enough for any ring position — and
+// Frame() re-caps it tighter per recency. The emoji prefix is added on top of the
+// text budget, so it is never split or counted against the cap.
 func activityLine(e claude.Event) (string, bool) {
 	switch e.Type {
 	case claude.ToolUse:
@@ -82,17 +102,29 @@ func activityLine(e claude.Event) (string, bool) {
 		if tool == "" {
 			tool = "tool"
 		}
-		return toolPrefix + truncateRunes(tool, activitySnippetMax), true
+		return toolPrefix + truncateRunes(tool, recentSnippetMax), true
 	case claude.Text:
 		snippet := collapseWhitespace(e.Text)
 		if snippet == "" {
 			return "", false
 		}
-		return thoughtPrefix + truncateRunes(snippet, activitySnippetMax), true
+		return thoughtPrefix + truncateRunes(snippet, recentSnippetMax), true
 	default:
 		// SystemInit, ToolResult, Result, RunError: no activity line.
 		return "", false
 	}
+}
+
+// capLine re-caps a stored activity line's TEXT to maxText runes, preserving its
+// emoji prefix (which is added on top of the budget, never split or counted). A
+// line without a known prefix is capped whole.
+func capLine(line string, maxText int) string {
+	for _, prefix := range []string{thoughtPrefix, toolPrefix} {
+		if strings.HasPrefix(line, prefix) {
+			return prefix + truncateRunes(line[len(prefix):], maxText)
+		}
+	}
+	return truncateRunes(line, maxText)
 }
 
 // push appends a line to the bounded ring, evicting the oldest when full.
@@ -117,15 +149,62 @@ func (p *Progress) Frame() string {
 	if len(p.ring) == 0 {
 		return header
 	}
-	var b strings.Builder
-	b.WriteString(header)
-	// A blank line sets the activity ("thoughts") apart from the Working header.
-	b.WriteString("\n")
-	for _, line := range p.ring {
-		b.WriteByte('\n')
-		b.WriteString(line)
+
+	// Re-cap each ring line by recency: the last (most recent) line gets the
+	// generous recentSnippetMax, all earlier lines the tighter olderSnippetMax.
+	lines := make([]string, len(p.ring))
+	for i, line := range p.ring {
+		maxText := olderSnippetMax
+		if i == len(p.ring)-1 {
+			maxText = recentSnippetMax
+		}
+		lines[i] = capLine(line, maxText)
 	}
-	return b.String()
+
+	// Enforce the overall frame budget. assemble joins the header (always kept),
+	// a blank separator, and the given ring lines; its rune count must not exceed
+	// frameBudgetMax. Drop the OLDEST lines first until it fits.
+	assemble := func(ringLines []string) string {
+		var b strings.Builder
+		b.WriteString(header)
+		// A blank line sets the activity ("thoughts") apart from the Working header.
+		b.WriteString("\n")
+		for _, line := range ringLines {
+			b.WriteByte('\n')
+			b.WriteString(line)
+		}
+		return b.String()
+	}
+	for len(lines) > 1 && utf8.RuneCountInString(assemble(lines)) > frameBudgetMax {
+		lines = lines[1:]
+	}
+
+	frame := assemble(lines)
+	if utf8.RuneCountInString(frame) <= frameBudgetMax {
+		return frame
+	}
+
+	// A single surviving line (the most recent) still blows the budget on its own.
+	// Hard-truncate it so the frame is always <= frameBudgetMax, but never emit an
+	// empty frame: keep the header + a blank + the truncated line. The header, the
+	// two separating newlines, and the line's emoji prefix all ride on top of the
+	// text budget, so subtract them so capLine's TEXT cap keeps the whole frame in
+	// bounds.
+	overhead := utf8.RuneCountInString(header) + 2
+	for _, prefix := range []string{thoughtPrefix, toolPrefix} {
+		if strings.HasPrefix(lines[0], prefix) {
+			overhead += utf8.RuneCountInString(prefix)
+			break
+		}
+	}
+	// The header is tiny (≈20 runes) and frameBudgetMax is in the thousands, so
+	// budget is always comfortably positive; the clamp is pure defense so a future
+	// outsized header can never make capLine's budget non-positive.
+	budget := frameBudgetMax - overhead
+	if budget < 1 {
+		budget = 1
+	}
+	return assemble([]string{capLine(lines[0], budget)})
 }
 
 // Final renders the terminal message text for a successful run result. A

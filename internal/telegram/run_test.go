@@ -55,7 +55,10 @@ type fakeChat struct {
 	sent     []string // every Send'd text, in order
 	docs     []string // every SendDocument'd filename, in order
 	drafts   []string // every successful StreamDraft'd text, in order (live preview)
+	draftMD  []bool   // asMarkdown flag for each successful StreamDraft, parallel to drafts
 	draftErr error    // when set, StreamDraft returns it (simulates no draft support)
+	editErr  error    // when set, Edit returns it (e.g. a 429 to exercise throttling)
+	edits    int      // count of Edit calls (progress + final), for the throttle test
 }
 
 func newFakeChat() *fakeChat {
@@ -80,18 +83,30 @@ func (f *fakeChat) Send(_ context.Context, _ int64, text, stopRunID string, _ bo
 func (f *fakeChat) Edit(_ context.Context, _ int64, messageID int, text, stopRunID string, _ bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.edits++
+	if f.editErr != nil {
+		return f.editErr
+	}
 	f.texts[messageID] = text
 	f.hasStop[messageID] = stopRunID != ""
 	return nil
 }
 
-func (f *fakeChat) StreamDraft(_ context.Context, _ int64, _ string, text string) error {
+// editCount reports how many Edit calls the chat has received.
+func (f *fakeChat) editCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.edits
+}
+
+func (f *fakeChat) StreamDraft(_ context.Context, _ int64, _ string, text string, asMarkdown bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.draftErr != nil {
 		return f.draftErr
 	}
 	f.drafts = append(f.drafts, text)
+	f.draftMD = append(f.draftMD, asMarkdown)
 	return nil
 }
 
@@ -366,9 +381,18 @@ func TestRunStreamsProgressAsDraftThenClears(t *testing.T) {
 	if len(fc.drafts) == 0 || !strings.Contains(fc.drafts[0], "Working") {
 		t.Fatalf("progress not streamed as a draft; drafts=%v", fc.drafts)
 	}
+	// ...rendered as markdown/HTML so `code` and **bold** don't show as raw text.
+	if !fc.draftMD[0] {
+		t.Fatalf("progress draft not pushed with asMarkdown=true; draftMD=%v", fc.draftMD)
+	}
 	// ...and the draft is cleared (empty) once the answer is finalized.
-	if last := fc.drafts[len(fc.drafts)-1]; last != "" {
-		t.Fatalf("draft not cleared on finish; last draft = %q", last)
+	last := len(fc.drafts) - 1
+	if fc.drafts[last] != "" {
+		t.Fatalf("draft not cleared on finish; last draft = %q", fc.drafts[last])
+	}
+	// The clear is plain (no formatting) — empty text carries no markdown.
+	if fc.draftMD[last] {
+		t.Fatalf("draft clear should be plain (asMarkdown=false); draftMD=%v", fc.draftMD)
 	}
 }
 
@@ -398,6 +422,89 @@ func TestRunFallsBackToEditsWhenDraftFails(t *testing.T) {
 	if len(fc.drafts) != 0 {
 		t.Fatalf("no draft should succeed in fallback mode; got %v", fc.drafts)
 	}
+}
+
+// fakeClock is a thread-safe, manually-advanced clock for nowFunc injection.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func newFakeClock() *fakeClock { return &fakeClock{t: time.Unix(0, 0)} }
+
+func (c *fakeClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
+// TestEditFallbackRespectsMinInterval drives the rate-limited Edit fallback (drafts
+// disabled) with many fast ticks while advancing the injected clock in small steps,
+// and asserts that real edits are bounded to roughly one per minEditInterval window
+// (not one per tick) AND that the rendered counter still advances across windows —
+// i.e. the throttle bounds edits without freezing the counter.
+func TestEditFallbackRespectsMinInterval(t *testing.T) {
+	fc := newFakeChat()
+	fc.draftErr = errors.New("drafts unsupported") // force the edit fallback
+	gate := make(chan struct{})
+	fr := &fakeRunner{
+		events: []claude.Event{{Type: claude.ToolUse, Tool: "Bash"}},
+		gate:   gate, // keep the run in flight while we drive ticks/clock
+	}
+	svc, d := newTestService(t, fr, fc)
+	defer d.Close()
+
+	clk := newFakeClock()
+	svc.nowFunc = clk.now
+	svc.tick = time.Millisecond // tick fast so many ticks land per clock window
+
+	svc.Handle(context.Background(), 100, 100, 1, "go")
+
+	// Wait until the anchor exists (the run is up and in fallback mode).
+	waitUntil(t, func() bool {
+		_, stop := fc.snapshot(1)
+		return stop
+	})
+
+	// Advance the clock across several minEditInterval windows in small sub-interval
+	// steps, giving the fast ticker many chances to edit within each window.
+	const windows = 4
+	step := minEditInterval / 5
+	for i := 0; i < windows*5; i++ {
+		clk.advance(step)
+		time.Sleep(3 * time.Millisecond) // let several real ticks fire at this clock value
+	}
+
+	// Edits during the run are throttled to ~one per window: with `windows` windows
+	// (plus the prompt first-edit) we expect far fewer than the hundreds of ticks.
+	progressEdits := fc.editCount()
+	if progressEdits > windows+2 {
+		t.Fatalf("edits not throttled: %d edits across %d windows", progressEdits, windows)
+	}
+	if progressEdits == 0 {
+		t.Fatal("no edits happened in fallback mode; counter would be frozen")
+	}
+
+	// The counter advanced across windows: the anchor text shows the elapsed seconds
+	// climbing past the first window, proving the throttle didn't park render().
+	text, _ := fc.snapshot(1)
+	if !strings.Contains(text, "Working") {
+		t.Fatalf("anchor not showing progress: %q", text)
+	}
+	wantSecs := int((windows * 5 * int(step)) / int(time.Second))
+	if wantSecs > 0 && !strings.Contains(text, "("+strconv.Itoa(wantSecs)+"s)") &&
+		!strings.Contains(text, "("+strconv.Itoa(wantSecs-1)+"s)") &&
+		!strings.Contains(text, "("+strconv.Itoa(wantSecs-2)+"s)") {
+		t.Fatalf("counter did not advance to ~%ds: %q", wantSecs, text)
+	}
+
+	close(gate)
 }
 
 func TestRunChunksLongFinal(t *testing.T) {

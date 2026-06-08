@@ -2,6 +2,7 @@ package tgui
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -90,7 +91,9 @@ func TestObserveTextAndIgnoredEvents(t *testing.T) {
 func TestActivitySnippetTruncated(t *testing.T) {
 	var elapsed time.Duration
 	p := NewProgress(fakeClock(&elapsed), 5)
-	long := strings.Repeat("a", 500)
+	// A single (hence most-recent) line longer than recentSnippetMax is capped at
+	// recentSnippetMax; the emoji prefix rides on top of that text budget.
+	long := strings.Repeat("a", recentSnippetMax+200)
 	p.Observe(claude.Event{Type: claude.Text, Text: long})
 	frame := p.Frame()
 	prefixRunes := utf8.RuneCountInString(thoughtPrefix)
@@ -100,9 +103,8 @@ func TestActivitySnippetTruncated(t *testing.T) {
 			continue
 		}
 		sawActivity = true
-		// The text is capped at activitySnippetMax; the emoji prefix rides on top.
-		if n := utf8.RuneCountInString(line); n > activitySnippetMax+prefixRunes {
-			t.Fatalf("snippet exceeded max: %d runes (cap %d + prefix %d)", n, activitySnippetMax, prefixRunes)
+		if n := utf8.RuneCountInString(line); n > recentSnippetMax+prefixRunes {
+			t.Fatalf("snippet exceeded max: %d runes (cap %d + prefix %d)", n, recentSnippetMax, prefixRunes)
 		}
 	}
 	if !sawActivity {
@@ -110,6 +112,131 @@ func TestActivitySnippetTruncated(t *testing.T) {
 	}
 	if !strings.Contains(frame, "…") {
 		t.Fatalf("expected ellipsis on truncated snippet: %q", frame)
+	}
+}
+
+// TestPositionalSnippetCaps asserts the per-line cap is positional by recency:
+// the most-recent ring line gets recentSnippetMax (so a line between olderSnippetMax
+// and recentSnippetMax stays untruncated when newest) while an older line of the
+// same length is truncated to olderSnippetMax.
+func TestPositionalSnippetCaps(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5)
+
+	// Length is longer than olderSnippetMax but shorter than recentSnippetMax, so
+	// it is untruncated only while it is the most-recent line.
+	mid := olderSnippetMax + 100
+	older := strings.Repeat("o", mid)
+	newer := strings.Repeat("n", mid)
+	p.Observe(claude.Event{Type: claude.Text, Text: older})
+	p.Observe(claude.Event{Type: claude.Text, Text: newer})
+
+	prefixRunes := utf8.RuneCountInString(thoughtPrefix)
+	var olderLine, newerLine string
+	for _, line := range strings.Split(p.Frame(), "\n") {
+		switch {
+		case strings.HasPrefix(line, thoughtPrefix+"o"):
+			olderLine = line
+		case strings.HasPrefix(line, thoughtPrefix+"n"):
+			newerLine = line
+		}
+	}
+	if olderLine == "" || newerLine == "" {
+		t.Fatalf("missing ring lines: older=%q newer=%q", olderLine, newerLine)
+	}
+
+	// The newer (most-recent) line fits within recentSnippetMax untruncated.
+	if n := utf8.RuneCountInString(newerLine) - prefixRunes; n != mid {
+		t.Fatalf("most-recent line truncated: %d text runes, want %d (no ellipsis)", n, mid)
+	}
+	if strings.Contains(newerLine, "…") {
+		t.Fatalf("most-recent line should not be truncated: %q", newerLine)
+	}
+	// The older line is capped to olderSnippetMax and shows an ellipsis.
+	if n := utf8.RuneCountInString(olderLine) - prefixRunes; n != olderSnippetMax {
+		t.Fatalf("older line text = %d runes, want olderSnippetMax %d", n, olderSnippetMax)
+	}
+	if !strings.Contains(olderLine, "…") {
+		t.Fatalf("older line should be truncated with an ellipsis: %q", olderLine)
+	}
+}
+
+// TestFrameBudgetNeverExceedsLimit pushes many maximal-length lines and asserts the
+// assembled frame stays within frameBudgetMax (and therefore below TelegramMaxMessage).
+func TestFrameBudgetNeverExceedsLimit(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5)
+	for i := 0; i < 5; i++ {
+		p.Observe(claude.Event{Type: claude.Text, Text: strings.Repeat("x", recentSnippetMax+500)})
+	}
+	frame := p.Frame()
+	if n := utf8.RuneCountInString(frame); n > frameBudgetMax {
+		t.Fatalf("frame exceeded budget: %d runes (max %d)", n, frameBudgetMax)
+	}
+	if utf8.RuneCountInString(frame) >= TelegramMaxMessage {
+		t.Fatalf("frame not below Telegram limit %d", TelegramMaxMessage)
+	}
+}
+
+// TestSingleOversizedLineHardTruncated covers the extreme: one line alone far
+// larger than frameBudgetMax must be hard-truncated so the frame still contains the
+// header + that line, is non-empty, and stays within budget. We push a pre-built
+// oversized ring entry directly (same package) because the public Observe path caps
+// stored text at recentSnippetMax, which is below the frame budget by design.
+func TestSingleOversizedLineHardTruncated(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5)
+	p.push(thoughtPrefix + strings.Repeat("z", frameBudgetMax+2000))
+	frame := p.Frame()
+	if frame == "" {
+		t.Fatal("frame is empty")
+	}
+	if !strings.HasPrefix(frame, spinnerFrames[0]) {
+		t.Fatalf("frame missing header: %.40q", frame)
+	}
+	if !strings.Contains(frame, thoughtPrefix) {
+		t.Fatalf("frame missing the activity line: %.60q", frame)
+	}
+	if !strings.Contains(frame, "…") {
+		t.Fatalf("oversized single line should be hard-truncated with an ellipsis")
+	}
+	if n := utf8.RuneCountInString(frame); n > frameBudgetMax {
+		t.Fatalf("frame exceeded budget: %d runes (max %d)", n, frameBudgetMax)
+	}
+}
+
+// TestFrameBudgetDropsOldestLines exercises the drop-oldest loop in Frame(): with a
+// ring larger than the default, the positionally-capped lines together exceed
+// frameBudgetMax, so Frame() must drop the OLDEST lines until the frame fits while
+// keeping the most recent ones. (At the default ring size of 5 the per-line caps
+// alone keep the frame well under budget, so the loop never triggers there.)
+func TestFrameBudgetDropsOldestLines(t *testing.T) {
+	var elapsed time.Duration
+	const ring = 20
+	p := NewProgress(fakeClock(&elapsed), ring)
+	// Each line is a max-length older snippet tagged with its index at the FRONT, so
+	// the tag survives end-truncation and lets us tell which lines were kept.
+	for i := 0; i < ring; i++ {
+		p.push(thoughtPrefix + "L" + strconv.Itoa(i) + " " + strings.Repeat("x", olderSnippetMax))
+	}
+	frame := p.Frame()
+	if n := utf8.RuneCountInString(frame); n > frameBudgetMax {
+		t.Fatalf("frame exceeded budget: %d runes (max %d)", n, frameBudgetMax)
+	}
+	// The drop loop must have run: fewer activity lines than pushed.
+	kept := strings.Count(frame, thoughtPrefix)
+	if kept >= ring {
+		t.Fatalf("drop loop did not run: kept %d of %d lines", kept, ring)
+	}
+	if kept < 1 {
+		t.Fatal("frame kept no activity lines")
+	}
+	// Newest survives, oldest is dropped.
+	if !strings.Contains(frame, "L"+strconv.Itoa(ring-1)+" ") {
+		t.Fatalf("most recent line was dropped: %.80q", frame)
+	}
+	if strings.Contains(frame, "L0 ") {
+		t.Fatalf("oldest line should have been dropped first: %.80q", frame)
 	}
 }
 
