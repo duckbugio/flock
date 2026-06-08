@@ -44,14 +44,26 @@ RUN set -eux; \
     curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc; \
     chmod a+r /etc/apt/keyrings/docker.asc; \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list; \
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg; \
-    chmod 0644 /etc/apt/keyrings/githubcli-archive-keyring.gpg; \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list; \
     apt-get update; \
-    apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin gh; \
+    apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin; \
     npm install -g @anthropic-ai/claude-code; \
     npm cache clean --force; \
     apt-get clean; rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI (gh) for PR creation on github.com — installed from the official release
+# tarball, NOT the apt repo: that extra apt source tipped the QEMU-emulated arm64
+# build over its memory limit during `apt-get update` (OOM: "Cannot allocate
+# memory"). One arch-matched binary is far lighter and keeps the multi-arch build
+# green. Uses the latest release, falling back to a pinned version if the GitHub API
+# is unreachable/rate-limited at build time.
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    ver="$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest 2>/dev/null | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')"; \
+    [ -n "$ver" ] || ver="2.45.0"; \
+    curl -fsSL "https://github.com/cli/cli/releases/download/v${ver}/gh_${ver}_linux_${arch}.tar.gz" -o /tmp/gh.tgz; \
+    tar -xzf /tmp/gh.tgz -C /tmp; \
+    install -m 0755 "/tmp/gh_${ver}_linux_${arch}/bin/gh" /usr/local/bin/gh; \
+    rm -rf /tmp/gh.tgz "/tmp/gh_${ver}_linux_${arch}"
 
 # Non-root runtime user; pre-create writable dirs so named volumes inherit uid 1000.
 # /app/data is kept for volume-layout parity with the previous image. The node base
