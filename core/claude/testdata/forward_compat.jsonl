@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"fc-session","tools":["Bash"],"future_field":{"nested":true}}
+{"type":"system","subtype":"telemetry","session_id":"fc-session","metric":"tokens","value":42}
+{"type":"future_event","subtype":"whatever","session_id":"fc-session","payload":{"anything":[1,2,3]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi there"}]},"unexpected_extra_field":"ignored"}
+{"type":"result","subtype":"success","is_error":false,"result":"hi there","session_id":"fc-session","num_turns":1,"total_cost_usd":0,"duration_ms":5,"surprise_field":"ok"}

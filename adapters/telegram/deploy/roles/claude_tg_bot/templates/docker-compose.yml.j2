@@ -1,0 +1,94 @@
+# Managed by Ansible — roles/claude_tg_bot/templates/docker-compose.yml.j2
+services:
+  bot:
+    image: {{ bot_image }}
+    pull_policy: always
+    container_name: {{ container_prefix }}-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+{% if gitea_host_ip is defined and gitea_host_ip %}
+    # Pin the Gitea host so git resolves it instantly (avoids the Docker
+    # cold-start DNS race against the host's systemd-resolved).
+    extra_hosts:
+      - "{{ gitea_host }}:{{ gitea_host_ip }}"
+{% endif %}
+    volumes:
+      - claude_home:/home/claude/.claude   # sessions + auth state (named -> uid 1000)
+      - bot_data:/app/data                 # sqlite db
+      - workspace:{{ approved_directory }} # where Claude reads/edits code (CLAUDE.md + agents baked into the image, rendered on start)
+    mem_limit: {{ container_mem_limit }}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+{% if enable_dind %}
+
+  dind:
+    image: {{ dind_image }}
+    container_name: {{ container_prefix }}-dind
+    privileged: true
+    restart: unless-stopped
+    environment:
+      - DOCKER_TLS_CERTDIR=
+    volumes:
+      - dind_storage:/var/lib/docker
+      - workspace:{{ approved_directory }}   # same path as the bot, so -v mounts line up
+{% endif %}
+
+{% if webhook_domain %}
+  caddy:
+    image: {{ caddy_image }}
+    container_name: {{ container_prefix }}-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - bot
+{% endif %}
+
+volumes:
+{% if legacy_volume_project %}
+  # Renamed project REUSES the old project's named volumes (declared external by their
+  # existing "<legacy_volume_project>_<vol>" names) so no data is orphaned and nothing is
+  # copied. For a fresh install leave legacy_volume_project empty -> managed volumes below.
+  claude_home:
+    external: true
+    name: {{ legacy_volume_project }}_claude_home
+  bot_data:
+    external: true
+    name: {{ legacy_volume_project }}_bot_data
+  workspace:
+    external: true
+    name: {{ legacy_volume_project }}_workspace
+{% if enable_dind %}
+  dind_storage:
+    external: true
+    name: {{ legacy_volume_project }}_dind_storage
+{% endif %}
+{% if webhook_domain %}
+  caddy_data:
+    external: true
+    name: {{ legacy_volume_project }}_caddy_data
+  caddy_config:
+    external: true
+    name: {{ legacy_volume_project }}_caddy_config
+{% endif %}
+{% else %}
+  claude_home:
+  bot_data:
+  workspace:
+{% if enable_dind %}
+  dind_storage:
+{% endif %}
+{% if webhook_domain %}
+  caddy_data:
+  caddy_config:
+{% endif %}
+{% endif %}

@@ -1,0 +1,37 @@
+---
+# The EXAMPLE instance's non-secret config. For a real bot, copy the whole example dir:
+#   cp -r inventories/example inventories/<your-bot>
+# then fill in inventories/<your-bot>/group_vars/all/vars.yml.
+
+# Your bot's @username from @BotFather, WITHOUT the @ (public, not a secret).
+telegram_bot_username: "your_bot"
+
+# Claude auth mode:
+#   subscription -> Claude Pro/Max via `claude setup-token`  (no per-token cost)
+#   api_key      -> pay-per-token Console key (sk-ant-...)
+claude_auth_mode: subscription
+
+# Directory Claude works in INSIDE the container (a Docker volume).
+approved_directory: /workspace
+
+# --- Git host (optional) — for cloning repos and opening PRs from chat. ---
+# Leave gitea_host empty to skip git auth entirely (the bot still works).
+# Despite the name, this works for ANY HTTPS git host: Gitea, GitHub, GitLab.
+gitea_scheme: https
+gitea_host: ""              # e.g. git.example.com  or  github.com
+gitea_host_ip: ""           # optional: pin the host IP in the container (dodge Docker DNS races)
+gitea_user: ""              # your git username
+git_user_name: "AI Team"
+git_user_email: "ai@example.com"
+
+# --- Webhook PR-monitoring (optional) ---
+# A domain with an A-record to your server enables a Caddy TLS proxy + the bot's
+# webhook server, so the team responds to review comments on its open PRs.
+# Leave empty to disable webhooks entirely.
+webhook_domain: ""          # e.g. bot.example.com
+notification_chat_ids: ""   # Telegram chat ID(s) that receive PR notifications
+
+# --- Docker-in-Docker (optional) ---
+# Adds a privileged dind sidecar + the docker CLI in the bot image so the team
+# can run dockerized linters/tests. The agent controls dind, not the host.
+enable_dind: false

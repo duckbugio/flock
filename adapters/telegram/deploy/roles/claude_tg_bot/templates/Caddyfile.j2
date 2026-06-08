@@ -1,0 +1,6 @@
+# Managed by Ansible — roles/claude_tg_bot/templates/Caddyfile.j2
+# Automatic HTTPS (Let's Encrypt) for {{ webhook_domain }}, proxied to the bot's
+# webhook server. Only /webhooks/* and /health are meaningful endpoints.
+{{ webhook_domain }} {
+	reverse_proxy bot:8080
+}

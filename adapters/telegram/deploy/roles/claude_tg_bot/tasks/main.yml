@@ -1,0 +1,162 @@
+---
+# ───────────────────────── base packages ─────────────────────────
+- name: Install base packages
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# ───────────────────────── swap ─────────────────────────
+- name: Check active swap
+  ansible.builtin.command: swapon --show=NAME --noheadings
+  register: active_swap
+  changed_when: false
+  check_mode: false
+
+- name: Configure swap
+  when:
+    - swap_size_gb | int > 0
+    - swap_file not in active_swap.stdout
+  block:
+    - name: Allocate swapfile
+      ansible.builtin.command:
+        cmd: "fallocate -l {{ swap_size_gb }}G {{ swap_file }}"
+        creates: "{{ swap_file }}"
+
+    - name: Secure swapfile permissions
+      ansible.builtin.file:
+        path: "{{ swap_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Initialise swap area
+      ansible.builtin.command: "mkswap {{ swap_file }}"
+
+    - name: Enable swap
+      ansible.builtin.command: "swapon {{ swap_file }}"
+
+    - name: Persist swap in /etc/fstab
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        line: "{{ swap_file }} none swap sw 0 0"
+        state: present
+
+# ───────────────────────── Docker engine ─────────────────────────
+- name: Ensure apt keyrings directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Add Docker apt GPG key
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+
+- name: Add Docker apt repository
+  ansible.builtin.apt_repository:
+    repo: "deb [arch={{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+    filename: docker
+    state: present
+
+- name: Install Docker Engine + Compose plugin
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    state: present
+    update_cache: true
+
+- name: Ensure Docker is running and enabled on boot
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+
+# ───────────────────────── Docker auto-prune (weekly systemd timer) ─────────────────────────
+- name: Install Docker auto-prune systemd units
+  when: enable_docker_prune | bool
+  block:
+    - name: Render docker-prune service unit
+      ansible.builtin.template:
+        src: docker-prune.service.j2
+        dest: /etc/systemd/system/docker-prune.service
+        mode: "0644"
+
+    - name: Render docker-prune timer unit
+      ansible.builtin.template:
+        src: docker-prune.timer.j2
+        dest: /etc/systemd/system/docker-prune.timer
+        mode: "0644"
+
+    - name: Enable + start the docker-prune timer
+      ansible.builtin.systemd:
+        name: docker-prune.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+
+# ───────────────────────── app deploy ─────────────────────────
+- name: Create application directory
+  ansible.builtin.file:
+    path: "{{ app_dir }}"
+    state: directory
+    mode: "0750"
+
+# Team subagents, feature patches, and CLAUDE.md are baked into the prebuilt image
+# (built by CI from the repo) and rendered into the workspace by the image entrypoint —
+# nothing to copy or render on the host.
+
+- name: Render Caddyfile (TLS reverse proxy)
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: "{{ app_dir }}/Caddyfile"
+    mode: "0644"
+  when: webhook_domain | default('') | length > 0
+
+- name: Render docker-compose.yml
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ app_dir }}/docker-compose.yml"
+    mode: "0644"
+
+- name: Render .env (contains secrets)
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ app_dir }}/.env"
+    mode: "0600"
+  no_log: true
+
+- name: Pull image and (re)start the bot
+  ansible.builtin.command:
+    cmd: docker compose up -d --pull always --force-recreate
+    chdir: "{{ app_dir }}"
+  async: 1800
+  poll: 15
+  register: compose_up
+  changed_when: >-
+    ('Started' in (compose_up.stderr + compose_up.stdout)) or
+    ('Created' in (compose_up.stderr + compose_up.stdout)) or
+    ('Recreated' in (compose_up.stderr + compose_up.stdout))
+
+- name: Wait for the container to settle
+  ansible.builtin.command:
+    cmd: docker inspect -f '{{ "{{" }}.State.Status{{ "}}" }}' {{ container_prefix }}-bot
+  register: bot_state
+  changed_when: false
+  retries: 5
+  delay: 3
+  until: bot_state.stdout == "running"
+
+- name: Report status
+  ansible.builtin.debug:
+    msg: "{{ container_prefix }}-bot is {{ bot_state.stdout }} — check logs with: docker compose -f {{ app_dir }}/docker-compose.yml logs -f"

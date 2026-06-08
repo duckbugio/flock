@@ -1,0 +1,91 @@
+---
+# Where the deploy lives on the server. The compose PROJECT name derives from this
+# directory's basename, so renaming it (per deployment) namespaces the whole stack.
+app_dir: /opt/claude-tg-bot
+
+# Container names are "<container_prefix>-bot | -dind | -caddy" (the playbook health-check
+# uses the same). Override per deployment so two bots on one host don't collide.
+container_prefix: claude-tg
+
+# Migration aid for renaming the compose project without losing data. When set, the
+# compose volumes are declared EXTERNAL as "<legacy_volume_project>_<vol>" instead of
+# being project-managed — so a renamed project/dir REUSES the existing data volumes
+# rather than creating empty ones (no 36G copy; disk-safe). Leave EMPTY for fresh
+# installs (volumes are auto-created and managed by the new project as usual).
+legacy_volume_project: ""
+
+# Prebuilt image — pulled, not built (patches/agents/CLAUDE.md are baked in by CI).
+# Pin a tag (e.g. :v1) for reproducibility, or :latest to track main.
+bot_image: "ghcr.io/duckbugio/flock-telegram:latest"
+
+# Node major version for the bundled `claude` CLI
+node_major: 22
+
+# Fallback if not set in group_vars/all/vars.yml
+approved_directory: /workspace
+
+# Bot "environment" string. IMPORTANT: the values development / testing / production
+# trigger HARDCODED overrides inside the bot (production forces $5/user + 5 req/min,
+# clobbering the limits below — see src/config/environments.py). Any OTHER value makes
+# the bot honor the env vars below verbatim. The whitelist stays enforced regardless,
+# because that is driven by debug + development_mode (both false), not by this string.
+bot_environment: prod
+
+# Swap — the server ships with 0 swap; give Node+Python headroom
+swap_file: /swapfile
+swap_size_gb: 2
+
+# Container memory ceiling (host has ~3.9 GB + swap)
+container_mem_limit: 3g
+
+# Claude cost caps. With a subscription nothing is billed per token, so these are
+# generous (effectively no throttle). If you switch to api_key mode, LOWER them
+# (e.g. 10 / 5) to avoid surprise spend.
+claude_max_cost_per_user: "1000.0"
+claude_max_cost_per_request: "100.0"
+# Headroom for multi-step team runs (coder→tester→reviewer→arbiter→PR in one session)
+claude_max_turns: 250
+claude_timeout_seconds: 10800  # 3h — big multi-step team builds run long in one turn
+# Model for the team (subagents inherit it). Opus 4.8 = best; costly on api_key mode.
+claude_model: "claude-opus-4-8"
+
+# Telegram rate limiting (per user)
+rate_limit_requests: 30
+rate_limit_window: 60
+
+# Chats that may run concurrently (each chat stays serial within itself). Different users get
+# answered in parallel up to this; it caps memory. 1 = fully serial (old behavior). ~3.9GB host:
+# keep modest to avoid OOM from parallel Opus runs.
+max_concurrent_chat_runs: 4
+
+# Dev-team loop limits (tune without touching code)
+pre_pr_cycles: 5      # coder<->tester rounds to get green BEFORE opening a PR
+pr_review_cycles: 10  # reviewer<->coder rounds ON the open PR, then arbiter approves/escalates
+
+# Group-chat mention behavior: false = answer every message in groups (default);
+# true = only answer on @mention/reply. Private chats are always answered.
+require_group_mention: false
+# Published-PR review/fix loop (PR-comment poller + CLAUDE.md Phase 2). false = off (default):
+# build + open a PR, then stop. true = react to PR comments + run the on-PR review loop.
+enable_pr_review: false
+
+# Webhook PR-monitoring (enabled when webhook_domain is set in group_vars/all/vars.yml)
+webhook_domain: ""
+notification_chat_ids: ""
+caddy_image: "caddy:2-alpine"
+
+# PR poller cadence (seconds). The bot polls Gitea for new PR comments — the reliable
+# path when inbound webhooks can't be delivered (e.g. cross-border network filtering).
+# Active whenever gitea_host is set; 0 disables it.
+gitea_poll_interval: 90
+
+# Docker-in-Docker sidecar so the team can run dockerized linters/tests
+enable_dind: false
+dind_image: "docker:27-dind"
+
+# Weekly reclaim of unused Docker images + build cache via a systemd timer. Only prunes
+# things OLDER than docker_prune_keep_hours, so a recently-pulled image stays for rollback;
+# images in use by a running container are never touched. Set enable_docker_prune: false to skip.
+enable_docker_prune: true
+docker_prune_schedule: "weekly"   # systemd OnCalendar (weekly | daily | "Sun *-*-* 04:00:00")
+docker_prune_keep_hours: 168      # keep anything newer than this many hours (168 = 7 days)

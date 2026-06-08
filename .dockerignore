@@ -1,0 +1,20 @@
+# The telegram image is built with the REPO ROOT as context (it needs core/ + a few
+# adapter files). Keep everything else out of the build context — especially the Ansible
+# deploy dir, which holds per-instance SECRETS locally — plus git history and caches.
+.git
+.github
+**/__pycache__
+**/*.pyc
+**/.DS_Store
+
+# Ansible deploy + any local instance secrets — never needed to build the image.
+adapters/telegram/deploy
+
+# Local runtime env (the image is configured at runtime, not build time).
+adapters/telegram/.env
+
+# Go build/test caches and any locally-built binaries — never part of the image
+# (the binary is compiled fresh in the build stage).
+.gocache
+.cache
+flock-telegram

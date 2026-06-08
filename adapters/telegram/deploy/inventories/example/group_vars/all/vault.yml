@@ -1,0 +1,24 @@
+---
+# This is the EXAMPLE instance. To create a real bot, copy the whole example dir:
+#   cp -r inventories/example inventories/<your-bot>
+# then fill in inventories/<your-bot>/group_vars/all/vault.yml and (optionally) encrypt it:
+#   ansible-vault encrypt inventories/<your-bot>/group_vars/all/vault.yml
+
+# Telegram bot token from @BotFather
+vault_telegram_bot_token: "PUT_BOTFATHER_TOKEN_HERE"
+
+# Telegram numeric user ID(s) allowed to use the bot (from @userinfobot). Comma-separated.
+vault_allowed_users: "PUT_YOUR_TELEGRAM_USER_ID_HERE"
+
+# Claude auth when claude_auth_mode: subscription — from `claude setup-token`
+vault_claude_oauth_token: "PUT_CLAUDE_CODE_OAUTH_TOKEN_HERE"
+
+# Claude auth when claude_auth_mode: api_key — Anthropic Console key
+vault_anthropic_api_key: ""
+
+# Git host access token (HTTPS PAT) — for cloning/PRs. Leave empty to skip git auth.
+vault_gitea_token: ""
+
+# Webhook shared secret (only if webhook_domain is set). Generate: openssl rand -hex 32
+# Gitea sends it as the Authorization header: "Bearer <secret>".
+vault_webhook_secret: ""

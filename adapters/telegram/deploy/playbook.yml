@@ -1,0 +1,7 @@
+---
+- name: Deploy claude-code-telegram bot (Docker)
+  hosts: claude_bot
+  become: true
+  gather_facts: true
+  roles:
+    - claude_tg_bot

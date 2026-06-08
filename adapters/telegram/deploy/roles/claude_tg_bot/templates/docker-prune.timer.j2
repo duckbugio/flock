@@ -1,0 +1,10 @@
+# Managed by Ansible — schedule for docker-prune.service.
+[Unit]
+Description=Weekly Docker prune
+
+[Timer]
+OnCalendar={{ docker_prune_schedule }}
+Persistent=true
+
+[Install]
+WantedBy=timers.target

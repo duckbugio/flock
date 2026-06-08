@@ -1,0 +1,10 @@
+# Managed by Ansible — weekly reclaim of unused Docker images + build cache.
+# Only removes images/cache OLDER than {{ docker_prune_keep_hours }}h, so a recently
+# pulled image stays available for rollback. Images in use by a container are never touched.
+[Unit]
+Description=Prune unused Docker images and build cache
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker image prune -af --filter until={{ docker_prune_keep_hours }}h
+ExecStart=/usr/bin/docker builder prune -f --filter until={{ docker_prune_keep_hours }}h

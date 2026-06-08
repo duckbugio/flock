@@ -1,0 +1,7 @@
+---
+# Convenience handler (e.g. for `--tags restart`). The main converge task
+# already runs `docker compose up -d --build`, which is idempotent.
+- name: Restart claude-tg-bot
+  ansible.builtin.command:
+    cmd: docker compose restart
+    chdir: "{{ app_dir }}"

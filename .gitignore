@@ -1,0 +1,33 @@
+# --- Per-deployment instance config & secrets — NEVER commit these ---
+# Each real bot instance lives in adapters/telegram/deploy/inventories/<name>/
+# (e.g. gitea-lo-duck). Everything under inventories/ is ignored EXCEPT the tracked
+# example/ template — so a new bot's secrets can never be committed by accident.
+adapters/telegram/deploy/inventories/*
+!adapters/telegram/deploy/inventories/example/
+.vault_pass
+
+# Ansible
+*.retry
+
+# Rendered envs / misc
+*.env
+.env
+/tmp/
+.DS_Store
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Go build artifacts
+/flock-telegram
+cmd/flock-telegram/flock-telegram
+*.test
+*.out
+# Local Go module/build cache used by the dind toolchain
+/.gocache/
+
+# Durable per-chat session store (SESSION_STORE_PATH); lives under the workspace
+# data dir, never committed even if a path lands inside the repo tree.
+sessions.json
+.sessions-*.tmp

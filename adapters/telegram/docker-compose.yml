@@ -1,0 +1,39 @@
+# DuckFlock AI dev-team Telegram bot — quick start:
+#   cp .env.example .env   # fill in your tokens
+#   docker compose up -d
+#
+# Optional sidecars are profiles (off by default):
+#   docker compose --profile dind up -d            # dockerized linters/tests for the team
+services:
+  bot:
+    image: ghcr.io/duckbugio/flock-telegram:latest
+    container_name: duck-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - claude_home:/home/claude/.claude   # Claude sessions + auth state
+      - bot_data:/app/data                 # sqlite db + persistence
+      - workspace:/workspace               # where the team reads/writes code
+    mem_limit: ${BOT_MEM_LIMIT:-3g}
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  dind:
+    image: docker:27-dind
+    container_name: duck-dind
+    profiles: ["dind"]
+    privileged: true
+    restart: unless-stopped
+    environment:
+      - DOCKER_TLS_CERTDIR=
+    volumes:
+      - dind_storage:/var/lib/docker
+      - workspace:/workspace               # same path as the bot, so -v mounts line up
+    # NOTE: set DOCKER_HOST=tcp://dind:2375 in .env to make the bot use this.
+
+volumes:
+  claude_home:
+  bot_data:
+  workspace:
+  dind_storage:
