@@ -2,6 +2,7 @@ package tgui
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -201,6 +202,41 @@ func TestSingleOversizedLineHardTruncated(t *testing.T) {
 	}
 	if n := utf8.RuneCountInString(frame); n > frameBudgetMax {
 		t.Fatalf("frame exceeded budget: %d runes (max %d)", n, frameBudgetMax)
+	}
+}
+
+// TestFrameBudgetDropsOldestLines exercises the drop-oldest loop in Frame(): with a
+// ring larger than the default, the positionally-capped lines together exceed
+// frameBudgetMax, so Frame() must drop the OLDEST lines until the frame fits while
+// keeping the most recent ones. (At the default ring size of 5 the per-line caps
+// alone keep the frame well under budget, so the loop never triggers there.)
+func TestFrameBudgetDropsOldestLines(t *testing.T) {
+	var elapsed time.Duration
+	const ring = 20
+	p := NewProgress(fakeClock(&elapsed), ring)
+	// Each line is a max-length older snippet tagged with its index at the FRONT, so
+	// the tag survives end-truncation and lets us tell which lines were kept.
+	for i := 0; i < ring; i++ {
+		p.push(thoughtPrefix + "L" + strconv.Itoa(i) + " " + strings.Repeat("x", olderSnippetMax))
+	}
+	frame := p.Frame()
+	if n := utf8.RuneCountInString(frame); n > frameBudgetMax {
+		t.Fatalf("frame exceeded budget: %d runes (max %d)", n, frameBudgetMax)
+	}
+	// The drop loop must have run: fewer activity lines than pushed.
+	kept := strings.Count(frame, thoughtPrefix)
+	if kept >= ring {
+		t.Fatalf("drop loop did not run: kept %d of %d lines", kept, ring)
+	}
+	if kept < 1 {
+		t.Fatal("frame kept no activity lines")
+	}
+	// Newest survives, oldest is dropped.
+	if !strings.Contains(frame, "L"+strconv.Itoa(ring-1)+" ") {
+		t.Fatalf("most recent line was dropped: %.80q", frame)
+	}
+	if strings.Contains(frame, "L0 ") {
+		t.Fatalf("oldest line should have been dropped first: %.80q", frame)
 	}
 }
 

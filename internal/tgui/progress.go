@@ -193,6 +193,9 @@ func (p *Progress) Frame() string {
 			break
 		}
 	}
+	// The header is tiny (≈20 runes) and frameBudgetMax is in the thousands, so
+	// budget is always comfortably positive; the clamp is pure defense so a future
+	// outsized header can never make capLine's budget non-positive.
 	budget := frameBudgetMax - overhead
 	if budget < 1 {
 		budget = 1
