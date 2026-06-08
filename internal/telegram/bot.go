@@ -69,9 +69,10 @@ func (c *botChat) Edit(ctx context.Context, chatID int64, messageID int, text, s
 // calls update the same preview; an empty text clears it). It is rate-limit-free
 // relative to EditMessageText, so it carries the live run progress while the answer
 // is persisted with Send/Edit. A draft can't hold an inline keyboard, which is why
-// the Stop button rides a separate anchor message. asMarkdown behaves as for
-// Send/Edit (HTML render with a plain-text fallback on a parse error); it is ignored
-// when text is empty (the clear call).
+// the Stop button rides a separate anchor message. When asMarkdown is set the frame
+// is rendered as HTML, but — unlike Send/Edit — it falls back to a plain draft on ANY
+// error (not just a parse error) so enabling markup can never knock the preview off
+// the rate-limit-free draft path. asMarkdown is ignored when text is empty (clear).
 func (c *botChat) StreamDraft(ctx context.Context, chatID int64, draftID, text string, asMarkdown bool) error {
 	params := &bot.SendMessageDraftParams{
 		ChatID:  chatID,
@@ -83,9 +84,14 @@ func (c *botChat) StreamDraft(ctx context.Context, chatID int64, draftID, text s
 		params.ParseMode = models.ParseModeHTML
 	}
 	_, err := c.b.SendMessageDraft(ctx, params)
-	if err != nil && asMarkdown && text != "" && isParseError(err) {
-		// Telegram rejected our HTML markup: resend the ORIGINAL text as plain so a
-		// formatting glitch never costs the user the live preview.
+	if err != nil && asMarkdown && text != "" {
+		// The HTML attempt failed — retry as PLAIN text, UNCONDITIONALLY (not only on
+		// an isParseError). The draft transport may reject parse_mode with an error that
+		// doesn't mention "parse", or not support it at all; if that error propagates,
+		// the run loop flips draftStreaming off and drops to the rate-limited edit
+		// fallback for the rest of the run (smooth ~1s preview -> throttled ~3s steps).
+		// A plain draft keeps the preview on the rate-limit-free path; worst case it is
+		// an unformatted but still-live frame.
 		params.Text = text
 		params.ParseMode = ""
 		_, err = c.b.SendMessageDraft(ctx, params)
