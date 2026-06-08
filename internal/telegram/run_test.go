@@ -486,7 +486,7 @@ func TestEditFallbackRespectsMinInterval(t *testing.T) {
 	if !strings.Contains(text, "Working") {
 		t.Fatalf("anchor not showing progress: %q", text)
 	}
-	wantSecs := int((windows*5 * int(step)) / int(time.Second))
+	wantSecs := int((windows * 5 * int(step)) / int(time.Second))
 	if wantSecs > 0 && !strings.Contains(text, "("+strconv.Itoa(wantSecs)+"s)") &&
 		!strings.Contains(text, "("+strconv.Itoa(wantSecs-1)+"s)") &&
 		!strings.Contains(text, "("+strconv.Itoa(wantSecs-2)+"s)") {
