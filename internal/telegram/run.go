@@ -24,10 +24,11 @@ import (
 	"github.com/duckbugio/flock/internal/tgui"
 )
 
-// tickInterval is how often the wall-clock ticker re-renders the progress
-// message. It is independent of stream events so the elapsed counter advances
-// during a silent tool call (§7.2).
-const tickInterval = 2 * time.Second
+// tickInterval is how often the wall-clock ticker refreshes the progress frame
+// when no event arrives — it advances the elapsed counter/spinner during a silent
+// tool call (§7.2). Activity events refresh the live draft immediately (see the run
+// loop), so this only governs the quiet-period cadence.
+const tickInterval = 1 * time.Second
 
 // anchorText is the persistent message sent at the start of a run. It carries the
 // Stop button (which an ephemeral draft can't) and is later edited into the final
@@ -416,9 +417,13 @@ loop:
 			case claude.RunError:
 				finalErr = ev.Err
 			default:
-				// Fold activity into the renderer; the wall-clock ticker flushes the
-				// frame to Telegram, so we don't edit on every event (rate limiting).
-				prog.Observe(ev)
+				// Fold the activity event into the renderer and, in draft mode, push it
+				// to the live preview RIGHT AWAY (drafts have no edit rate limit) so the
+				// stream reflects what's happening in real time instead of once a tick.
+				// In the edit fallback we leave rendering to the (rate-limited) ticker.
+				if prog.Observe(ev) && draftStreaming {
+					render()
+				}
 			}
 		}
 	}
