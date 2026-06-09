@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,6 +34,10 @@ type botChat struct {
 	groupID  int64
 	randSeed int64
 	randSeq  atomic.Uint64
+	// kbDisabledOnce guards the one-shot WARN log emitted the first time the VK
+	// "Bot abilities" toggle (error 912) forces a keyboard-less resend, so a
+	// misconfigured community does not spam the log on every progress message.
+	kbDisabledOnce sync.Once
 }
 
 // NewBotChat adapts a VK *Client to the core/chat.Transport interface. groupID is
@@ -89,7 +95,17 @@ func parseMessageID(messageID chat.MessageID) int64 {
 func (c *botChat) Send(
 	ctx context.Context, chatID chat.ChatID, text, stopRunID string, _ bool,
 ) (chat.MessageID, error) {
-	msgID, err := c.api.MessagesSend(ctx, parsePeerID(chatID), text, c.nextRandomID(), stopKeyboard(stopRunID), "")
+	peerID := parsePeerID(chatID)
+	keyboard := stopKeyboard(stopRunID)
+	msgID, err := c.api.MessagesSend(ctx, peerID, text, c.nextRandomID(), keyboard, "")
+	// VK error 912: the community has "Bot abilities" OFF, so a keyboard'd send is
+	// rejected while the same send WITHOUT a keyboard succeeds. Retry once without
+	// the keyboard (Stop then falls back to the /stop text command); the message
+	// must still be delivered. Only retry when a keyboard was actually attached.
+	if err != nil && keyboard != "" && isBotFeatureDisabled(err) {
+		c.warnKeyboardsDisabled()
+		msgID, err = c.api.MessagesSend(ctx, peerID, text, c.nextRandomID(), "", "")
+	}
 	if err != nil {
 		return "", err
 	}
@@ -102,7 +118,29 @@ func (c *botChat) Send(
 func (c *botChat) Edit(
 	ctx context.Context, chatID chat.ChatID, messageID chat.MessageID, text, stopRunID string, _ bool,
 ) error {
-	return c.api.MessagesEdit(ctx, parsePeerID(chatID), parseMessageID(messageID), text, stopKeyboard(stopRunID))
+	peerID := parsePeerID(chatID)
+	msgID := parseMessageID(messageID)
+	keyboard := stopKeyboard(stopRunID)
+	err := c.api.MessagesEdit(ctx, peerID, msgID, text, keyboard)
+	// VK error 912: see Send. Retry the edit once without the keyboard so progress
+	// keeps updating even when the community's "Bot abilities" toggle is OFF. Only
+	// retry when a keyboard was actually attached (an empty keyboard clears markup
+	// and never triggers 912).
+	if err != nil && keyboard != "" && isBotFeatureDisabled(err) {
+		c.warnKeyboardsDisabled()
+		err = c.api.MessagesEdit(ctx, peerID, msgID, text, "")
+	}
+	return err
+}
+
+// warnKeyboardsDisabled logs a single WARN line the first time error 912 forces a
+// keyboard-less resend, pointing at the community-side fix. The sync.Once keeps a
+// misconfigured community from spamming the log on every progress message.
+func (c *botChat) warnKeyboardsDisabled() {
+	c.kbDisabledOnce.Do(func() {
+		slog.Default().Warn("vk: bot keyboards disabled for this community (error 912); " +
+			"sending without Stop button — enable 'Bot abilities' in community settings")
+	})
 }
 
 // StreamDraft is unsupported on VK: it has no ephemeral live-draft primitive, so

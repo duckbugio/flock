@@ -89,7 +89,21 @@ func (e *apiError) Error() string {
 const (
 	errCodeTooManyRequests = 6
 	errCodeFloodControl    = 9
+	// errBotFeatureDisabled is VK error 912 ("This is a chat bot feature, change
+	// this status in settings") — returned for a messages.send/messages.edit that
+	// carries an inline keyboard when the community's "Bot abilities" toggle is OFF.
+	// The same call without a keyboard succeeds, so the Send/Edit paths use this to
+	// retry once without the keyboard (verified live against a real community).
+	errBotFeatureDisabled = 912
 )
+
+// isBotFeatureDisabled reports whether err is a VK *apiError with code 912 (bot
+// keyboards disabled for the community). The Send/Edit paths use it to fall back
+// to a keyboard-less resend.
+func isBotFeatureDisabled(err error) bool {
+	var ae *apiError
+	return errors.As(err, &ae) && ae.Code == errBotFeatureDisabled
+}
 
 // call invokes a VK API method with the given params, decoding the "response"
 // field of the envelope into out (which may be nil to discard it). The access
