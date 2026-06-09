@@ -19,6 +19,7 @@ RUN go mod download
 # Then the sources the binary needs.
 COPY cmd/ ./cmd/
 COPY core/ ./core/
+COPY adapters/ ./adapters/
 COPY internal/ ./internal/
 
 ARG TARGETOS
