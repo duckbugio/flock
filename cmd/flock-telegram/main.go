@@ -25,7 +25,9 @@ import (
 	"github.com/duckbugio/flock/core/claude"
 	"github.com/duckbugio/flock/core/cost"
 	"github.com/duckbugio/flock/core/dispatch"
+	"github.com/duckbugio/flock/core/ghstar"
 	"github.com/duckbugio/flock/core/gitsetup"
+	"github.com/duckbugio/flock/core/nudge"
 	"github.com/duckbugio/flock/core/poller"
 	"github.com/duckbugio/flock/core/ratelimit"
 	"github.com/duckbugio/flock/core/session"
@@ -214,6 +216,14 @@ func run() int {
 	// empty/absent.
 	outbox := telegram.NewSweeper(ws, cfg.MaxOutboxBytes, cfg.MaxOutboxFiles, logger)
 
+	// Post-task GitHub star nudge (core/ghstar + core/nudge). GitHub-only and OFF
+	// for every other deploy: the gate IS the off switch (StarNudgeEnabled needs
+	// github.com + a token + a valid STAR_NUDGE_REPO). When disabled, the config is
+	// left zero-valued so the Service no-ops the whole path. A nudge-store open
+	// failure is non-fatal, like the rest of the best-effort startup wiring: log
+	// and disable the feature rather than crash-loop the bot.
+	starNudge := buildStarNudge(cfg, logger)
+
 	svc = telegram.New(telegram.Config{
 		Runner:     runner,
 		Chat:       telegram.NewBotChat(b),
@@ -222,12 +232,16 @@ func run() int {
 		Sessions:   sessions,
 		Costs:      costs,
 		Outbox:     outbox,
+		StarNudge:  starNudge,
 		Opts:       opts,
 		Timeout:    cfg.ClaudeTimeout(),
 		Logger:     logger,
 	})
 
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, telegram.CallbackMatch(), bot.MatchTypePrefix, stopHandler(cfg, svc))
+	b.RegisterHandler(
+		bot.HandlerTypeCallbackQueryData, telegram.StarCallbackPrefix(), bot.MatchTypePrefix, starHandler(cfg, svc),
+	)
 
 	// Slash commands. Registered handlers match BEFORE the default text handler.
 	// We match via telegram.CommandName (a bot_command entity at offset 0, with
@@ -631,6 +645,83 @@ func stopHandler(cfg config.Config, svc *telegram.Service) bot.HandlerFunc {
 			Text:            text,
 		}); err != nil {
 			slog.Debug("answer stop callback", "error", err)
+		}
+	}
+}
+
+// buildStarNudge assembles the post-task star-nudge config. It returns a
+// zero-valued (disabled) config when the feature is off (non-GitHub deploy,
+// missing token, or bad STAR_NUDGE_REPO) or when the durable flag store cannot be
+// opened — both leave the Service path inert. A GitHub client and the nudge store
+// are only constructed when the feature is fully enabled.
+func buildStarNudge(cfg config.Config, logger *slog.Logger) telegram.StarNudgeConfig {
+	if !cfg.StarNudgeEnabled() {
+		return telegram.StarNudgeConfig{}
+	}
+	owner, repo, ok := cfg.StarNudgeRepoParts()
+	if !ok {
+		// Should not happen (StarNudgeEnabled already validated the shape), but stay
+		// fail-safe rather than trust the invariant.
+		return telegram.StarNudgeConfig{}
+	}
+	store, err := nudge.Open(cfg.StarNudgeStoreFile())
+	if err != nil {
+		logger.Error("open star-nudge store; nudge disabled", "path", cfg.StarNudgeStoreFile(), "error", err)
+		return telegram.StarNudgeConfig{}
+	}
+	logger.Info("star nudge enabled", "repo", cfg.StarNudgeRepo)
+	return telegram.StarNudgeConfig{
+		Enabled: true,
+		Owner:   owner,
+		Repo:    repo,
+		Client:  ghstar.New(ghstar.Config{Token: cfg.GitToken, Logger: logger}),
+		Store:   store,
+	}
+}
+
+// starHandler handles a press of the star-nudge confirm button: it stars the repo
+// from the deployment account (Service.StarPress), answers the callback with a
+// short toast, and on success edits the nudge message into the confirmation
+// (clearing the button). It is gated by the same allow-list as the Stop callback
+// so a disallowed sender cannot trigger the star. Every failure is soft: the run
+// is never affected.
+func starHandler(cfg config.Config, svc *telegram.Service) bot.HandlerFunc {
+	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
+		cq := update.CallbackQuery
+		if cq == nil {
+			return
+		}
+		if cq.From.ID == 0 || !cfg.IsAllowed(cq.From.ID) {
+			slog.Debug("ignoring star callback from disallowed user", "user_id", cq.From.ID)
+			if _, err := b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+				CallbackQueryID: cq.ID,
+				Text:            "Not available.",
+			}); err != nil {
+				slog.Debug("answer disallowed star callback", "error", err)
+			}
+			return
+		}
+
+		// StarPress detaches its own bounded context so the star completes even if
+		// this short callback ctx is already done.
+		//nolint:contextcheck // intentionally detached; see StarPress.
+		toast, ok := svc.StarPress()
+		if _, err := b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+			CallbackQueryID: cq.ID,
+			Text:            toast,
+		}); err != nil {
+			slog.Debug("answer star callback", "error", err)
+		}
+		// On success, edit the nudge message into the confirmation and drop the
+		// button. Best-effort: a failed edit never undoes the star.
+		if ok && cq.Message.Message != nil {
+			if _, err := b.EditMessageText(ctx, &bot.EditMessageTextParams{
+				ChatID:    cq.Message.Message.Chat.ID,
+				MessageID: cq.Message.Message.ID,
+				Text:      telegram.StarDoneText(),
+			}); err != nil {
+				slog.Debug("edit star nudge message", "error", err)
+			}
 		}
 	}
 }

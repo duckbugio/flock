@@ -99,6 +99,21 @@ type Config struct {
 	GiteaAPIURL       string `env:"GITEA_API_URL"`
 	GiteaPollInterval int    `env:"GITEA_POLL_INTERVAL" envDefault:"90"`
 
+	// StarNudgeRepo is the "owner/repo" the post-task star nudge targets. The
+	// nudge invites the user to star the project on GitHub and is GitHub-only: it
+	// is active only when GIT_HOST is github.com and a GIT_TOKEN is set (see
+	// StarNudgeEnabled). The token must have star-write scope for the button to
+	// work (classic public_repo, or a fine-grained token with the "Starring"
+	// account permission).
+	StarNudgeRepo string `env:"STAR_NUDGE_REPO" envDefault:"duckbugio/flock"`
+
+	// StarNudgeStorePath is the JSON file persisting the global "starred resolved"
+	// flag so the nudge stops once the repo is known starred. When empty it
+	// defaults to <APPROVED_DIRECTORY>/star_nudge.json (see StarNudgeStoreFile),
+	// alongside the session/cost stores under the workspace data dir, never inside
+	// a repo.
+	StarNudgeStorePath string `env:"STAR_NUDGE_STORE_PATH"`
+
 	// Voice transcription (core/voice). Disabled by default; when enabled,
 	// VoiceProvider selects the transcription backend and the matching key/command
 	// must be set. Mirrors the VOICE_* keys in adapters/telegram/.env.example.
@@ -238,6 +253,55 @@ func (c Config) GiteaPollDuration() time.Duration {
 // review enabled AND the API URL + token configured AND a positive interval.
 func (c Config) PollerEnabled() bool {
 	return c.PRReviewEnabled() && c.GiteaAPIURL != "" && c.GitToken != "" && c.GiteaPollInterval > 0
+}
+
+// gitHubHost is the GIT_HOST value (case-insensitive) that enables the
+// GitHub-only star nudge.
+const gitHubHost = "github.com"
+
+// starRepoParts is the number of "/"-separated segments a STAR_NUDGE_REPO must
+// have: exactly "owner/repo".
+const starRepoParts = 2
+
+// StarNudgeStoreFile returns the path to the JSON star-nudge flag store,
+// defaulting to <ApprovedDirectory>/star_nudge.json when STAR_NUDGE_STORE_PATH is
+// unset so it lives under the workspace data dir alongside the session/cost
+// stores, never inside any repo.
+func (c Config) StarNudgeStoreFile() string {
+	if strings.TrimSpace(c.StarNudgeStorePath) != "" {
+		return c.StarNudgeStorePath
+	}
+	return filepath.Join(c.ApprovedDirectory, "star_nudge.json")
+}
+
+// StarNudgeRepoParts splits StarNudgeRepo into owner and repo, returning ok=false
+// when it is not a well-formed "owner/repo" (e.g. empty, missing slash, or a
+// blank segment). Surrounding whitespace is trimmed.
+func (c Config) StarNudgeRepoParts() (owner, repo string, ok bool) {
+	parts := strings.Split(strings.TrimSpace(c.StarNudgeRepo), "/")
+	if len(parts) != starRepoParts {
+		return "", "", false
+	}
+	owner, repo = strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	if owner == "" || repo == "" {
+		return "", "", false
+	}
+	return owner, repo, true
+}
+
+// StarNudgeEnabled reports whether the post-task star nudge should run: the
+// deployment is wired to github.com, a GIT_TOKEN is set, and STAR_NUDGE_REPO
+// parses as "owner/repo". Any other host (Gitea/GitLab) or a missing token turns
+// the feature off — the gate IS the off switch, so no separate flag is needed.
+func (c Config) StarNudgeEnabled() bool {
+	if !strings.EqualFold(strings.TrimSpace(c.GitHost), gitHubHost) {
+		return false
+	}
+	if c.GitToken == "" {
+		return false
+	}
+	_, _, ok := c.StarNudgeRepoParts()
+	return ok
 }
 
 // IsAllowed reports whether the given Telegram user ID is in the allow-list.

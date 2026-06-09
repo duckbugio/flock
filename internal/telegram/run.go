@@ -72,6 +72,11 @@ type chat interface {
 	// URL is ever constructed for it. Used by the outbox sweeper to deliver files
 	// a run produced.
 	SendDocument(ctx context.Context, chatID int64, name string, data io.Reader) error
+	// SendStarNudge posts the post-task star-nudge message carrying the inline
+	// confirm button (a callback button, so pressing it triggers the server-side
+	// star). It is a separate seam from Send because the nudge needs the star
+	// markup, not the Stop markup. Returns the new message id.
+	SendStarNudge(ctx context.Context, chatID int64, text string) (messageID int, err error)
 }
 
 // workspaceEnsurer resolves a chat's isolated workspace path, creating it (and
@@ -113,6 +118,7 @@ type Service struct {
 	sessions  sessionStore
 	costs     *cost.Store
 	outbox    *Sweeper
+	nudge     *starNudge
 	opts      claude.Options
 	timeout   time.Duration
 	log       *slog.Logger
@@ -142,7 +148,10 @@ type Config struct {
 	// and delivers any files a run produced as Telegram documents. Nil disables
 	// the feature: the text-only finish path stays byte-identical.
 	Outbox *Sweeper
-	Opts   claude.Options // Model/MaxTurns/Env for every run; Workdir is set per chat
+	// StarNudge configures the post-task GitHub star nudge. When its Enabled flag
+	// is false (the default for non-GitHub deploys) the whole nudge path is inert.
+	StarNudge StarNudgeConfig
+	Opts      claude.Options // Model/MaxTurns/Env for every run; Workdir is set per chat
 	// Timeout bounds a single run's delivery; 0 means no deadline. On timeout the
 	// run is cancelled but the captured session_id is still stored (plan §7.3).
 	Timeout time.Duration
@@ -163,6 +172,7 @@ func New(cfg Config) *Service {
 		sessions:  cfg.Sessions,
 		costs:     cfg.Costs,
 		outbox:    cfg.Outbox,
+		nudge:     newStarNudge(cfg.StarNudge, cfg.Chat, log),
 		opts:      cfg.Opts,
 		timeout:   cfg.Timeout,
 		log:       log,
@@ -462,6 +472,17 @@ loop:
 	s.recordCost(userID, finalResult)
 
 	s.finish(ctx, chatID, progressMsgID, runID, finalResult, finalErr, ctx.Err())
+
+	// Post-task GitHub star nudge. Fire ONLY on a cleanly successful run (a
+	// terminal Result with no error and no cancel/timeout) so a failed, stopped,
+	// or timed-out run never nudges. The nudge runs fully off the hot path (its
+	// own detached goroutine, recovering any panic) so it can never delay or break
+	// a run; a nil/disabled nudge makes this a no-op.
+	if finalResult != nil && finalErr == nil && ctx.Err() == nil {
+		// maybeNudge detaches its own context (it outlives this run's ctx by design).
+		//nolint:contextcheck // intentionally detached; the nudge runs post-completion.
+		s.nudge.maybeNudge(chatID)
+	}
 }
 
 // recordCost accumulates a completed run's USD cost onto userID's running total

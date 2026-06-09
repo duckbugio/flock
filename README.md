@@ -88,6 +88,24 @@ git host can't reach the bot (e.g. cross-border network filtering), because the 
 *out*. Inbound webhooks + a Caddy TLS proxy are an optional alternative (`--profile caddy`,
 see `.env.example`).
 
+## GitHub star nudge (optional, GitHub-only)
+
+When the bot is wired to a GitHub account (`GIT_HOST=github.com` + `GIT_TOKEN`) that has not
+yet starred the project, it sends a short message after each successful run inviting you to
+star it, with an inline button. Pressing the button stars the repo from the deployment's own
+account and the nudge then stops for good. It is GitHub-only and **auto-off** everywhere else
+(the gate is the off switch — no separate flag); it runs entirely off the hot path, so it
+never delays or breaks a run.
+
+```ini
+STAR_NUDGE_REPO=duckbugio/flock   # owner/repo to nudge for / star
+# STAR_NUDGE_STORE_PATH=          # default <APPROVED_DIRECTORY>/star_nudge.json
+```
+
+The button needs a token with **star-write scope**: a classic PAT with `public_repo`, or a
+fine-grained token with the "Starring" account permission. Without it the star simply fails
+softly (the run is unaffected).
+
 ## Voice messages (optional)
 
 ```ini

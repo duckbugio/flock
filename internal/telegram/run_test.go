@@ -66,6 +66,7 @@ type fakeChat struct {
 	deleted  map[int]bool
 	sent     []string // every Send'd text, in order
 	docs     []string // every SendDocument'd filename, in order
+	nudges   []string // every SendStarNudge'd text, in order
 	drafts   []string // every successful StreamDraft'd text, in order (live preview)
 	draftMD  []bool   // asMarkdown flag for each successful StreamDraft, parallel to drafts
 	draftErr error    // when set, StreamDraft returns it (simulates no draft support)
@@ -139,10 +140,26 @@ func (f *fakeChat) SendDocument(_ context.Context, _ int64, name string, data io
 	return nil
 }
 
+func (f *fakeChat) SendStarNudge(_ context.Context, _ int64, text string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextID++
+	id := f.nextID
+	f.texts[id] = text
+	f.nudges = append(f.nudges, text)
+	return id, nil
+}
+
 func (f *fakeChat) sentDocs() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.docs...)
+}
+
+func (f *fakeChat) sentNudges() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.nudges...)
 }
 
 func (f *fakeChat) snapshot() (string, bool) {
