@@ -50,6 +50,18 @@ const (
 	toolPrefix    = "🔧 "
 )
 
+// elidedFormat renders the "+N earlier" indicator prepended to the activity block
+// when older lines have scrolled off above the visible window. It is plain English
+// to match the rest of the UI ("Working…", "Stop").
+const elidedFormat = "+%d earlier"
+
+// Units used by formatElapsed to humanize the elapsed counter.
+const (
+	secondsPerMinute = 60
+	minutesPerHour   = 60
+	secondsPerHour   = secondsPerMinute * minutesPerHour
+)
+
 // spinnerFrames animate the "Working" header. The frame is selected from the
 // wall-clock elapsed seconds, so the header visibly ticks alongside the counter
 // even during a long, silent tool call.
@@ -64,6 +76,9 @@ type Progress struct {
 	elapsed  func() time.Duration
 	ring     []string
 	ringSize int
+	// total counts every activity line ever pushed (not no-op/ignored events), so
+	// Frame can show how many lines have scrolled off above the visible window.
+	total int
 }
 
 // NewProgress returns a Progress whose header counter reads from elapsed, the
@@ -131,14 +146,36 @@ func capLine(line string, maxText int) string {
 	return truncateRunes(line, maxText)
 }
 
-// push appends a line to the bounded ring, evicting the oldest when full.
+// push appends a line to the bounded ring, evicting the oldest when full. It also
+// bumps total, the running count of every activity line ever pushed.
 func (p *Progress) push(line string) {
+	p.total++
 	if len(p.ring) == p.ringSize {
 		copy(p.ring, p.ring[1:])
 		p.ring[len(p.ring)-1] = line
 		return
 	}
 	p.ring = append(p.ring, line)
+}
+
+// formatElapsed humanizes an elapsed-seconds count, showing hours and minutes
+// only when present and zero-padding sub-units: "45s", "21m 21s", "1h 02m 05s".
+// Negative input is clamped to "0s".
+func formatElapsed(secs int64) string {
+	if secs < 0 {
+		secs = 0
+	}
+	switch {
+	case secs < secondsPerMinute:
+		return fmt.Sprintf("%ds", secs)
+	case secs < secondsPerHour:
+		return fmt.Sprintf("%dm %02ds", secs/secondsPerMinute, secs%secondsPerMinute)
+	default:
+		h := secs / secondsPerHour
+		m := (secs % secondsPerHour) / secondsPerMinute
+		s := secs % secondsPerMinute
+		return fmt.Sprintf("%dh %02dm %02ds", h, m, s)
+	}
 }
 
 // Frame renders the current progress message: a header line driven by the
@@ -149,7 +186,7 @@ func (p *Progress) Frame() string {
 		secs = 0
 	}
 	spin := spinnerFrames[secs%int64(len(spinnerFrames))]
-	header := fmt.Sprintf("%s Working… (%ds)", spin, secs)
+	header := fmt.Sprintf("%s Working… (%s)", spin, formatElapsed(secs))
 	if len(p.ring) == 0 {
 		return header
 	}
@@ -166,13 +203,22 @@ func (p *Progress) Frame() string {
 	}
 
 	// Enforce the overall frame budget. assemble joins the header (always kept),
-	// a blank separator, and the given ring lines; its rune count must not exceed
-	// frameBudgetMax. Drop the OLDEST lines first until it fits.
+	// a blank separator, the "+N earlier" indicator (when lines have scrolled off
+	// above the shown window), and the given ring lines; its rune count must not
+	// exceed frameBudgetMax. Drop the OLDEST lines first until it fits.
+	//
+	// hidden is computed from the lines being SHOWN in this call (p.total minus the
+	// shown count), so each dropped line raises N by one — keeping the indicator
+	// self-consistent with the drop loop below.
 	assemble := func(ringLines []string) string {
 		var b strings.Builder
 		_, _ = b.WriteString(header)
 		// A blank line sets the activity ("thoughts") apart from the Working header.
 		_, _ = b.WriteString("\n")
+		if hidden := p.total - len(ringLines); hidden > 0 {
+			_ = b.WriteByte('\n')
+			_, _ = fmt.Fprintf(&b, elidedFormat, hidden)
+		}
 		for _, line := range ringLines {
 			_ = b.WriteByte('\n')
 			_, _ = b.WriteString(line)
@@ -191,10 +237,14 @@ func (p *Progress) Frame() string {
 	// A single surviving line (the most recent) still blows the budget on its own.
 	// Hard-truncate it so the frame is always <= frameBudgetMax, but never emit an
 	// empty frame: keep the header + a blank + the truncated line. The header, the
-	// two separating newlines, and the line's emoji prefix all ride on top of the
-	// text budget, so subtract them so capLine's TEXT cap keeps the whole frame in
-	// bounds.
+	// two separating newlines, the optional "+N earlier" indicator line, and the
+	// line's emoji prefix all ride on top of the text budget, so subtract them so
+	// capLine's TEXT cap keeps the whole frame in bounds.
 	overhead := utf8.RuneCountInString(header) + separatorRunes
+	if hidden := p.total - 1; hidden > 0 {
+		// The indicator line plus its leading newline.
+		overhead += 1 + utf8.RuneCountInString(fmt.Sprintf(elidedFormat, hidden))
+	}
 	for _, prefix := range []string{thoughtPrefix, toolPrefix} {
 		if strings.HasPrefix(lines[0], prefix) {
 			overhead += utf8.RuneCountInString(prefix)

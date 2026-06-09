@@ -54,9 +54,13 @@ func TestActivityRingBounded(t *testing.T) {
 	}
 	frame := p.Frame()
 	lines := strings.Split(frame, "\n")
-	// 1 header + 1 blank separator + at most 3 activity lines.
-	if len(lines) != 5 {
-		t.Fatalf("expected header + blank + 3 ring lines, got %d lines: %q", len(lines), frame)
+	// 1 header + 1 blank separator + 1 "+2 earlier" indicator + 3 activity lines.
+	if len(lines) != 6 {
+		t.Fatalf("expected header + blank + indicator + 3 ring lines, got %d lines: %q", len(lines), frame)
+	}
+	// Five pushed, three shown: two scrolled off above the window.
+	if !strings.Contains(frame, "+2 earlier") {
+		t.Fatalf("expected +2 earlier indicator: %q", frame)
 	}
 	// Oldest two ("Read", "Grep") evicted; newest three retained in order.
 	if !strings.Contains(frame, "Edit") || !strings.Contains(frame, "Bash") || !strings.Contains(frame, "Write") {
@@ -238,6 +242,105 @@ func TestFrameBudgetDropsOldestLines(t *testing.T) {
 	}
 	if strings.Contains(frame, "L0 ") {
 		t.Fatalf("oldest line should have been dropped first: %.80q", frame)
+	}
+}
+
+func TestFormatElapsed(t *testing.T) {
+	cases := []struct {
+		secs int64
+		want string
+	}{
+		{-5, "0s"},
+		{0, "0s"},
+		{45, "45s"},
+		{60, "1m 00s"},
+		{185, "3m 05s"},
+		{1281, "21m 21s"},
+		{3600, "1h 00m 00s"},
+		{3725, "1h 02m 05s"},
+	}
+	for _, tc := range cases {
+		if got := formatElapsed(tc.secs); got != tc.want {
+			t.Errorf("formatElapsed(%d) = %q, want %q", tc.secs, got, tc.want)
+		}
+	}
+}
+
+// TestFormatElapsedInHeader confirms the humanized form reaches the rendered header.
+func TestFormatElapsedInHeader(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5)
+	elapsed = 1281 * time.Second
+	if got := p.Frame(); !strings.Contains(got, "Working… (21m 21s)") {
+		t.Fatalf("header not humanized: %q", got)
+	}
+}
+
+// TestElidedIndicatorHiddenWhenAllShown asserts no "+N earlier" line appears while
+// the number of pushed lines is within the visible ring.
+func TestElidedIndicatorHiddenWhenAllShown(t *testing.T) {
+	var elapsed time.Duration
+	const ring = 5
+	p := NewProgress(fakeClock(&elapsed), ring)
+	for i := 0; i < ring; i++ {
+		p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash"})
+	}
+	if frame := p.Frame(); strings.Contains(frame, "earlier") {
+		t.Fatalf("indicator shown when nothing elided: %q", frame)
+	}
+}
+
+// TestElidedIndicatorShownWhenEvicted asserts that pushing more than ringSize lines
+// renders "+K earlier" as the FIRST activity line, with the last ringSize lines kept.
+func TestElidedIndicatorShownWhenEvicted(t *testing.T) {
+	var elapsed time.Duration
+	const ring = 5
+	const extra = 37
+	p := NewProgress(fakeClock(&elapsed), ring)
+	for i := 0; i < ring+extra; i++ {
+		p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash"})
+	}
+	frame := p.Frame()
+	if !strings.Contains(frame, "+"+strconv.Itoa(extra)+" earlier") {
+		t.Fatalf("expected +%d earlier indicator: %q", extra, frame)
+	}
+	// The indicator must be the FIRST line of the activity block: header, blank,
+	// then the indicator.
+	lines := strings.Split(frame, "\n")
+	if len(lines) < 3 || lines[2] != "+"+strconv.Itoa(extra)+" earlier" {
+		t.Fatalf("indicator not first activity line: %q", frame)
+	}
+	// Exactly ringSize activity lines are kept below the indicator.
+	if kept := strings.Count(frame, toolPrefix); kept != ring {
+		t.Fatalf("kept %d activity lines, want %d", kept, ring)
+	}
+}
+
+// TestElidedIndicatorCountsBudgetDrops asserts N reflects lines dropped by the frame
+// budget loop, not just ring eviction: with a large ring of long lines the budget
+// loop drops some shown lines, and each drop must raise N by one.
+func TestElidedIndicatorCountsBudgetDrops(t *testing.T) {
+	var elapsed time.Duration
+	const ring = 20
+	p := NewProgress(fakeClock(&elapsed), ring)
+	for i := 0; i < ring; i++ {
+		p.push(thoughtPrefix + "L" + strconv.Itoa(i) + " " + strings.Repeat("x", olderSnippetMax))
+	}
+	frame := p.Frame()
+	if n := utf8.RuneCountInString(frame); n > frameBudgetMax {
+		t.Fatalf("frame exceeded budget: %d runes (max %d)", n, frameBudgetMax)
+	}
+	kept := strings.Count(frame, thoughtPrefix)
+	if kept >= ring {
+		t.Fatalf("budget loop did not drop any lines: kept %d of %d", kept, ring)
+	}
+	// total == ring; hidden == total - kept, and that must be the rendered N.
+	hidden := ring - kept
+	if !strings.Contains(frame, "+"+strconv.Itoa(hidden)+" earlier") {
+		t.Fatalf("indicator N=%d not reflected after budget drops: %.80q", hidden, frame)
+	}
+	if hidden <= 0 {
+		t.Fatalf("expected some lines hidden, got N=%d", hidden)
 	}
 }
 
