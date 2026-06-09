@@ -4,6 +4,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -13,15 +14,41 @@ import (
 	env "github.com/caarlos0/env/v11"
 )
 
+// ErrMissingTelegramToken is returned by ValidateTelegram when TELEGRAM_BOT_TOKEN
+// is unset, mirroring the previous env "required" behavior but deferred so a
+// non-Telegram binary (e.g. cmd/duck-vk) can share the same Config without
+// demanding the Telegram token.
+var ErrMissingTelegramToken = errors.New("TELEGRAM_BOT_TOKEN is required")
+
+// ErrMissingVKToken is returned by ValidateVK when VK_BOT_TOKEN is unset.
+var ErrMissingVKToken = errors.New("VK_BOT_TOKEN is required")
+
+// ErrMissingVKGroupID is returned by ValidateVK when VK_GROUP_ID is unset/zero;
+// the community id is needed for groups.getLongPollServer and the mention parse.
+var ErrMissingVKGroupID = errors.New("VK_GROUP_ID is required")
+
 // Config holds all runtime configuration sourced from the environment. Field
 // names and env keys mirror adapters/telegram/.env.example for deploy parity.
+// The per-transport tokens are parsed but NOT marked env-required: each binary
+// validates only its own transport (ValidateTelegram / ValidateVK) so a VK
+// deployment need not set TELEGRAM_BOT_TOKEN and vice versa, while the shared
+// core config is parsed once and reused.
 type Config struct {
-	// Required.
-	TelegramBotToken    string `env:"TELEGRAM_BOT_TOKEN,required"`
+	// Telegram (cmd/flock-telegram). Validated by ValidateTelegram, not env-required.
+	TelegramBotToken    string `env:"TELEGRAM_BOT_TOKEN"`
 	TelegramBotUsername string `env:"TELEGRAM_BOT_USERNAME"`
 
 	// Telegram user IDs allowed to use the bot (comma-separated).
 	AllowedUsers []int64 `env:"ALLOWED_USERS" envSeparator:","`
+
+	// VK (cmd/duck-vk). VKBotToken is the community access token; VKGroupID is the
+	// community id (used for groups.getLongPollServer and the [club<id>|...] mention
+	// parse); VKAllowedUsers is the comma-separated allow-list of VK user ids. These
+	// are validated by ValidateVK, not env-required, so the Telegram binary need not
+	// set them. REQUIRE_GROUP_MENTION is shared (reused, not duplicated).
+	VKBotToken     string  `env:"VK_BOT_TOKEN"`
+	VKGroupID      int64   `env:"VK_GROUP_ID"`
+	VKAllowedUsers []int64 `env:"VK_ALLOWED_USERS" envSeparator:","`
 
 	// Claude auth — not hard-required at Stage 0.
 	ClaudeCodeOAuthToken string `env:"CLAUDE_CODE_OAUTH_TOKEN"`
@@ -306,10 +333,46 @@ func (c Config) StarNudgeEnabled() bool {
 
 // IsAllowed reports whether the given Telegram user ID is in the allow-list.
 func (c Config) IsAllowed(userID int64) bool {
-	for _, id := range c.AllowedUsers {
+	return containsID(c.AllowedUsers, userID)
+}
+
+// IsVKAllowed reports whether the given VK user ID is in the VK allow-list.
+// VK_ALLOWED_USERS is a separate list from the Telegram ALLOWED_USERS so the two
+// transports' deploys stay independent (a VK user id is unrelated to a Telegram
+// one).
+func (c Config) IsVKAllowed(userID int64) bool {
+	return containsID(c.VKAllowedUsers, userID)
+}
+
+// containsID reports whether ids contains userID.
+func containsID(ids []int64, userID int64) bool {
+	for _, id := range ids {
 		if id == userID {
 			return true
 		}
 	}
 	return false
+}
+
+// ValidateTelegram checks the fields the Telegram binary requires at startup. It
+// is called by cmd/flock-telegram after Load, replacing the previous env
+// "required" tag on TELEGRAM_BOT_TOKEN so the shared Config can be parsed by a
+// non-Telegram binary too.
+func (c Config) ValidateTelegram() error {
+	if strings.TrimSpace(c.TelegramBotToken) == "" {
+		return ErrMissingTelegramToken
+	}
+	return nil
+}
+
+// ValidateVK checks the fields the VK binary requires at startup (the community
+// access token and the community id). It is called by cmd/duck-vk after Load.
+func (c Config) ValidateVK() error {
+	if strings.TrimSpace(c.VKBotToken) == "" {
+		return ErrMissingVKToken
+	}
+	if c.VKGroupID == 0 {
+		return ErrMissingVKGroupID
+	}
+	return nil
 }

@@ -2,6 +2,7 @@
 package config
 
 import (
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -35,11 +36,11 @@ func TestLoad(t *testing.T) {
 			wantUsers: nil,
 		},
 		{
-			name: "missing token errors",
+			name: "missing telegram token still loads (validated per-binary)",
 			env: map[string]string{
 				"TELEGRAM_BOT_USERNAME": "duckbot",
 			},
-			wantErr: true,
+			wantUsers: nil,
 		},
 		{
 			name: "log level mapping",
@@ -338,6 +339,84 @@ func TestIsAllowed(t *testing.T) {
 	}
 	if c.IsAllowed(99) {
 		t.Errorf("IsAllowed(99) = true, want false")
+	}
+}
+
+func TestValidateTelegram(t *testing.T) {
+	if err := (Config{TelegramBotToken: "token"}).ValidateTelegram(); err != nil {
+		t.Errorf("ValidateTelegram() with token = %v, want nil", err)
+	}
+	if err := (Config{TelegramBotToken: "  "}).ValidateTelegram(); err == nil {
+		t.Error("ValidateTelegram() with blank token = nil, want error")
+	}
+	if err := (Config{}).ValidateTelegram(); err == nil {
+		t.Error("ValidateTelegram() with no token = nil, want error")
+	}
+}
+
+func TestVKConfigParses(t *testing.T) {
+	t.Setenv("VK_BOT_TOKEN", "vk-community-token")
+	t.Setenv("VK_GROUP_ID", "123456")
+	t.Setenv("VK_ALLOWED_USERS", "10,20,30")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.VKBotToken != "vk-community-token" {
+		t.Errorf("VKBotToken = %q, want vk-community-token", cfg.VKBotToken)
+	}
+	if cfg.VKGroupID != 123456 {
+		t.Errorf("VKGroupID = %d, want 123456", cfg.VKGroupID)
+	}
+	want := []int64{10, 20, 30}
+	if len(cfg.VKAllowedUsers) != len(want) {
+		t.Fatalf("VKAllowedUsers = %v, want %v", cfg.VKAllowedUsers, want)
+	}
+	for i := range want {
+		if cfg.VKAllowedUsers[i] != want[i] {
+			t.Fatalf("VKAllowedUsers = %v, want %v", cfg.VKAllowedUsers, want)
+		}
+	}
+}
+
+func TestValidateVK(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		cfg     Config
+		wantErr error
+	}{
+		{"ok", Config{VKBotToken: "t", VKGroupID: 1}, nil},
+		{"missing token", Config{VKGroupID: 1}, ErrMissingVKToken},
+		{"blank token", Config{VKBotToken: "  ", VKGroupID: 1}, ErrMissingVKToken},
+		{"missing group", Config{VKBotToken: "t"}, ErrMissingVKGroupID},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.ValidateVK()
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Fatalf("ValidateVK() = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("ValidateVK() = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestIsVKAllowed(t *testing.T) {
+	c := Config{VKAllowedUsers: []int64{10, 20}}
+	if !c.IsVKAllowed(10) {
+		t.Errorf("IsVKAllowed(10) = false, want true")
+	}
+	if c.IsVKAllowed(99) {
+		t.Errorf("IsVKAllowed(99) = true, want false")
+	}
+	// The VK list is independent of the Telegram one.
+	c = Config{AllowedUsers: []int64{5}}
+	if c.IsVKAllowed(5) {
+		t.Errorf("IsVKAllowed(5) = true on a Telegram-only allow-list, want false")
 	}
 }
 

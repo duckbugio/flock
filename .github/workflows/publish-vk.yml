@@ -1,0 +1,73 @@
+name: Publish vk image
+
+# Builds the self-contained VK bot image and pushes it to GitHub Container
+# Registry (ghcr.io/duckbugio/flock-vk) so adopters can just `docker compose up`.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    # Only rebuild when something that actually lands in the image changes: the Go
+    # sources (cmd/, internal/, core/, go.mod/go.sum) or the adapter build
+    # (Dockerfile/.dockerignore). Docs and the Ansible deploy dir don't affect the
+    # image, so they don't trigger a build.
+    paths:
+      - 'cmd/**'
+      - 'internal/**'
+      - 'core/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'adapters/vk/**'
+      - '!adapters/vk/deploy/**'
+      - '.dockerignore'
+      - '.github/workflows/publish-vk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/duckbugio/flock-vk
+          # Tags produced per build:
+          #   :latest              — rolling, default branch only (what deploys track)
+          #   :0.1.<run_number>    — ordered, human-readable auto-version for every main
+          #                          build (no manual step); the number increments per
+          #                          publish run so images sort and read sanely
+          #   :vX.Y.Z              — milestone release: push a git tag vX.Y.Z and it lands
+          #   :sha-<commit>        — exact, immutable pin for traceability/rollback
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=0.1.${{ github.run_number }},enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=short
+
+      - name: Build & push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./adapters/vk/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
