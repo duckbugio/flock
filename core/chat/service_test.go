@@ -65,9 +65,9 @@ func newFakeChat() *fakeChat {
 }
 
 // Capabilities reports a full-capability transport so the fake drives the same
-// run-loop path Telegram does (live edits, inline Stop, documents, 4096 cap).
+// run-loop path Telegram does (documents, 4096 cap).
 func (f *fakeChat) Capabilities() Capabilities {
-	return Capabilities{CanEditMessages: true, CanInlineStop: true, CanSendDocument: true, MaxMessageRunes: TelegramMaxMessage}
+	return Capabilities{CanSendDocument: true, MaxMessageRunes: TelegramMaxMessage}
 }
 
 func (f *fakeChat) Send(_ context.Context, _ ChatID, text, stopRunID string, _ bool) (MessageID, error) {
