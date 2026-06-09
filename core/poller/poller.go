@@ -2,7 +2,8 @@
 // always reach the bot, but the bot can reach Gitea. A background loop polls the
 // bot user's unread Pull notifications and, for each new non-self comment on an
 // open duck/<chatid>/... PR, emits a PRComment the adapter routes back into the
-// owning chat. It ports adapters/telegram/patches/gitea_poller.py to Go.
+// owning chat. It polls the git host's API for new review comments on open PRs
+// and routes them back to the owning chat.
 package poller
 
 import (

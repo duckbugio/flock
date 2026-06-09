@@ -5,14 +5,13 @@ workspace per chat**. Describe a feature in a chat; the team plans it, implement
 branch, tests it, reviews it (line-anchored inline comments), and opens a PR. It runs on your
 Claude **subscription** (no per-token billing) or an Anthropic API key.
 
-Built on [RichardAtCT/claude-code-telegram](https://github.com/RichardAtCT/claude-code-telegram)
-for the Telegram interface, plus native Claude Code subagents for the team and a set of
-runtime patches (per-chat isolation, parallel chats, PR poller, voice, …) — all baked into one
+A native Go service that drives the Claude Code CLI as a dev team and exposes it through a
+Telegram adapter — per-chat isolation, parallel chats, PR poller, voice, … — all shipped as one
 prebuilt image.
 
 > **Repo layout (monorepo).** The platform-agnostic dev-team brain — subagents + orchestration —
 > lives in [`core/`](core/); the Telegram bot is one **adapter** under
-> [`adapters/telegram/`](adapters/telegram/) (its image, patches, compose, and Ansible deploy).
+> [`adapters/telegram/`](adapters/telegram/) (its image, compose, and Ansible deploy).
 > Future chat platforms get their own `adapters/<name>/` and share `core/`.
 
 ## What you get
@@ -128,7 +127,7 @@ ansible-playbook -i inventories/my-bot/inventory.ini playbook.yml
 Each bot instance is its own `inventories/<name>/` (e.g. the maintained `gitea-lo-duck`); only
 `inventories/example/` is committed — real instances are gitignored. The role pulls the prebuilt
 image — set `bot_image` to pin a tag. (Build your own with `docker build -f
-adapters/telegram/Dockerfile .` from the repo root if you've forked the patches.)
+adapters/telegram/Dockerfile .` from the repo root if you've forked the repo.)
 
 ## The dev team
 

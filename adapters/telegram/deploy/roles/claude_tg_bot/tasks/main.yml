@@ -112,7 +112,7 @@
     state: directory
     mode: "0750"
 
-# Team subagents, feature patches, and CLAUDE.md are baked into the prebuilt image
+# Team subagents and CLAUDE.md are baked into the prebuilt image
 # (built by CI from the repo) and rendered into the workspace by the image entrypoint —
 # nothing to copy or render on the host.
 
