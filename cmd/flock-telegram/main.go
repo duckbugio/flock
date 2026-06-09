@@ -257,6 +257,7 @@ func run() int {
 	// does NOT match (different command name). Each command is gated by the same
 	// allow-list as text messages and is NOT mention-gated (a slash command is an
 	// explicit address).
+	b.RegisterHandlerMatchFunc(commandMatch("start"), startHandler(cfg))
 	b.RegisterHandlerMatchFunc(commandMatch("help"), helpHandler(cfg))
 	b.RegisterHandlerMatchFunc(commandMatch("new"), newHandler(cfg, svc))
 	b.RegisterHandlerMatchFunc(commandMatch("stop"), stopCommandHandler(cfg, svc))
@@ -762,6 +763,21 @@ func commandSender(cfg config.Config, msg *models.Message) (int64, bool) {
 		return 0, false
 	}
 	return msg.Chat.ID, true
+}
+
+// startHandler replies to /start from an allowed user with the static welcome
+// text (a short greeting + the usage help). Like helpHandler it is gated by the
+// allow-list, is not mention-gated, and never touches the dispatcher or session
+// store (no Claude run) — without it /start would fall through to the text
+// handler and be forwarded to the model as a prompt.
+func startHandler(cfg config.Config) bot.HandlerFunc {
+	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
+		chatID, ok := commandSender(cfg, update.Message)
+		if !ok {
+			return
+		}
+		sendCommandReply(ctx, b, chatID, telegram.WelcomeText)
+	}
 }
 
 // helpHandler replies to /help from an allowed user with the static usage text.

@@ -17,6 +17,18 @@ import (
 // mapped in the receive loop alongside the inline Stop button.
 const stopCommand = "/stop"
 
+// startCommand is the text command a new user sends first; it is answered with a
+// short welcome + usage notice and never starts a run (parity with Telegram's
+// /start handler).
+const startCommand = "/start"
+
+// welcomeText is the static reply to /start: a short greeting + usage, mirroring
+// the Telegram adapter's WelcomeText. It is an engineering artifact (plain
+// English, no duck flavor) and never reaches the Claude Runner.
+const welcomeText = "Hi! I'm the DuckFlock assistant.\n\n" +
+	"Send any message to run it through the assistant.\n" +
+	"/stop — stop the run currently in progress."
+
 // Service is the subset of *core/chat.Service the receiver drives. The real
 // Service satisfies it; tests use a fake to assert the mapped calls.
 type Service interface {
@@ -292,8 +304,13 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 	isGroup := isGroupPeer(peerID)
 
 	// Universal Stop fallback: a bare "/stop" cancels the chat's in-flight run.
-	if strings.TrimSpace(msg.Text) == stopCommand {
+	switch strings.TrimSpace(msg.Text) {
+	case stopCommand:
 		r.svc.StopChat(chatIDStr(peerID))
+		return
+	case startCommand:
+		// /start is answered with the welcome/usage notice and never starts a run.
+		r.notify(ctx, peerID, welcomeText)
 		return
 	}
 

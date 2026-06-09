@@ -45,3 +45,10 @@ const HelpText = "DuckFlock Telegram assistant — available commands:\n\n" +
 	"/new — start a fresh session (forget the current conversation)\n" +
 	"/stop — stop the run currently in progress\n\n" +
 	"Send any other message to run it through the assistant."
+
+// WelcomeText is the static usage message replied to an allowed user who sends
+// /start. It is a short greeting prepended to the command help so a brand-new
+// user immediately sees what the bot does and how to use it. Like HelpText it is
+// an engineering artifact (plain English, no duck flavor) and never reaches the
+// Claude Runner — the duck greeting comes from the model on a real message.
+const WelcomeText = "Hi! I'm the DuckFlock assistant.\n\n" + HelpText

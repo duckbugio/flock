@@ -1,10 +1,12 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/go-telegram/bot/models"
 
+	"github.com/duckbugio/flock/adapters/telegram"
 	"github.com/duckbugio/flock/internal/config"
 )
 
@@ -63,6 +65,44 @@ func botCommandUpdate(text string, cmdLen int) *models.Update {
 		Text:     text,
 		Entities: []models.MessageEntity{{Type: models.MessageEntityTypeBotCommand, Offset: 0, Length: cmdLen}},
 	}}
+}
+
+// TestStartCommandRouted is the /start routing guard: /start must be matched as a command
+// (so it is handled by the start handler and never reaches the text/model path),
+// tolerating the group @botname suffix exactly like the other slash commands.
+// Without a /start handler the message falls through to the default text handler
+// and is forwarded to the model, which improvises a confusing reply.
+func TestStartCommandRouted(t *testing.T) {
+	match := commandMatch("start")
+	tests := []struct {
+		name string
+		u    *models.Update
+		want bool
+	}{
+		{"bare /start", botCommandUpdate("/start", 6), true},
+		{"group form /start@duck_bot", botCommandUpdate("/start@duck_bot", 15), true},
+		{"/start with args", botCommandUpdate("/start now", 6), true},
+		{"different command /stop", botCommandUpdate("/stop", 5), false},
+		{"nil update", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := match(tt.u); got != tt.want {
+				t.Fatalf("commandMatch(start)(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStartWelcomeText asserts the static /start reply is the welcome text: a
+// short greeting prepended to the usage help, plain English with no duck flavor.
+func TestStartWelcomeText(t *testing.T) {
+	if !strings.HasPrefix(telegram.WelcomeText, "Hi!") {
+		t.Fatalf("WelcomeText should open with a greeting, got %q", telegram.WelcomeText)
+	}
+	if !strings.Contains(telegram.WelcomeText, telegram.HelpText) {
+		t.Fatalf("WelcomeText should include the usage help (HelpText)")
+	}
 }
 
 // TestCommandMatchToleratesBotnameSuffix is the routing guard: a command handler

@@ -173,6 +173,23 @@ func TestReceiverStopTextCommand(t *testing.T) {
 	}
 }
 
+// TestReceiverStartTextCommand is the VK /start guard: a bare "/start" replies
+// with the welcome notice and does NOT start a run (no Service dispatch).
+func TestReceiverStartTextCommand(t *testing.T) {
+	svc := &fakeService{}
+	notices := &fakeNotice{}
+	r := newTestReceiver(svc, notices, false, nil)
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 200, Text: "/start"}))
+
+	if len(svc.handleCalls) != 0 {
+		t.Errorf("/start should not start a run, got %d Handle calls", len(svc.handleCalls))
+	}
+	if len(notices.texts) != 1 || notices.texts[0] != welcomeText {
+		t.Errorf("notice texts = %v, want one welcome notice", notices.texts)
+	}
+}
+
 func TestReceiverMessageEventStopAndAck(t *testing.T) {
 	svc := &fakeService{}
 	var acked []string
