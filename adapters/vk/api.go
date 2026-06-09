@@ -23,6 +23,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/duckbugio/flock/internal/fsutil"
 )
 
 // apiBase is the default VK API method endpoint. It is a struct field on Client
@@ -343,11 +345,8 @@ func (c *Client) docsSave(ctx context.Context, uploaded uploadFileResult) (docSa
 
 // redactURLError replaces a *url.Error (whose Error() includes the request URL)
 // with its underlying cause so a URL never reaches a log or a user-facing error.
-// Mirrors adapters/telegram/voice.go's discipline.
+// It delegates to the shared primitive; the package keeps this name because the
+// general VK API plumbing (call/longpoll) redacts the same way.
 func redactURLError(err error) error {
-	var ue *url.Error
-	if errors.As(err, &ue) && ue.Err != nil {
-		return ue.Err
-	}
-	return err
+	return fsutil.RedactURLError(err)
 }

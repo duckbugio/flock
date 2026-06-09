@@ -2,18 +2,17 @@ package telegram
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"path"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
 	"github.com/duckbugio/flock/core/voice"
+	"github.com/duckbugio/flock/internal/fsutil"
 )
 
 // defaultMaxVoiceBytes caps a voice download to guard against oversized files.
@@ -108,7 +107,7 @@ func (vt *VoiceTranscriber) Transcribe(ctx context.Context, fileID string) (stri
 		// A transport error from client.Do is a *url.Error whose message embeds
 		// the request URL — which carries the bot token. Strip the URL so the
 		// token never reaches a log or a user-facing error.
-		return "", fmt.Errorf("download voice file: %w", redactURLError(err))
+		return "", fmt.Errorf("download voice file: %w", fsutil.RedactURLError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -118,15 +117,4 @@ func (vt *VoiceTranscriber) Transcribe(ctx context.Context, fileID string) (stri
 
 	limited := io.LimitReader(resp.Body, vt.maxBytes)
 	return vt.transcriber.Transcribe(ctx, limited, path.Base(filePath))
-}
-
-// redactURLError replaces a *url.Error (whose Error() includes the request URL,
-// and thus the bot token in a Telegram file-download URL) with its underlying
-// cause, which carries no URL. Other errors pass through unchanged.
-func redactURLError(err error) error {
-	var ue *url.Error
-	if errors.As(err, &ue) && ue.Err != nil {
-		return ue.Err
-	}
-	return err
 }
