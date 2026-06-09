@@ -71,3 +71,34 @@ jobs:
           severity: "CRITICAL,HIGH"
           exit-code: "1"
           format: "table"
+
+  image:
+    name: Build telegram image (no push)
+    runs-on: ubuntu-latest
+    # PR-only dry run: prove the runtime image still builds before merge. The Go
+    # lint/tests above never touch the Dockerfile, so a base-image/dependency bump
+    # (e.g. a Node major) could land green here yet break the real build — which
+    # otherwise only runs post-merge in publish-telegram.yml. This mirrors that
+    # workflow's build EXACTLY (same context/file/platforms/cache) but with
+    # push: false, so it catches multi-arch breakage (incl. the QEMU-emulated
+    # arm64 path) on the PR. On push to main the actual publish covers it.
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build telegram image (no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./adapters/telegram/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
