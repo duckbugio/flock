@@ -126,6 +126,21 @@ func (c *botChat) SendDocument(ctx context.Context, chatID int64, name string, d
 	return err
 }
 
+// SendStarNudge posts the post-task star-nudge message with the inline confirm
+// button (a callback button). It sends plain text (the nudge copy carries no
+// markup) and returns the new message id.
+func (c *botChat) SendStarNudge(ctx context.Context, chatID int64, text string) (int, error) {
+	msg, err := c.b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:      chatID,
+		Text:        text,
+		ReplyMarkup: starMarkup(),
+	})
+	if err != nil {
+		return 0, err
+	}
+	return msg.ID, nil
+}
+
 // stopMarkup returns an inline keyboard with a single Stop button bound to
 // runID, or nil when runID is empty (final messages carry no markup).
 func stopMarkup(runID string) models.ReplyMarkup {
