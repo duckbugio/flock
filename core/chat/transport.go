@@ -56,10 +56,9 @@ type Transport interface {
 	Capabilities() Capabilities
 }
 
-// Capabilities lets the Service adapt to platforms weaker than Telegram. Each
-// flag has a defined fallback so a "false" never breaks delivery. Telegram
-// returns every flag true and MaxMessageRunes 4096, so its behavior is
-// unchanged.
+// Capabilities lets the Service adapt to platforms weaker than Telegram, with a
+// defined fallback so a missing primitive never breaks delivery. Telegram and VK
+// set CanSendDocument true and MaxMessageRunes 4096.
 type Capabilities struct {
 	// CanSendDocument: platform supports file attachments. false → the outbox
 	// sweep is skipped. (Telegram/VK: true.)
