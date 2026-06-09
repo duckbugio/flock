@@ -112,6 +112,10 @@ const killGrace = 500 * time.Millisecond
 // default, so we raise it well above that.
 const maxScanLine = 16 * 1024 * 1024
 
+// initScanBuf is the scanner's initial buffer size; it grows up to maxScanLine
+// as needed. Matches bufio's default starting point (64KB).
+const initScanBuf = 64 * 1024
+
 // stderrTailBytes is how much trailing stderr we keep to enrich errors.
 const stderrTailBytes = 4096
 
@@ -336,7 +340,7 @@ func (r *runner) stream(ctx context.Context, cmd *exec.Cmd, stdout io.Reader, st
 // RunError when no result was reached.
 func (r *runner) parse(ctx context.Context, stdout io.Reader, out chan<- Event) (bool, error) {
 	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 0, 64*1024), maxScanLine)
+	sc.Buffer(make([]byte, 0, initScanBuf), maxScanLine)
 
 	var sawResult bool
 	for sc.Scan() {
@@ -421,9 +425,5 @@ func exitError(waitErr error, stderrTail *tail, scanErr error) error {
 }
 
 func asExitError(err error, target **exec.ExitError) bool {
-	if ee, ok := err.(*exec.ExitError); ok {
-		*target = ee
-		return true
-	}
-	return false
+	return errors.As(err, target)
 }

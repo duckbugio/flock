@@ -39,6 +39,10 @@ const (
 // Telegram's 4096 limit counts) is <= source length. The limit therefore still holds.
 const frameBudgetMax = 3500
 
+// separatorRunes is the rune count of the "\n\n" that separates the header from
+// the activity lines in a frame.
+const separatorRunes = 2
+
 // Activity-line prefixes: a thought balloon for the model's text, a wrench for a
 // tool call.
 const (
@@ -190,7 +194,7 @@ func (p *Progress) Frame() string {
 	// two separating newlines, and the line's emoji prefix all ride on top of the
 	// text budget, so subtract them so capLine's TEXT cap keeps the whole frame in
 	// bounds.
-	overhead := utf8.RuneCountInString(header) + 2
+	overhead := utf8.RuneCountInString(header) + separatorRunes
 	for _, prefix := range []string{thoughtPrefix, toolPrefix} {
 		if strings.HasPrefix(lines[0], prefix) {
 			overhead += utf8.RuneCountInString(prefix)

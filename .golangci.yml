@@ -19,12 +19,16 @@ linters:
     - asciicheck
     - bidichk
     - bodyclose
+    - containedctx
     - contextcheck
     - depguard
+    - dogsled
+    - dupl
     - durationcheck
     - errcheck
     - errchkjson
     - errname
+    - errorlint
     - exhaustive
     - copyloopvar
     - forbidigo
@@ -46,6 +50,7 @@ linters:
     - lll
     - makezero
     - misspell
+    - mnd
     - musttag
     - nakedret
     - nestif

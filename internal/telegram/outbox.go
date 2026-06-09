@@ -26,6 +26,12 @@ const defaultMaxOutboxFiles = 10
 // recurses into it, so it is naturally skipped and never re-swept (AC3).
 const sentSubdir = "sent"
 
+// dirPerm is the owner-only permission for bot-created directories.
+const dirPerm os.FileMode = 0o750
+
+// filePerm is the owner-only permission for bot-created files.
+const filePerm os.FileMode = 0o600
+
 // outboxDirResolver resolves (and creates) a chat's outbox directory. The
 // *workspace.Renderer satisfies it via OutboxDir; tests use a fake. This mirrors
 // uploadsDirResolver.
@@ -175,7 +181,7 @@ func (s *Sweeper) deliver(ctx context.Context, chatID int64, outboxDir, name str
 // (created on first use), preserving it rather than deleting it (AC1/AC5).
 func (s *Sweeper) archive(outboxDir, name string) error {
 	sentDir := filepath.Join(outboxDir, sentSubdir)
-	if err := os.MkdirAll(sentDir, 0o750); err != nil {
+	if err := os.MkdirAll(sentDir, dirPerm); err != nil {
 		return fmt.Errorf("create sent dir: %w", err)
 	}
 	if err := os.Rename(filepath.Join(outboxDir, name), filepath.Join(sentDir, name)); err != nil {

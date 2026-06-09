@@ -158,6 +158,11 @@ func entitySlice(text string, ent Entity) string {
 // entity offset/length. end == -1 means "to the end of the string". This keeps
 // mention extraction correct in the presence of emoji and other astral-plane
 // characters.
+//
+// maxBMPRune is the highest Unicode code point in the Basic Multilingual Plane;
+// a rune above it needs a UTF-16 surrogate pair (two code units).
+const maxBMPRune = 0xFFFF
+
 func utf16Slice(text string, start, end int) string {
 	units := 0
 	startByte, endByte := -1, len(text)
@@ -172,7 +177,7 @@ func utf16Slice(text string, start, end int) string {
 			endByte = i
 			break
 		}
-		if r > 0xFFFF {
+		if r > maxBMPRune {
 			units += 2 // surrogate pair
 		} else {
 			units++

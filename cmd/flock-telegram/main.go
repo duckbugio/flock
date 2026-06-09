@@ -35,6 +35,18 @@ import (
 	"github.com/duckbugio/flock/internal/telegram"
 )
 
+// shutdownDrainTimeout bounds how long Shutdown waits for in-flight runs to
+// deliver their final message during graceful drain.
+const shutdownDrainTimeout = 5 * time.Second
+
+// voiceClientTimeout is the shared budget for the voice file download plus the
+// transcription provider call.
+const voiceClientTimeout = 60 * time.Second
+
+// uploadClientTimeout is the budget for a (potentially large) inbound file
+// download.
+const uploadClientTimeout = 120 * time.Second
+
 func main() {
 	os.Exit(run())
 }
@@ -123,7 +135,7 @@ func run() int {
 	// message before exit (graceful drain) rather than dropping them with the
 	// non-waiting Close(). Close() remains available for callers that don't drain.
 	defer func() {
-		drainCtx, cancelDrain := context.WithTimeout(context.Background(), 5*time.Second)
+		drainCtx, cancelDrain := context.WithTimeout(context.Background(), shutdownDrainTimeout)
 		defer cancelDrain()
 		if err := disp.Shutdown(drainCtx); err != nil {
 			logger.Warn("dispatcher drain timed out", "error", err)
@@ -156,7 +168,7 @@ func run() int {
 	if cfg.EnableVoiceMessages {
 		// One HTTP client shared by the file download and the provider call, so the
 		// timeout is a single budget rather than two stacked 60s windows.
-		voiceClient := &http.Client{Timeout: 60 * time.Second}
+		voiceClient := &http.Client{Timeout: voiceClientTimeout}
 		tr, terr := voice.New(voice.Config{
 			Provider:      cfg.VoiceProvider,
 			MistralAPIKey: cfg.MistralAPIKey,
@@ -185,7 +197,7 @@ func run() int {
 	// the per-chat uploads dir (a sibling of the repos, outside every git tree) and
 	// reuses the same token-redacting download seam as voice. A dedicated HTTP
 	// client gives the (potentially large) file download its own timeout budget.
-	uploadClient := &http.Client{Timeout: 120 * time.Second}
+	uploadClient := &http.Client{Timeout: uploadClientTimeout}
 	up = telegram.NewUploader(
 		telegram.NewBotFileSource(b),
 		uploadClient,

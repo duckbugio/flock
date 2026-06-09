@@ -161,7 +161,7 @@ func (u *Uploader) uniquePrefix() string {
 // silently truncated: we read one extra byte and fail when it is present.
 func (u *Uploader) writeCapped(dest string, src io.Reader) (string, error) {
 	//nolint:gosec // G304: dest is a workspace upload path we construct, not raw user input.
-	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, filePerm)
 	if err != nil {
 		return "", fmt.Errorf("create upload file: %w", err)
 	}

@@ -15,6 +15,9 @@ import (
 
 // job is one unit of work plus the per-chat cancelable context it runs under.
 type job struct {
+	// ctx is the job's payload (carried through the buffered channel), not a
+	// per-call parameter — each queued job runs under its own cancelable context.
+	//nolint:containedctx // ctx is the job's queued payload, not a per-call parameter.
 	ctx context.Context
 	run func(ctx context.Context)
 }
@@ -45,10 +48,11 @@ type Dispatcher struct {
 	sem     *semaphore.Weighted
 	bufSize int
 
-	mu       sync.Mutex
-	chats    map[int64]*chatQueue
-	closed   bool
-	wg       sync.WaitGroup // tracks per-chat worker goroutines for graceful drain
+	mu     sync.Mutex
+	chats  map[int64]*chatQueue
+	closed bool
+	wg     sync.WaitGroup // tracks per-chat worker goroutines for graceful drain
+	//nolint:containedctx // root context held for the dispatcher's lifecycle; cancelled in Shutdown via rootStop.
 	rootCtx  context.Context
 	rootStop context.CancelFunc
 }
