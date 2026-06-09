@@ -40,13 +40,11 @@ func NewBotChat(b *bot.Bot) chat.Transport {
 	return &botChat{b: b}
 }
 
-// Capabilities reports Telegram's full feature set: it can edit messages, render
-// an inline Stop button, send documents, and its message cap is 4096 runes. With
-// every flag true the neutral Service behaves exactly as before.
+// Capabilities reports Telegram's full feature set: it can send documents and
+// its message cap is 4096 runes. With these flags the neutral Service behaves
+// exactly as before.
 func (c *botChat) Capabilities() chat.Capabilities {
 	return chat.Capabilities{
-		CanEditMessages: true,
-		CanInlineStop:   true,
 		CanSendDocument: true,
 		MaxMessageRunes: telegramMaxMessageRunes,
 	}

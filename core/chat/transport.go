@@ -56,19 +56,10 @@ type Transport interface {
 	Capabilities() Capabilities
 }
 
-// Capabilities lets the Service adapt to platforms weaker than Telegram. Each
-// flag has a defined fallback so a "false" never breaks delivery. Telegram
-// returns every flag true and MaxMessageRunes 4096, so its behavior is
-// unchanged.
+// Capabilities lets the Service adapt to platforms weaker than Telegram, with a
+// defined fallback so a missing primitive never breaks delivery. Telegram and VK
+// set CanSendDocument true and MaxMessageRunes 4096.
 type Capabilities struct {
-	// CanEditMessages: platform supports editing a sent message. false → the
-	// Service does NOT post a live-updating progress message; it sends the final
-	// answer as a new message (the wall-clock tick edit loop is skipped).
-	CanEditMessages bool
-	// CanInlineStop: platform supports an inline button / callback bound to a
-	// message. false → no Stop button is rendered; Stop is still reachable via a
-	// text command the adapter maps to Service.Stop.
-	CanInlineStop bool
 	// CanSendDocument: platform supports file attachments. false → the outbox
 	// sweep is skipped. (Telegram/VK: true.)
 	CanSendDocument bool

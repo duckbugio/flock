@@ -14,7 +14,7 @@ import (
 )
 
 // stopCommand is the universal text fallback for cancelling the in-flight run,
-// mapped in the receive loop alongside the inline Stop button (CanInlineStop).
+// mapped in the receive loop alongside the inline Stop button.
 const stopCommand = "/stop"
 
 // Service is the subset of *core/chat.Service the receiver drives. The real

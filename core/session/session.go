@@ -17,6 +17,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/duckbugio/flock/internal/atomicfile"
 )
 
 // Store persists chatID -> sessionID durably. The chat id is the transport's
@@ -136,30 +138,8 @@ func (s *FileStore) persistLocked() error {
 	if err != nil {
 		return fmt.Errorf("session: encode store: %w", err)
 	}
-
-	dir := filepath.Dir(s.path)
-	tmp, err := os.CreateTemp(dir, ".sessions-*.tmp")
-	if err != nil {
-		return fmt.Errorf("session: create temp store: %w", err)
-	}
-	tmpName := tmp.Name()
-	// Best-effort cleanup if we bail before the rename; after a successful rename
-	// the temp name no longer exists so the Remove is a harmless no-op.
-	defer func() { _ = os.Remove(tmpName) }()
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("session: write temp store: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("session: sync temp store: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("session: close temp store: %w", err)
-	}
-	if err := os.Rename(tmpName, s.path); err != nil {
-		return fmt.Errorf("session: rename store into place: %w", err)
+	if err := atomicfile.Write(s.path, data, ".sessions-*.tmp"); err != nil {
+		return fmt.Errorf("session: %w", err)
 	}
 	return nil
 }

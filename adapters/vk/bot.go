@@ -49,15 +49,11 @@ func NewBotChat(api *Client, groupID, randSeed int64) chat.Transport {
 	return &botChat{api: api, groupID: groupID, randSeed: randSeed}
 }
 
-// Capabilities reports VK's feature set: it can edit messages (messages.edit),
-// render an inline Stop button (callback keyboard + message_event), send
-// documents (the docs.* dance), and its message cap is 4096 runes. With every
-// flag true the neutral Service drives the full live-progress + Stop-button +
-// outbox path, exactly as on Telegram.
+// Capabilities reports VK's feature set: it can send documents (the docs.*
+// dance), and its message cap is 4096 runes. With these flags the neutral
+// Service drives the full outbox path, exactly as on Telegram.
 func (c *botChat) Capabilities() chat.Capabilities {
 	return chat.Capabilities{
-		CanEditMessages: true,
-		CanInlineStop:   true,
 		CanSendDocument: true,
 		MaxMessageRunes: vkMaxMessageRunes,
 	}

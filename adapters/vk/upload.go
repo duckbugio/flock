@@ -2,20 +2,14 @@ package vk
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
-	"path"
-	"path/filepath"
 	"strconv"
-	"strings"
 	"sync/atomic"
-	"time"
+
+	"github.com/duckbugio/flock/internal/fsutil"
 )
 
 // defaultMaxUploadBytes caps an inbound attachment download. 20 MiB matches the
@@ -28,7 +22,7 @@ const filePerm os.FileMode = 0o600
 
 // ErrUploadTooLarge is returned when the stream exceeds the configured size cap,
 // so the caller can turn it into one friendly notice.
-var ErrUploadTooLarge = errors.New("uploaded file exceeds the size limit")
+var ErrUploadTooLarge = fsutil.ErrUploadTooLarge
 
 // uploadsDirResolver resolves (and creates) a chat's uploads directory. The
 // *workspace.Renderer satisfies it via UploadsDir; tests use a fake. The chat id
@@ -83,7 +77,7 @@ func (u *Uploader) Save(ctx context.Context, chatID int64, url, fileName string)
 		return "", fmt.Errorf("resolve uploads dir: %w", err)
 	}
 
-	dest, err := u.destPath(uploadsDir, fileName)
+	dest, err := fsutil.DestPath(uploadsDir, fileName, &u.seq)
 	if err != nil {
 		return "", err
 	}
@@ -104,68 +98,11 @@ func (u *Uploader) Save(ctx context.Context, chatID int64, url, fileName string)
 		return "", fmt.Errorf("download attachment: status %d", resp.StatusCode)
 	}
 
-	saved, err := u.writeCapped(dest, resp.Body)
+	saved, err := fsutil.WriteCapped(dest, resp.Body, u.maxBytes, filePerm)
 	if err != nil {
 		_ = os.Remove(dest) // best-effort cleanup of a partial file
 		return "", err
 	}
 	u.logger.Debug("saved upload", "chat_id", chatID, "path", saved)
 	return saved, nil
-}
-
-// destPath builds the sanitized, collision-safe absolute destination path inside
-// uploadsDir and asserts the result is contained within it.
-func (u *Uploader) destPath(uploadsDir, fileName string) (string, error) {
-	name := sanitizeUploadName(fileName)
-	prefix := u.uniquePrefix()
-	dest := filepath.Join(uploadsDir, prefix+name)
-
-	rel, err := filepath.Rel(uploadsDir, dest)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("refusing upload path outside uploads dir: %q", fileName)
-	}
-	return dest, nil
-}
-
-// uniquePrefix returns a short collision-safe prefix (timestamp + monotonic
-// counter + random hex) so two uploads with the same sanitized name never clash.
-func (u *Uploader) uniquePrefix() string {
-	var rnd [4]byte
-	_, _ = rand.Read(rnd[:])
-	return fmt.Sprintf("%d-%d-%s-", time.Now().UnixNano(), u.seq.Add(1), hex.EncodeToString(rnd[:]))
-}
-
-// writeCapped streams src into dest under a maxBytes cap (LimitReader). If the
-// source is longer than the cap the file is rejected as oversize rather than
-// silently truncated: we read one extra byte and fail when it is present.
-func (u *Uploader) writeCapped(dest string, src io.Reader) (string, error) {
-	//nolint:gosec // G304: dest is a workspace upload path we construct, not raw user input.
-	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, filePerm)
-	if err != nil {
-		return "", fmt.Errorf("create upload file: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	limited := io.LimitReader(src, u.maxBytes+1)
-	n, err := io.Copy(f, limited)
-	if err != nil {
-		return "", fmt.Errorf("write upload file: %w", err)
-	}
-	if n > u.maxBytes {
-		return "", ErrUploadTooLarge
-	}
-	return dest, nil
-}
-
-// sanitizeUploadName reduces a client-supplied file name to a safe basename that
-// can never escape the uploads dir. Mirrors the Telegram adapter's sanitizer.
-func sanitizeUploadName(name string) string {
-	name = strings.ReplaceAll(name, "\\", "/")
-	name = path.Base(name)
-	name = strings.TrimLeft(name, ".")
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return "upload"
-	}
-	return name
 }

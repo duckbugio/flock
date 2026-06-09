@@ -17,8 +17,8 @@ import (
 func TestCapabilities(t *testing.T) {
 	c := NewBotChat(NewClient("tok"), 100, 1)
 	caps := c.Capabilities()
-	if !caps.CanEditMessages || !caps.CanInlineStop || !caps.CanSendDocument {
-		t.Errorf("capabilities = %+v, want all-true feature flags", caps)
+	if !caps.CanSendDocument {
+		t.Errorf("capabilities = %+v, want CanSendDocument true", caps)
 	}
 	if caps.MaxMessageRunes != vkMaxMessageRunes {
 		t.Errorf("MaxMessageRunes = %d, want %d", caps.MaxMessageRunes, vkMaxMessageRunes)

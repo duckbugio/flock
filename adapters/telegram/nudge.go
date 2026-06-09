@@ -1,8 +1,6 @@
 package telegram
 
 import (
-	"strings"
-
 	"github.com/go-telegram/bot/models"
 )
 
@@ -28,13 +26,6 @@ func starMarkup() models.ReplyMarkup {
 			{Text: starButtonText, CallbackData: starCallbackData},
 		}},
 	}
-}
-
-// IsStarCallback reports whether callback data is a star-confirm callback the
-// Service should handle. Used as the prefix for the bot's callback handler, the
-// same way CallbackMatch drives the Stop handler.
-func IsStarCallback(data string) bool {
-	return strings.HasPrefix(data, starCallbackPrefix)
 }
 
 // StarCallbackPrefix is the callback_data prefix the cmd registers the star
