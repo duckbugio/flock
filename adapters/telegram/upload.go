@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,9 @@ import (
 // Telegram Bot API getFile download limit; an oversize file is rejected with a
 // single friendly notice rather than downloaded.
 const defaultMaxUploadBytes int64 = 20 << 20 // 20 MiB
+
+// filePerm is the owner-only permission for bot-created upload files.
+const filePerm os.FileMode = 0o600
 
 // ErrUploadTooLarge is returned when the source reports (or the stream exceeds)
 // the configured size cap, so the caller can turn it into one friendly notice.
@@ -41,9 +45,11 @@ type Uploader struct {
 }
 
 // uploadsDirResolver resolves (and creates) a chat's uploads directory. The
-// *workspace.Renderer satisfies it via UploadsDir; tests use a fake.
+// *workspace.Renderer satisfies it via UploadsDir; tests use a fake. The chat id
+// is the transport-neutral string id (Telegram's numeric chat id rendered as a
+// string), matching the core/workspace.Renderer signature.
 type uploadsDirResolver interface {
-	UploadsDir(chatID int64) (string, error)
+	UploadsDir(chatID string) (string, error)
 }
 
 // NewUploader builds an Uploader. A nil client defaults to http.DefaultClient, a
@@ -82,7 +88,7 @@ func (u *Uploader) MaxBytes() int64 { return u.maxBytes }
 // undownloadable file returns an error (ErrUploadTooLarge for the size case) the
 // caller turns into one friendly notice; the error never carries the bot token.
 func (u *Uploader) Save(ctx context.Context, chatID int64, fileID, fileName string) (string, error) {
-	uploadsDir, err := u.uploads.UploadsDir(chatID)
+	uploadsDir, err := u.uploads.UploadsDir(strconv.FormatInt(chatID, 10))
 	if err != nil {
 		return "", fmt.Errorf("resolve uploads dir: %w", err)
 	}

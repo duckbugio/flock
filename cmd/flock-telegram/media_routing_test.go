@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,10 +18,11 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"github.com/duckbugio/flock/adapters/telegram"
+	"github.com/duckbugio/flock/core/chat"
 	"github.com/duckbugio/flock/core/claude"
 	"github.com/duckbugio/flock/core/dispatch"
 	"github.com/duckbugio/flock/internal/config"
-	"github.com/duckbugio/flock/internal/telegram"
 )
 
 // recordingRunner records the prompts and image counts it was asked to run and
@@ -58,22 +58,22 @@ func (r *recordingRunner) seen() ([]string, []int) {
 // fakeUploads resolves a per-chat uploads dir under a temp root.
 type fakeUploads struct{ root string }
 
-func (f *fakeUploads) UploadsDir(chatID int64) (string, error) {
-	dir := filepath.Join(f.root, "chat_"+strconv.FormatInt(chatID, 10), "uploads")
+func (f *fakeUploads) UploadsDir(chatID string) (string, error) {
+	dir := filepath.Join(f.root, "chat_"+chatID, "uploads")
 	return dir, os.MkdirAll(dir, 0o750)
 }
 
 // fakeWorkspace returns a fixed workdir.
 type fakeWorkspace struct{ dir string }
 
-func (f *fakeWorkspace) Ensure(int64) (string, error) { return f.dir, nil }
+func (f *fakeWorkspace) Ensure(string) (string, error) { return f.dir, nil }
 
 // mediaTestHarness wires a real Service + Uploader against a fake Telegram API
 // server (counting getFile + file downloads) so the routing in handleMessage can
 // be exercised black-box.
 type mediaTestHarness struct {
 	b          *bot.Bot
-	svc        *telegram.Service
+	svc        *chat.Service
 	up         *telegram.Uploader
 	runner     *recordingRunner
 	disp       *dispatch.Dispatcher
@@ -125,9 +125,9 @@ func newMediaHarness(t *testing.T, maxUpload int64) *mediaTestHarness {
 
 	runner := &recordingRunner{}
 	disp := dispatch.New(2)
-	svc := telegram.New(telegram.Config{
+	svc := chat.New(chat.Config{
 		Runner:     runner,
-		Chat:       telegram.NewBotChat(b),
+		Transport:  telegram.NewBotChat(b),
 		Dispatcher: disp,
 		Workspace:  &fakeWorkspace{dir: t.TempDir()},
 		Logger:     logger,
@@ -161,7 +161,7 @@ func TestMediaGateRejectionZeroWork(t *testing.T) {
 		Document: &models.Document{FileID: "fid", FileName: "doc.pdf"},
 	}
 
-	deps := messageDeps{cfg: cfg, service: h.svc, up: h.up, guards: telegram.GuardConfig{}}
+	deps := messageDeps{cfg: cfg, service: h.svc, up: h.up, guards: chat.GuardConfig{}}
 	handleMessage(context.Background(), deps, h.b, msg, false)
 
 	// Give any erroneous async work a brief chance to run, then assert nothing did.
@@ -189,7 +189,7 @@ func TestDocumentRoutingSubmitsPromptWithPath(t *testing.T) {
 		Document: &models.Document{FileID: "fid", FileName: "report.pdf"},
 	}
 
-	deps := messageDeps{cfg: cfg, service: h.svc, up: h.up, guards: telegram.GuardConfig{}}
+	deps := messageDeps{cfg: cfg, service: h.svc, up: h.up, guards: chat.GuardConfig{}}
 	handleMessage(context.Background(), deps, h.b, msg, false)
 
 	waitFor(t, func() bool {
@@ -230,7 +230,7 @@ func TestPhotoRoutingAttachesImageAndPath(t *testing.T) {
 		},
 	}
 
-	deps := messageDeps{cfg: cfg, service: h.svc, up: h.up, guards: telegram.GuardConfig{}}
+	deps := messageDeps{cfg: cfg, service: h.svc, up: h.up, guards: chat.GuardConfig{}}
 	handleMessage(context.Background(), deps, h.b, msg, false)
 
 	waitFor(t, func() bool {

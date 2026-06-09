@@ -17,7 +17,7 @@ type fakeUploadsResolver struct {
 	dir string
 }
 
-func (f *fakeUploadsResolver) UploadsDir(int64) (string, error) {
+func (f *fakeUploadsResolver) UploadsDir(string) (string, error) {
 	return f.dir, nil
 }
 

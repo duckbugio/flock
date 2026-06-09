@@ -50,7 +50,7 @@ func newTestRenderer(t *testing.T) *Renderer {
 func TestEnsureRendersWorkspace(t *testing.T) {
 	r := newTestRenderer(t)
 
-	ws, err := r.Ensure(123)
+	ws, err := r.Ensure("123")
 	if err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestEnsureRendersWorkspace(t *testing.T) {
 func TestUploadsDir(t *testing.T) {
 	r := newTestRenderer(t)
 
-	dir, err := r.UploadsDir(123)
+	dir, err := r.UploadsDir("123")
 	if err != nil {
 		t.Fatalf("UploadsDir: %v", err)
 	}
@@ -132,11 +132,11 @@ func TestUploadsDir(t *testing.T) {
 // not error (the dir already exists).
 func TestUploadsDirIdempotent(t *testing.T) {
 	r := newTestRenderer(t)
-	first, err := r.UploadsDir(7)
+	first, err := r.UploadsDir("7")
 	if err != nil {
 		t.Fatalf("first UploadsDir: %v", err)
 	}
-	second, err := r.UploadsDir(7)
+	second, err := r.UploadsDir("7")
 	if err != nil {
 		t.Fatalf("second UploadsDir: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestUploadsDirIdempotent(t *testing.T) {
 func TestOutboxDir(t *testing.T) {
 	r := newTestRenderer(t)
 
-	dir, err := r.OutboxDir(123)
+	dir, err := r.OutboxDir("123")
 	if err != nil {
 		t.Fatalf("OutboxDir: %v", err)
 	}
@@ -182,11 +182,11 @@ func TestOutboxDir(t *testing.T) {
 // not error (the dir already exists).
 func TestOutboxDirIdempotent(t *testing.T) {
 	r := newTestRenderer(t)
-	first, err := r.OutboxDir(7)
+	first, err := r.OutboxDir("7")
 	if err != nil {
 		t.Fatalf("first OutboxDir: %v", err)
 	}
-	second, err := r.OutboxDir(7)
+	second, err := r.OutboxDir("7")
 	if err != nil {
 		t.Fatalf("second OutboxDir: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestRenderedClaudeMDHasOutboxSection(t *testing.T) {
 		t.Fatalf("read template before: %v", err)
 	}
 
-	ws, err := r.Ensure(123)
+	ws, err := r.Ensure("123")
 	if err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
@@ -241,10 +241,10 @@ func TestRenderedClaudeMDHasOutboxSection(t *testing.T) {
 func TestEnsureIdempotent(t *testing.T) {
 	r := newTestRenderer(t)
 
-	if _, err := r.Ensure(7); err != nil {
+	if _, err := r.Ensure("7"); err != nil {
 		t.Fatalf("first Ensure: %v", err)
 	}
-	ws, err := r.Ensure(7)
+	ws, err := r.Ensure("7")
 	if err != nil {
 		t.Fatalf("second Ensure: %v", err)
 	}

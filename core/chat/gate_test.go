@@ -1,5 +1,5 @@
 //nolint:testpackage // intentionally whitebox to test unexported telegram gate internals
-package telegram
+package chat
 
 import (
 	"bytes"

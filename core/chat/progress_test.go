@@ -1,5 +1,5 @@
 //nolint:testpackage // intentionally whitebox to test unexported tgui progress rendering internals
-package tgui
+package chat
 
 import (
 	"errors"

@@ -1,31 +1,14 @@
-package telegram
+package chat
 
 import (
 	"context"
 	"log/slog"
-	"strings"
 	"time"
-
-	"github.com/go-telegram/bot/models"
 )
-
-// starCallbackPrefix is the inline-button callback_data prefix for the star
-// nudge's confirm button. It mirrors stopCallbackPrefix: a press routes to the
-// Service via the bot's callback handler, which calls StarPress.
-const starCallbackPrefix = "star:"
-
-// starCallbackData is the full callback_data carried by the star button. The
-// nudge is a single global account action (no per-run id), so a fixed token is
-// enough — unlike the Stop button which embeds a run id.
-const starCallbackData = starCallbackPrefix + "confirm"
 
 // nudgeText is the post-task invitation to star the project. It is short and
 // lightly Duck-flavoured; the duck touch is optional seasoning, not required.
 const nudgeText = "Если flock пригодился — можно поддержать проект звездой на GitHub 🦆"
-
-// starButtonText labels the confirm button. Pressing it triggers the server-side
-// star (a callback button, not a URL button).
-const starButtonText = "⭐ Поставить звезду"
 
 // starDoneText replaces the nudge message after a successful star.
 const starDoneText = "⭐ Спасибо! Звезда поставлена"
@@ -36,6 +19,10 @@ const starFailToast = "Не удалось поставить звезду"
 
 // starOpTimeout bounds a single GitHub stars API call made off the hot path.
 const starOpTimeout = 20 * time.Second
+
+// StarDoneText is the confirmation text the transport edits the nudge message
+// into after a successful star (the button is removed at the same time).
+func StarDoneText() string { return starDoneText }
 
 // starrer checks and sets the deployment account's star on a repo. *ghstar.Client
 // satisfies it; tests use a fake. Methods take owner/repo so the same client can
@@ -79,14 +66,14 @@ type starNudge struct {
 	repo    string
 	client  starrer
 	store   nudgeStore
-	chat    chat
+	chat    Transport
 	log     *slog.Logger
 }
 
 // newStarNudge builds a starNudge from cfg. When cfg.Enabled is false (or its
 // dependencies are missing) it returns a disabled nudge whose methods no-op, so
 // the Service can wire it unconditionally.
-func newStarNudge(cfg StarNudgeConfig, c chat, log *slog.Logger) *starNudge {
+func newStarNudge(cfg StarNudgeConfig, c Transport, log *slog.Logger) *starNudge {
 	enabled := cfg.Enabled && cfg.Client != nil && cfg.Store != nil && cfg.Owner != "" && cfg.Repo != ""
 	return &starNudge{
 		enabled: enabled,
@@ -110,7 +97,7 @@ func (n *starNudge) active() bool {
 // swallows every error at debug level (so it never breaks a run). It is called
 // only after a cleanly successful run. When the repo is already known starred, or
 // the feature is disabled, it does nothing.
-func (n *starNudge) maybeNudge(chatID int64) {
+func (n *starNudge) maybeNudge(chatID ChatID) {
 	if !n.active() {
 		return
 	}
@@ -127,7 +114,7 @@ func (n *starNudge) maybeNudge(chatID int64) {
 // runNudge checks the live star state and either records it (already starred →
 // stop nudging, send nothing) or sends the invitation with a confirm button. All
 // failures are logged at debug and swallowed.
-func (n *starNudge) runNudge(chatID int64) {
+func (n *starNudge) runNudge(chatID ChatID) {
 	// A fresh root context is deliberate: the nudge runs in a detached goroutine
 	// AFTER the run's own ctx may have been cancelled (Stop/timeout), and must not
 	// be torn down with it. It is independently bounded by starOpTimeout.
@@ -192,28 +179,3 @@ func (n *starNudge) handlePress() (toast string, ok bool) {
 	}
 	return starDoneText, true
 }
-
-// starMarkup returns the inline keyboard with the single confirm button used on a
-// nudge message.
-func starMarkup() models.ReplyMarkup {
-	return &models.InlineKeyboardMarkup{
-		InlineKeyboard: [][]models.InlineKeyboardButton{{
-			{Text: starButtonText, CallbackData: starCallbackData},
-		}},
-	}
-}
-
-// IsStarCallback reports whether callback data is a star-confirm callback this
-// Service should handle. Used as the prefix for the bot's callback handler, the
-// same way CallbackMatch drives the Stop handler.
-func IsStarCallback(data string) bool {
-	return strings.HasPrefix(data, starCallbackPrefix)
-}
-
-// StarCallbackPrefix is the callback_data prefix the cmd registers the star
-// handler against (bot.MatchTypePrefix), mirroring CallbackMatch for Stop.
-func StarCallbackPrefix() string { return starCallbackPrefix }
-
-// StarDoneText is the confirmation text the callback handler edits the nudge
-// message into after a successful star (the button is removed at the same time).
-func StarDoneText() string { return starDoneText }

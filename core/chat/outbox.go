@@ -1,4 +1,4 @@
-package telegram
+package chat
 
 import (
 	"context"
@@ -29,20 +29,17 @@ const sentSubdir = "sent"
 // dirPerm is the owner-only permission for bot-created directories.
 const dirPerm os.FileMode = 0o750
 
-// filePerm is the owner-only permission for bot-created files.
-const filePerm os.FileMode = 0o600
-
 // outboxDirResolver resolves (and creates) a chat's outbox directory. The
 // *workspace.Renderer satisfies it via OutboxDir; tests use a fake. This mirrors
 // uploadsDirResolver.
 type outboxDirResolver interface {
-	OutboxDir(chatID int64) (string, error)
+	OutboxDir(chatID ChatID) (string, error)
 }
 
-// documentSender is the subset of chat the Sweeper needs: it uploads one file to
-// a chat as a Telegram document. The botChat (and the test fakes) satisfy it.
+// documentSender is the subset of the Transport the Sweeper needs: it uploads
+// one file to a chat as a document. The Transport (and the test fakes) satisfy it.
 type documentSender interface {
-	SendDocument(ctx context.Context, chatID int64, name string, data io.Reader) error
+	SendDocument(ctx context.Context, chatID ChatID, name string, data io.Reader) error
 }
 
 // Sweeper delivers files a run left in a chat's outbox directory as Telegram
@@ -87,7 +84,7 @@ func NewSweeper(outbox outboxDirResolver, maxBytes int64, maxFiles int, logger *
 // send failure leaves the file in place (NOT archived) so a future sweep can
 // retry. An empty or absent outbox is a no-op. At most maxFiles files are
 // delivered per sweep.
-func (s *Sweeper) Sweep(ctx context.Context, chatID int64, c documentSender) {
+func (s *Sweeper) Sweep(ctx context.Context, chatID ChatID, c documentSender) {
 	outboxDir, err := s.outbox.OutboxDir(chatID)
 	if err != nil {
 		s.logger.Warn("resolve outbox dir", "chat_id", chatID, "error", err)
@@ -125,7 +122,7 @@ func (s *Sweeper) Sweep(ctx context.Context, chatID int64, c documentSender) {
 // solely on real deliveries). It is defensive on every step: a non-regular entry
 // (dir, symlink), an oversize file, an unreadable file, or a send failure is
 // logged and skipped, never panicking or aborting the sweep.
-func (s *Sweeper) deliver(ctx context.Context, chatID int64, outboxDir, name string, c documentSender) bool {
+func (s *Sweeper) deliver(ctx context.Context, chatID ChatID, outboxDir, name string, c documentSender) bool {
 	path := filepath.Join(outboxDir, name)
 
 	// Defense in depth: assert the entry stays directly under outboxDir. ReadDir

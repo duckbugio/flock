@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 )
@@ -17,14 +18,14 @@ func TestSetGet(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 
-	if _, ok := s.Get(42); ok {
+	if _, ok := s.Get("42"); ok {
 		t.Fatal("Get of an unknown chat returned ok=true")
 	}
 
-	if err := s.Set(42, "sess-abc"); err != nil {
+	if err := s.Set("42", "sess-abc"); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
-	got, ok := s.Get(42)
+	got, ok := s.Get("42")
 	if !ok || got != "sess-abc" {
 		t.Fatalf("Get = (%q, %v), want (%q, true)", got, ok, "sess-abc")
 	}
@@ -38,13 +39,13 @@ func TestSetEmptyIsNoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := s.Set(7, "good"); err != nil {
+	if err := s.Set("7", "good"); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
-	if err := s.Set(7, ""); err != nil {
+	if err := s.Set("7", ""); err != nil {
 		t.Fatalf("Set empty: %v", err)
 	}
-	got, ok := s.Get(7)
+	got, ok := s.Get("7")
 	if !ok || got != "good" {
 		t.Fatalf("empty Set overwrote stored id: got (%q, %v)", got, ok)
 	}
@@ -58,10 +59,10 @@ func TestPersistenceAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := s1.Set(100, "sess-100"); err != nil {
+	if err := s1.Set("100", "sess-100"); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
-	if err := s1.Set(200, "sess-200"); err != nil {
+	if err := s1.Set("200", "sess-200"); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
 
@@ -70,10 +71,10 @@ func TestPersistenceAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	for id, want := range map[int64]string{100: "sess-100", 200: "sess-200"} {
+	for id, want := range map[string]string{"100": "sess-100", "200": "sess-200"} {
 		got, ok := s2.Get(id)
 		if !ok || got != want {
-			t.Fatalf("after reopen Get(%d) = (%q, %v), want (%q, true)", id, got, ok, want)
+			t.Fatalf("after reopen Get(%s) = (%q, %v), want (%q, true)", id, got, ok, want)
 		}
 	}
 }
@@ -85,13 +86,13 @@ func TestDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := s.Set(1, "x"); err != nil {
+	if err := s.Set("1", "x"); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
-	if err := s.Delete(1); err != nil {
+	if err := s.Delete("1"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if _, ok := s.Get(1); ok {
+	if _, ok := s.Get("1"); ok {
 		t.Fatal("Get after Delete returned ok=true")
 	}
 
@@ -100,7 +101,7 @@ func TestDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	if _, ok := s2.Get(1); ok {
+	if _, ok := s2.Get("1"); ok {
 		t.Fatal("deleted id reappeared after reopen")
 	}
 }
@@ -114,7 +115,7 @@ func TestAtomicWriteNoCorruption(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	for i := 0; i < 50; i++ {
-		if err := s.Set(int64(i), fmt.Sprintf("sess-%d", i)); err != nil {
+		if err := s.Set(strconv.Itoa(i), fmt.Sprintf("sess-%d", i)); err != nil {
 			t.Fatalf("Set %d: %v", i, err)
 		}
 	}
@@ -142,10 +143,10 @@ func TestMissingFileIsEmptyStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open of missing file: %v", err)
 	}
-	if _, ok := s.Get(1); ok {
+	if _, ok := s.Get("1"); ok {
 		t.Fatal("fresh store reported a stored id")
 	}
-	if err := s.Set(1, "x"); err != nil {
+	if err := s.Set("1", "x"); err != nil {
 		t.Fatalf("Set on fresh store: %v", err)
 	}
 }
@@ -164,11 +165,11 @@ func TestConcurrentSetGetRace(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(goroutines * 2)
 	for g := 0; g < goroutines; g++ {
-		chatID := int64(g)
+		chatID := strconv.Itoa(g)
 		go func() {
 			defer wg.Done()
 			for i := 0; i < iterations; i++ {
-				if err := s.Set(chatID, fmt.Sprintf("sess-%d-%d", chatID, i)); err != nil {
+				if err := s.Set(chatID, fmt.Sprintf("sess-%s-%d", chatID, i)); err != nil {
 					t.Errorf("Set: %v", err)
 					return
 				}

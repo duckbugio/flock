@@ -16,23 +16,24 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 )
 
-// Store persists chatID -> sessionID durably.
+// Store persists chatID -> sessionID durably. The chat id is the transport's
+// opaque string id (see core/chat.ChatID); for Telegram it is the numeric chat
+// id rendered as a string, so the on-disk format is unchanged.
 type Store interface {
 	// Get returns the stored session id for chatID, with ok=false when none is
 	// stored.
-	Get(chatID int64) (sessionID string, ok bool)
+	Get(chatID string) (sessionID string, ok bool)
 	// Set stores sessionID for chatID and persists the change durably before
 	// returning. An empty sessionID is ignored (there is nothing to resume), so
 	// callers can call Set unconditionally with whatever the run captured.
-	Set(chatID int64, sessionID string) error
+	Set(chatID, sessionID string) error
 	// Delete removes any stored session id for chatID and persists the change.
 	// Provided for completeness (e.g. a future /new reset); the timeout path must
 	// NOT call it.
-	Delete(chatID int64) error
+	Delete(chatID string) error
 }
 
 // dirPerm is the owner-only permission for bot-created directories.
@@ -44,7 +45,7 @@ type FileStore struct {
 	path string
 
 	mu       sync.Mutex
-	sessions map[int64]string
+	sessions map[string]string
 }
 
 // Open loads (or creates) a FileStore at path. A missing file yields an empty
@@ -58,7 +59,7 @@ func Open(path string) (*FileStore, error) {
 	if err := os.MkdirAll(filepath.Dir(path), dirPerm); err != nil {
 		return nil, fmt.Errorf("session: create store dir: %w", err)
 	}
-	s := &FileStore{path: path, sessions: map[int64]string{}}
+	s := &FileStore{path: path, sessions: map[string]string{}}
 	if err := s.load(); err != nil {
 		return nil, err
 	}
@@ -67,7 +68,7 @@ func Open(path string) (*FileStore, error) {
 
 // load reads and decodes the backing file. A non-existent file is not an error
 // (a fresh store). The on-disk format is a JSON object keyed by the chat id as a
-// string (JSON object keys must be strings), e.g. {"100":"sess-abc"}.
+// string (JSON object keys are strings), e.g. {"100":"sess-abc"}.
 func (s *FileStore) load() error {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
@@ -84,19 +85,13 @@ func (s *FileStore) load() error {
 		return fmt.Errorf("session: parse store %s: %w", s.path, err)
 	}
 	for k, v := range raw {
-		id, convErr := strconv.ParseInt(k, 10, 64)
-		if convErr != nil {
-			// Skip a malformed key rather than failing the whole load; the store is
-			// best-effort continuity, not authoritative data.
-			continue
-		}
-		s.sessions[id] = v
+		s.sessions[k] = v
 	}
 	return nil
 }
 
 // Get returns the stored session id for chatID.
-func (s *FileStore) Get(chatID int64) (string, bool) {
+func (s *FileStore) Get(chatID string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	id, ok := s.sessions[chatID]
@@ -107,7 +102,7 @@ func (s *FileStore) Get(chatID int64) (string, bool) {
 // sessionID is a no-op so callers can pass whatever a run captured without
 // guarding for the not-yet-known case (and so a failed run never blanks a good
 // stored id).
-func (s *FileStore) Set(chatID int64, sessionID string) error {
+func (s *FileStore) Set(chatID, sessionID string) error {
 	if sessionID == "" {
 		return nil
 	}
@@ -122,7 +117,7 @@ func (s *FileStore) Set(chatID int64, sessionID string) error {
 
 // Delete removes chatID's stored session id and rewrites the file. Deleting an
 // absent chat is a no-op.
-func (s *FileStore) Delete(chatID int64) error {
+func (s *FileStore) Delete(chatID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.sessions[chatID]; !ok {
@@ -137,11 +132,7 @@ func (s *FileStore) Delete(chatID int64) error {
 // or corrupt store (rename is atomic on the same filesystem). The caller must
 // hold s.mu.
 func (s *FileStore) persistLocked() error {
-	raw := make(map[string]string, len(s.sessions))
-	for id, sess := range s.sessions {
-		raw[strconv.FormatInt(id, 10)] = sess
-	}
-	data, err := json.Marshal(raw)
+	data, err := json.Marshal(s.sessions)
 	if err != nil {
 		return fmt.Errorf("session: encode store: %w", err)
 	}

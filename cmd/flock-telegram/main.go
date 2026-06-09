@@ -22,6 +22,8 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"github.com/duckbugio/flock/adapters/telegram"
+	"github.com/duckbugio/flock/core/chat"
 	"github.com/duckbugio/flock/core/claude"
 	"github.com/duckbugio/flock/core/cost"
 	"github.com/duckbugio/flock/core/dispatch"
@@ -34,7 +36,6 @@ import (
 	"github.com/duckbugio/flock/core/voice"
 	"github.com/duckbugio/flock/core/workspace"
 	"github.com/duckbugio/flock/internal/config"
-	"github.com/duckbugio/flock/internal/telegram"
 )
 
 // shutdownDrainTimeout bounds how long Shutdown waits for in-flight runs to
@@ -148,11 +149,11 @@ func run() int {
 	// holders because the bot's handlers close over them. vt may stay nil when
 	// voice is disabled or its provider fails to configure (text still works); up
 	// is always constructed (uploads have no external dependency).
-	var svc *telegram.Service
+	var svc *chat.Service
 	var vt *telegram.VoiceTranscriber
 	var up *telegram.Uploader
 
-	guards := telegram.GuardConfig{CostCapUSD: cfg.ClaudeMaxCostPerUser}
+	guards := chat.GuardConfig{CostCapUSD: cfg.ClaudeMaxCostPerUser}
 
 	opts2 := []bot.Option{
 		bot.WithDefaultHandler(textHandler(cfg, &svc, &vt, &up, limiter, costs, guards)),
@@ -214,7 +215,7 @@ func run() int {
 	// file the run produced as a Telegram document, archiving it under
 	// outbox/sent/. Always constructed; the sweep is a no-op when the outbox is
 	// empty/absent.
-	outbox := telegram.NewSweeper(ws, cfg.MaxOutboxBytes, cfg.MaxOutboxFiles, logger)
+	outbox := chat.NewSweeper(ws, cfg.MaxOutboxBytes, cfg.MaxOutboxFiles, logger)
 
 	// Post-task GitHub star nudge (core/ghstar + core/nudge). GitHub-only and OFF
 	// for every other deploy: the gate IS the off switch (StarNudgeEnabled needs
@@ -224,9 +225,9 @@ func run() int {
 	// and disable the feature rather than crash-loop the bot.
 	starNudge := buildStarNudge(cfg, logger)
 
-	svc = telegram.New(telegram.Config{
+	svc = chat.New(chat.Config{
 		Runner:     runner,
-		Chat:       telegram.NewBotChat(b),
+		Transport:  telegram.NewBotChat(b),
 		Dispatcher: disp,
 		Workspace:  ws,
 		Sessions:   sessions,
@@ -235,6 +236,7 @@ func run() int {
 		StarNudge:  starNudge,
 		Opts:       opts,
 		Timeout:    cfg.ClaudeTimeout(),
+		RetryAfter: telegram.RetryAfter,
 		Logger:     logger,
 	})
 
@@ -277,12 +279,11 @@ func run() int {
 				case <-ctx.Done():
 					return
 				case c := <-out:
-					chatID, err := strconv.ParseInt(c.ChatID, 10, 64)
-					if err != nil {
+					if _, err := strconv.ParseInt(c.ChatID, 10, 64); err != nil {
 						logger.Warn("poller: bad chat id in branch", "chat_id", c.ChatID)
 						continue
 					}
-					svc.Inject(chatID, formatPRComment(c))
+					svc.Inject(c.ChatID, formatPRComment(c))
 				}
 			}
 		}()
@@ -304,12 +305,12 @@ func run() int {
 // enforced by the Dispatcher.
 func textHandler(
 	cfg config.Config,
-	svc **telegram.Service,
+	svc **chat.Service,
 	vt **telegram.VoiceTranscriber,
 	up **telegram.Uploader,
 	limiter *ratelimit.Limiter,
 	costs *cost.Store,
-	guards telegram.GuardConfig,
+	guards chat.GuardConfig,
 ) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		service := *svc
@@ -337,18 +338,19 @@ func textHandler(
 // messages leave vt/up nil (voice and media uploads apply only to new messages).
 type messageDeps struct {
 	cfg     config.Config
-	service *telegram.Service
+	service *chat.Service
 	vt      *telegram.VoiceTranscriber
 	up      *telegram.Uploader
 	limiter *ratelimit.Limiter
 	costs   *cost.Store
-	guards  telegram.GuardConfig
+	guards  chat.GuardConfig
 }
 
 // handleMessage applies the allow-list and the group mention-gate to one message
 // (new or edited) and routes it to the Service. The mention-gate decision is the
-// pure telegram.ShouldHandle; this function only extracts its transport-agnostic
-// inputs from the Telegram message.
+// pure chat.ShouldHandle; this function only extracts its transport-agnostic
+// inputs from the Telegram message (and parses the @username entities the
+// adapter is responsible for).
 func handleMessage(ctx context.Context, deps messageDeps, b *bot.Bot, msg *models.Message, isEdit bool) {
 	cfg, service, vt, up := deps.cfg, deps.service, deps.vt, deps.up
 	limiter, costs, guards := deps.limiter, deps.costs, deps.guards
@@ -383,7 +385,7 @@ func handleMessage(ctx context.Context, deps messageDeps, b *bot.Bot, msg *model
 	isDocument := !isVoice && up != nil && msg.Document != nil
 	isPhoto := !isVoice && !isDocument && up != nil && len(msg.Photo) > 0
 
-	in := telegram.GateInput{
+	in := chat.GateInput{
 		IsGroup:        isGroup(msg.Chat.Type),
 		Text:           rawText,
 		Entities:       toGateEntities(entities),
@@ -392,7 +394,7 @@ func handleMessage(ctx context.Context, deps messageDeps, b *bot.Bot, msg *model
 		BotUserID:      botID(b),
 		RequireMention: cfg.RequireGroupMention,
 	}
-	handle, cleaned := telegram.ShouldHandle(in)
+	handle, cleaned := chat.ShouldHandle(in)
 	if !handle {
 		slog.Debug("group message not addressed to bot — ignoring", "chat_id", msg.Chat.ID)
 		return
@@ -404,7 +406,7 @@ func handleMessage(ctx context.Context, deps messageDeps, b *bot.Bot, msg *model
 	// call and is never submitted to the dispatcher; the user gets a single
 	// professional notice. Disallowed users already returned above, so the guards
 	// only ever see allow-listed senders.
-	if allow, reason := telegram.CheckGuards(limiter, costs, guards, msg.From.ID); !allow {
+	if allow, reason := chat.CheckGuards(limiter, costs, guards, msg.From.ID); !allow {
 		slog.Debug("guardrail denied message", "chat_id", msg.Chat.ID, "user_id", msg.From.ID, "reason", reason)
 		sendCommandReply(ctx, b, msg.Chat.ID, reason)
 		return
@@ -454,18 +456,25 @@ func handleMessage(ctx context.Context, deps messageDeps, b *bot.Bot, msg *model
 	// back-pressure); during shutdown the job is cleanly dropped. Either way no
 	// extra goroutine is needed here.
 	if isEdit {
-		service.HandleEdit(ctx, msg.Chat.ID, msg.From.ID, msg.ID, text)
+		service.HandleEdit(ctx, chatIDStr(msg.Chat.ID), msg.From.ID, msgIDStr(msg.ID), text)
 		return
 	}
-	service.Handle(ctx, msg.Chat.ID, msg.From.ID, msg.ID, text)
+	service.Handle(ctx, chatIDStr(msg.Chat.ID), msg.From.ID, msgIDStr(msg.ID), text)
 }
+
+// chatIDStr renders Telegram's int64 chat id as the transport-neutral string id
+// the core/chat Service uses. msgIDStr does the same for the int message id. The
+// adapter converts them back at its boundary (see adapters/telegram.botChat).
+func chatIDStr(id int64) string { return strconv.FormatInt(id, 10) }
+
+func msgIDStr(id int) string { return strconv.Itoa(id) }
 
 // handleDocument downloads + saves an uploaded document and submits a run whose
 // prompt references the saved path plus the user's caption. The download runs on
 // this update's own goroutine, so the blocking call does not stall the poll loop.
 // Oversize/undownloadable yields one notice (never a silent drop).
 func handleDocument(
-	ctx context.Context, b *bot.Bot, up *telegram.Uploader, service *telegram.Service, msg *models.Message, isEdit bool,
+	ctx context.Context, b *bot.Bot, up *telegram.Uploader, service *chat.Service, msg *models.Message, isEdit bool,
 ) {
 	doc := msg.Document
 	// Reject an oversize file before downloading when Telegram reports its size.
@@ -479,7 +488,7 @@ func handleDocument(
 		sendNotice(ctx, b, msg.Chat.ID, "Sorry, I couldn't save that file.")
 		return
 	}
-	prompt := telegram.DocumentPrompt(savedPath, msg.Caption)
+	prompt := chat.DocumentPrompt(savedPath, msg.Caption)
 	submitMedia(ctx, service, msg, prompt, nil, isEdit)
 }
 
@@ -488,7 +497,7 @@ func handleDocument(
 // is attached as a content block so Claude can see it. The photo is ALWAYS saved
 // to uploads too, giving a no-commit-safe on-disk copy even in vision mode.
 func handlePhoto(
-	ctx context.Context, b *bot.Bot, up *telegram.Uploader, service *telegram.Service, msg *models.Message, isEdit bool,
+	ctx context.Context, b *bot.Bot, up *telegram.Uploader, service *chat.Service, msg *models.Message, isEdit bool,
 ) {
 	photo := largestPhoto(msg.Photo)
 	if photo == nil {
@@ -509,8 +518,8 @@ func handlePhoto(
 		sendNotice(ctx, b, msg.Chat.ID, "Sorry, I couldn't save that image.")
 		return
 	}
-	prompt := telegram.PhotoPrompt(savedPath, msg.Caption)
-	images, err := telegram.LoadPhotoImage(savedPath)
+	prompt := chat.PhotoPrompt(savedPath, msg.Caption)
+	images, err := chat.LoadPhotoImage(savedPath)
 	if err != nil {
 		// Vision attach failed (e.g. unreadable file); fall back to a path-only run
 		// so the user still gets a response referencing the saved image.
@@ -523,13 +532,13 @@ func handlePhoto(
 // submitMedia routes a media-derived run through the Service, mirroring the
 // new-vs-edit split of the text path. Images are non-nil only for a vision run.
 func submitMedia(
-	ctx context.Context, service *telegram.Service, msg *models.Message, prompt string, images []claude.ImageInput, isEdit bool,
+	ctx context.Context, service *chat.Service, msg *models.Message, prompt string, images []claude.ImageInput, isEdit bool,
 ) {
 	if isEdit {
-		service.HandleEditMedia(ctx, msg.Chat.ID, msg.From.ID, msg.ID, prompt, images)
+		service.HandleEditMedia(ctx, chatIDStr(msg.Chat.ID), msg.From.ID, msgIDStr(msg.ID), prompt, images)
 		return
 	}
-	service.HandleMedia(ctx, msg.Chat.ID, msg.From.ID, msg.ID, prompt, images)
+	service.HandleMedia(ctx, chatIDStr(msg.Chat.ID), msg.From.ID, msgIDStr(msg.ID), prompt, images)
 }
 
 // largestPhoto returns the highest-resolution PhotoSize from a Telegram photo
@@ -576,18 +585,18 @@ func botID(b *bot.Bot) int64 {
 }
 
 // toGateEntities maps Telegram message entities to the transport-agnostic
-// telegram.Entity used by the gate, keeping only the mention kinds it cares
+// chat.Entity used by the gate, keeping only the mention kinds it cares
 // about.
-func toGateEntities(entities []models.MessageEntity) []telegram.Entity {
+func toGateEntities(entities []models.MessageEntity) []chat.Entity {
 	if len(entities) == 0 {
 		return nil
 	}
-	out := make([]telegram.Entity, 0, len(entities))
+	out := make([]chat.Entity, 0, len(entities))
 	for _, e := range entities {
 		switch e.Type {
 		case models.MessageEntityTypeMention:
-			out = append(out, telegram.Entity{
-				Type:   telegram.EntityMention,
+			out = append(out, chat.Entity{
+				Type:   chat.EntityMention,
 				Offset: e.Offset,
 				Length: e.Length,
 			})
@@ -596,8 +605,8 @@ func toGateEntities(entities []models.MessageEntity) []telegram.Entity {
 			if e.User != nil {
 				uid = e.User.ID
 			}
-			out = append(out, telegram.Entity{
-				Type:   telegram.EntityTextMention,
+			out = append(out, chat.Entity{
+				Type:   chat.EntityTextMention,
 				Offset: e.Offset,
 				Length: e.Length,
 				UserID: uid,
@@ -613,7 +622,7 @@ func toGateEntities(entities []models.MessageEntity) []telegram.Entity {
 // acknowledges the callback so Telegram clears the button's spinner. Run IDs are
 // sequential and guessable, so we gate the callback on the same allow-list as
 // text messages: a disallowed sender cannot cancel another user's run.
-func stopHandler(cfg config.Config, svc *telegram.Service) bot.HandlerFunc {
+func stopHandler(cfg config.Config, svc *chat.Service) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		cq := update.CallbackQuery
 		if cq == nil {
@@ -654,23 +663,23 @@ func stopHandler(cfg config.Config, svc *telegram.Service) bot.HandlerFunc {
 // missing token, or bad STAR_NUDGE_REPO) or when the durable flag store cannot be
 // opened — both leave the Service path inert. A GitHub client and the nudge store
 // are only constructed when the feature is fully enabled.
-func buildStarNudge(cfg config.Config, logger *slog.Logger) telegram.StarNudgeConfig {
+func buildStarNudge(cfg config.Config, logger *slog.Logger) chat.StarNudgeConfig {
 	if !cfg.StarNudgeEnabled() {
-		return telegram.StarNudgeConfig{}
+		return chat.StarNudgeConfig{}
 	}
 	owner, repo, ok := cfg.StarNudgeRepoParts()
 	if !ok {
 		// Should not happen (StarNudgeEnabled already validated the shape), but stay
 		// fail-safe rather than trust the invariant.
-		return telegram.StarNudgeConfig{}
+		return chat.StarNudgeConfig{}
 	}
 	store, err := nudge.Open(cfg.StarNudgeStoreFile())
 	if err != nil {
 		logger.Error("open star-nudge store; nudge disabled", "path", cfg.StarNudgeStoreFile(), "error", err)
-		return telegram.StarNudgeConfig{}
+		return chat.StarNudgeConfig{}
 	}
 	logger.Info("star nudge enabled", "repo", cfg.StarNudgeRepo)
-	return telegram.StarNudgeConfig{
+	return chat.StarNudgeConfig{
 		Enabled: true,
 		Owner:   owner,
 		Repo:    repo,
@@ -685,7 +694,7 @@ func buildStarNudge(cfg config.Config, logger *slog.Logger) telegram.StarNudgeCo
 // (clearing the button). It is gated by the same allow-list as the Stop callback
 // so a disallowed sender cannot trigger the star. Every failure is soft: the run
 // is never affected.
-func starHandler(cfg config.Config, svc *telegram.Service) bot.HandlerFunc {
+func starHandler(cfg config.Config, svc *chat.Service) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		cq := update.CallbackQuery
 		if cq == nil {
@@ -718,7 +727,7 @@ func starHandler(cfg config.Config, svc *telegram.Service) bot.HandlerFunc {
 			if _, err := b.EditMessageText(ctx, &bot.EditMessageTextParams{
 				ChatID:    cq.Message.Message.Chat.ID,
 				MessageID: cq.Message.Message.ID,
-				Text:      telegram.StarDoneText(),
+				Text:      chat.StarDoneText(),
 			}); err != nil {
 				slog.Debug("edit star nudge message", "error", err)
 			}
@@ -766,13 +775,13 @@ func helpHandler(cfg config.Config) bot.HandlerFunc {
 // newHandler resets the calling chat's session (so the next message starts fresh
 // with no --resume) and confirms. A reset of a chat with no stored session is a
 // harmless no-op that still confirms.
-func newHandler(cfg config.Config, svc *telegram.Service) bot.HandlerFunc {
+func newHandler(cfg config.Config, svc *chat.Service) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		chatID, ok := commandSender(cfg, update.Message)
 		if !ok {
 			return
 		}
-		if err := svc.NewSession(chatID); err != nil {
+		if err := svc.NewSession(chatIDStr(chatID)); err != nil {
 			slog.Error("reset session", "chat_id", chatID, "error", err)
 		}
 		sendCommandReply(ctx, b, chatID, "Started a fresh session. Your next message begins a new conversation.")
@@ -781,14 +790,14 @@ func newHandler(cfg config.Config, svc *telegram.Service) bot.HandlerFunc {
 
 // stopCommandHandler cancels the chat's in-flight run via the same primitive as
 // the inline Stop button and acknowledges. When nothing is running it says so.
-func stopCommandHandler(cfg config.Config, svc *telegram.Service) bot.HandlerFunc {
+func stopCommandHandler(cfg config.Config, svc *chat.Service) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		chatID, ok := commandSender(cfg, update.Message)
 		if !ok {
 			return
 		}
 		text := "Nothing to stop."
-		if svc.StopChat(chatID) {
+		if svc.StopChat(chatIDStr(chatID)) {
 			text = "Stopping the current run."
 		}
 		sendCommandReply(ctx, b, chatID, text)
