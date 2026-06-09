@@ -297,7 +297,7 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 		return
 	}
 
-	handle, cleaned := shouldHandle(isGroup, msg.Text, r.groupID, r.requireMention, false)
+	handle, cleaned := shouldHandle(isGroup, msg.Text, r.groupID, r.requireMention)
 	if !handle {
 		r.logger.Debug("vk: group message not addressed to bot — ignoring", "peer_id", peerID)
 		return

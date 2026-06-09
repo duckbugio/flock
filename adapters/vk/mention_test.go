@@ -36,18 +36,16 @@ func TestShouldHandleGate(t *testing.T) {
 		isGroup        bool
 		text           string
 		requireMention bool
-		replyToBot     bool
 		wantHandle     bool
 		wantCleaned    string
 	}{
-		{"dm always handled", false, "hello", true, false, true, "hello"},
-		{"group no-require always handled", true, "hello", false, false, true, "hello"},
-		{"group require + mention", true, "[club123|Duck] hi", true, false, true, "hi"},
-		{"group require + no mention ignored", true, "hello", true, false, false, "hello"},
-		{"group require + reply handled", true, "hello", true, true, true, "hello"},
+		{"dm always handled", false, "hello", true, true, "hello"},
+		{"group no-require always handled", true, "hello", false, true, "hello"},
+		{"group require + mention", true, "[club123|Duck] hi", true, true, "hi"},
+		{"group require + no mention ignored", true, "hello", true, false, "hello"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			handle, cleaned := shouldHandle(tc.isGroup, tc.text, groupID, tc.requireMention, tc.replyToBot)
+			handle, cleaned := shouldHandle(tc.isGroup, tc.text, groupID, tc.requireMention)
 			if handle != tc.wantHandle {
 				t.Errorf("handle = %v, want %v", handle, tc.wantHandle)
 			}

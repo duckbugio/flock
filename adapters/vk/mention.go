@@ -45,22 +45,18 @@ func parseMention(text string, groupID int64) (mentioned bool, stripped string) 
 //
 // Rules (identical to the neutral gate): DMs and groups with requireMention=false
 // are always handled; a group with requireMention=true is handled only when the
-// message mentions this community (or, supplied by the caller, replies to the
-// bot — VK reply detection is handled upstream). The returned cleaned text always
-// has this community's mention stripped, even when handle is false.
-func shouldHandle(isGroup bool, text string, groupID int64, requireMention, replyToBot bool) (handle bool, cleaned string) {
+// message mentions this community. The returned cleaned text always has this
+// community's mention stripped, even when handle is false.
+func shouldHandle(isGroup bool, text string, groupID int64, requireMention bool) (handle bool, cleaned string) {
 	mentioned, cleaned := parseMention(text, groupID)
 
 	// The decision mirrors core/chat.ShouldHandle exactly (DMs and non-require
-	// groups always handled; a require-mention group needs a mention or a reply),
-	// but the addressed/stripped inputs are pre-resolved here because VK mentions
-	// are textual [club<id>|...] tokens, not the entity spans the neutral gate
-	// parses for Telegram — so this is the VK half of the §4 mention-gate split.
+	// groups always handled; a require-mention group needs a mention), but the
+	// addressed/stripped inputs are pre-resolved here because VK mentions are
+	// textual [club<id>|...] tokens, not the entity spans the neutral gate parses
+	// for Telegram — so this is the VK half of the §4 mention-gate split.
 	if !isGroup || !requireMention {
 		return true, cleaned
 	}
-	if replyToBot || mentioned {
-		return true, cleaned
-	}
-	return false, cleaned
+	return mentioned, cleaned
 }
