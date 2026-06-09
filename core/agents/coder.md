@@ -35,6 +35,10 @@ nothing more. Commit with a clear message and push to the SAME branch; the PR up
 automatically. Do NOT open a new PR. Briefly note what you changed per comment so the
 reviewer can re-check.
 
+- **No AI self-attribution.** Commit messages and PR text must never reference Claude, Anthropic,
+  or AI authorship — no `Co-Authored-By` trailers, no "Generated with Claude Code", no robot emoji.
+  Write as the engineering team.
+
 If reality diverges from the plan (it's wrong or incomplete), STOP and report back instead of
 forcing it through.
 

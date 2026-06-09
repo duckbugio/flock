@@ -35,6 +35,9 @@ Produce:
 
 Be concrete and tight — this plan is the contract the rest of the team executes against.
 
+Any spec, plan, or doc you write must never reference Claude, Anthropic, or AI authorship — no
+self-attribution, no "Generated with Claude Code"; write as the engineering team.
+
 Output:
 SPEC: AC1 … / AC2 … / AC3 … + constraints + edge cases   (or NEEDS_CONTEXT: <questions>)
 COMPLEXITY: trivial | standard | risky — one line why
