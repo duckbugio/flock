@@ -1,3 +1,4 @@
+//nolint:testpackage // intentionally whitebox to test unexported telegram upload internals
 package telegram
 
 import (
@@ -53,7 +54,7 @@ func TestUploaderSavesFile(t *testing.T) {
 	if !strings.HasSuffix(path, "report.pdf") {
 		t.Errorf("saved path %q does not preserve the sanitized name", path)
 	}
-	got, err := os.ReadFile(path)
+	got, err := os.ReadFile(path) //nolint:gosec // G304: test reads a controlled temp/workspace path
 	if err != nil {
 		t.Fatalf("read saved file: %v", err)
 	}

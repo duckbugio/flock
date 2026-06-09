@@ -37,7 +37,7 @@ func PhotoPrompt(savedPath, caption string) string {
 // from the file extension. The caller attaches the result to the run so Claude
 // can see the image; on a read error the caller falls back to a path-only run.
 func LoadPhotoImage(savedPath string) ([]claude.ImageInput, error) {
-	data, err := os.ReadFile(savedPath)
+	data, err := os.ReadFile(savedPath) //nolint:gosec // G304: path from a workspace upload we wrote, not raw user input.
 	if err != nil {
 		return nil, fmt.Errorf("read photo for vision: %w", err)
 	}

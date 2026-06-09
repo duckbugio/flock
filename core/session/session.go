@@ -12,6 +12,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -49,9 +50,9 @@ type FileStore struct {
 // persisted, which is how sessions survive a process restart.
 func Open(path string) (*FileStore, error) {
 	if path == "" {
-		return nil, fmt.Errorf("session: store path is empty")
+		return nil, errors.New("session: store path is empty")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("session: create store dir: %w", err)
 	}
 	s := &FileStore{path: path, sessions: map[int64]string{}}

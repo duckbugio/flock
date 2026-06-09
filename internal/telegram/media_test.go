@@ -1,3 +1,4 @@
+//nolint:testpackage // intentionally whitebox to test unexported telegram media routing internals
 package telegram
 
 import (

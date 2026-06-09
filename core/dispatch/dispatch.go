@@ -27,11 +27,11 @@ type job struct {
 // Shutdown — there is no closed channel to send on. Once a Dispatcher is
 // unreferenced, GC reclaims its queues and channels.
 //
-// TODO(stage-4+): per-chat worker goroutines are never reaped while the
+// Known limitation: per-chat worker goroutines are never reaped while the
 // dispatcher lives; a long-running process accumulates one idle goroutine per
-// distinct chat ID. Add an idle-reaper (close+delete a chat's queue after an
-// idle timeout, recreating it on the next Submit) when chat churn warrants it.
-// Out of Stage 3 scope.
+// distinct chat ID. A future idle-reaper (close+delete a chat's queue after an
+// idle timeout, recreating it on the next Submit) could bound this when chat
+// churn warrants it.
 type chatQueue struct {
 	ch chan job
 
@@ -64,6 +64,7 @@ func New(maxConcurrent int) *Dispatcher {
 	if maxConcurrent < 1 {
 		maxConcurrent = 1
 	}
+	//nolint:gosec // G118: cancel is stored as rootStop and invoked in Shutdown.
 	root, stop := context.WithCancel(context.Background())
 	return &Dispatcher{
 		sem:      semaphore.NewWeighted(int64(maxConcurrent)),

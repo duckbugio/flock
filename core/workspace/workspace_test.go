@@ -1,3 +1,4 @@
+//nolint:testpackage // intentionally whitebox to test unexported workspace helpers
 package workspace
 
 import (
@@ -17,21 +18,21 @@ func newTestRenderer(t *testing.T) *Renderer {
 
 	tmpl := filepath.Join(src, "CLAUDE.workspace.md.tmpl")
 	tmplBody := "cycles=${PRE_PR_CYCLES} review=${PR_REVIEW_CYCLES} enable=${ENABLE_PR_REVIEW} host=${GIT_HOST} keep=${OTHER_VAR}\n"
-	if err := os.WriteFile(tmpl, []byte(tmplBody), 0o644); err != nil {
+	if err := os.WriteFile(tmpl, []byte(tmplBody), 0o600); err != nil {
 		t.Fatalf("write template: %v", err)
 	}
 
 	agents := filepath.Join(src, "agents")
-	if err := os.MkdirAll(agents, 0o755); err != nil {
+	if err := os.MkdirAll(agents, 0o750); err != nil {
 		t.Fatalf("mkdir agents: %v", err)
 	}
 	for _, name := range []string{"arbiter.md", "coder.md"} {
-		if err := os.WriteFile(filepath.Join(agents, name), []byte("# "+name), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(agents, name), []byte("# "+name), 0o600); err != nil {
 			t.Fatalf("write agent %s: %v", name, err)
 		}
 	}
 	// A non-md file must be ignored.
-	if err := os.WriteFile(filepath.Join(agents, "notes.txt"), []byte("ignore"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(agents, "notes.txt"), []byte("ignore"), 0o600); err != nil {
 		t.Fatalf("write notes: %v", err)
 	}
 
@@ -63,7 +64,7 @@ func TestEnsureRendersWorkspace(t *testing.T) {
 	}
 
 	// CLAUDE.md substituted the three vars and left the unrelated one intact.
-	body, err := os.ReadFile(filepath.Join(ws, "CLAUDE.md"))
+	body, err := os.ReadFile(filepath.Join(ws, "CLAUDE.md")) //nolint:gosec // G304: test reads a controlled temp/workspace path
 	if err != nil {
 		t.Fatalf("read CLAUDE.md: %v", err)
 	}
@@ -211,7 +212,7 @@ func TestRenderedClaudeMDHasOutboxSection(t *testing.T) {
 		t.Fatalf("Ensure: %v", err)
 	}
 
-	body, err := os.ReadFile(filepath.Join(ws, "CLAUDE.md"))
+	body, err := os.ReadFile(filepath.Join(ws, "CLAUDE.md")) //nolint:gosec // G304: test reads a controlled temp/workspace path
 	if err != nil {
 		t.Fatalf("read CLAUDE.md: %v", err)
 	}
@@ -249,7 +250,7 @@ func TestEnsureIdempotent(t *testing.T) {
 	}
 
 	// CLAUDE.md is still present and correct after the second call.
-	body, err := os.ReadFile(filepath.Join(ws, "CLAUDE.md"))
+	body, err := os.ReadFile(filepath.Join(ws, "CLAUDE.md")) //nolint:gosec // G304: test reads a controlled temp/workspace path
 	if err != nil {
 		t.Fatalf("read CLAUDE.md: %v", err)
 	}

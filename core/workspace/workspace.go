@@ -47,7 +47,7 @@ type Renderer struct {
 func (r *Renderer) Ensure(chatID int64) (string, error) {
 	ws := filepath.Join(r.BaseDir, fmt.Sprintf("chat_%d", chatID))
 	agentsDst := filepath.Join(ws, ".claude", "agents")
-	if err := os.MkdirAll(agentsDst, 0o755); err != nil {
+	if err := os.MkdirAll(agentsDst, 0o750); err != nil {
 		return "", fmt.Errorf("create workspace dirs: %w", err)
 	}
 
@@ -69,7 +69,7 @@ func (r *Renderer) Ensure(chatID int64) (string, error) {
 // when BaseDir is absolute.
 func (r *Renderer) UploadsDir(chatID int64) (string, error) {
 	dir := filepath.Join(r.BaseDir, fmt.Sprintf("chat_%d", chatID), "uploads")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", fmt.Errorf("create uploads dir: %w", err)
 	}
 	return dir, nil
@@ -86,7 +86,7 @@ func (r *Renderer) UploadsDir(chatID int64) (string, error) {
 // when BaseDir is absolute.
 func (r *Renderer) OutboxDir(chatID int64) (string, error) {
 	dir := filepath.Join(r.BaseDir, fmt.Sprintf("chat_%d", chatID), "outbox")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", fmt.Errorf("create outbox dir: %w", err)
 	}
 	return dir, nil
@@ -134,7 +134,8 @@ func (r *Renderer) renderClaudeMD(ws string) error {
 	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove stale CLAUDE.md: %w", err)
 	}
-	if err := os.WriteFile(dst, []byte(rendered), 0o644); err != nil {
+	//nolint:gosec // G703: dst is a join of internal base dirs and a constant filename, not user-controlled.
+	if err := os.WriteFile(dst, []byte(rendered), 0o600); err != nil {
 		return fmt.Errorf("write CLAUDE.md: %w", err)
 	}
 	return nil
@@ -156,7 +157,8 @@ func (r *Renderer) copyAgents(agentsDst string) error {
 		if err != nil {
 			return fmt.Errorf("read agent %s: %w", e.Name(), err)
 		}
-		if err := os.WriteFile(filepath.Join(agentsDst, e.Name()), data, 0o644); err != nil {
+		//nolint:gosec // G703: path is a join of an internal dir and a directory entry name, not user-controlled.
+		if err := os.WriteFile(filepath.Join(agentsDst, e.Name()), data, 0o600); err != nil {
 			return fmt.Errorf("write agent %s: %w", e.Name(), err)
 		}
 	}

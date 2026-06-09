@@ -1,3 +1,4 @@
+//nolint:testpackage // intentionally whitebox to test unexported telegram run loop internals
 package telegram
 
 import (
@@ -20,6 +21,17 @@ import (
 	"github.com/duckbugio/flock/core/dispatch"
 	"github.com/duckbugio/flock/core/session"
 	"github.com/duckbugio/flock/internal/tgui"
+)
+
+// Shared fixture values used across multiple run-loop tests.
+const (
+	finalAnswer  = "final answer"
+	sessShutdown = "sess-shutdown"
+	// anchorMsgID is the id of the first message the fake chat hands out, which is
+	// the progress/answer anchor every single-run test inspects.
+	anchorMsgID = 1
+	// testChatID is the chat id the shutdown tests submit under.
+	testChatID = 100
 )
 
 // TestRetryAfter checks the Telegram-429 detector that drives the rate-limit
@@ -99,7 +111,7 @@ func (f *fakeChat) editCount() int {
 	return f.edits
 }
 
-func (f *fakeChat) StreamDraft(_ context.Context, _ int64, _ string, text string, asMarkdown bool) error {
+func (f *fakeChat) StreamDraft(_ context.Context, _ int64, _, text string, asMarkdown bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.draftErr != nil {
@@ -133,10 +145,10 @@ func (f *fakeChat) sentDocs() []string {
 	return append([]string(nil), f.docs...)
 }
 
-func (f *fakeChat) snapshot(id int) (string, bool) {
+func (f *fakeChat) snapshot() (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.texts[id], f.hasStop[id]
+	return f.texts[anchorMsgID], f.hasStop[anchorMsgID]
 }
 
 // fakeWorkspace returns a fixed path and records the chat ids it was asked for.
@@ -226,10 +238,10 @@ func (f *fakeSessions) Delete(chatID int64) error {
 	return nil
 }
 
-func (f *fakeSessions) get(chatID int64) (string, bool) {
+func (f *fakeSessions) get() (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	id, ok := f.store[chatID]
+	id, ok := f.store[testChatID]
 	return id, ok
 }
 
@@ -254,7 +266,7 @@ func newTestService(t *testing.T, r claude.Runner, c chat) (*Service, *dispatch.
 		Chat:       c,
 		Dispatcher: d,
 		Workspace:  &fakeWorkspace{},
-		Logger:     slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})),
+		Logger:     slog.New(slog.DiscardHandler),
 	})
 	s.tick = 5 * time.Millisecond // speed up the wall-clock ticker for tests
 	return s, d
@@ -262,7 +274,9 @@ func newTestService(t *testing.T, r claude.Runner, c chat) (*Service, *dispatch.
 
 // newTestServiceWithSessions builds a Service wired to a session store (and an
 // optional per-run timeout) for the Stage 5 continuity/timeout tests.
-func newTestServiceWithSessions(t *testing.T, r claude.Runner, c chat, sess sessionStore, timeout time.Duration) (*Service, *dispatch.Dispatcher) {
+func newTestServiceWithSessions(
+	t *testing.T, r claude.Runner, c chat, sess sessionStore, timeout time.Duration,
+) (*Service, *dispatch.Dispatcher) {
 	t.Helper()
 	d := dispatch.New(4)
 	s := New(Config{
@@ -272,7 +286,7 @@ func newTestServiceWithSessions(t *testing.T, r claude.Runner, c chat, sess sess
 		Workspace:  &fakeWorkspace{},
 		Sessions:   sess,
 		Timeout:    timeout,
-		Logger:     slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})),
+		Logger:     slog.New(slog.DiscardHandler),
 	})
 	s.tick = 5 * time.Millisecond
 	return s, d
@@ -335,7 +349,7 @@ func TestRunRendersProgressThenFinal(t *testing.T) {
 		{Type: claude.SystemInit, SessionID: "s1"},
 		{Type: claude.ToolUse, Tool: "Bash"},
 		{Type: claude.Text, Text: "all done"},
-		{Type: claude.Result, Result: &claude.RunResult{Text: "final answer", SessionID: "s1"}},
+		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer, SessionID: "s1"}},
 	}}
 	svc, d := newTestService(t, fr, fc)
 	defer d.Close()
@@ -345,8 +359,8 @@ func TestRunRendersProgressThenFinal(t *testing.T) {
 	// The progress message (id 1) should eventually hold the final answer with no
 	// Stop button.
 	waitUntil(t, func() bool {
-		text, stop := fc.snapshot(1)
-		return text == "final answer" && !stop
+		text, stop := fc.snapshot()
+		return text == finalAnswer && !stop
 	})
 }
 
@@ -358,7 +372,7 @@ func TestRunStreamsProgressAsDraftThenClears(t *testing.T) {
 	fr := &fakeRunner{events: []claude.Event{
 		{Type: claude.SystemInit, SessionID: "s1"},
 		{Type: claude.ToolUse, Tool: "Bash"},
-		{Type: claude.Result, Result: &claude.RunResult{Text: "final answer", SessionID: "s1"}},
+		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer, SessionID: "s1"}},
 	}}
 	svc, d := newTestService(t, fr, fc)
 	defer d.Close()
@@ -366,8 +380,8 @@ func TestRunStreamsProgressAsDraftThenClears(t *testing.T) {
 	svc.Handle(context.Background(), 100, 100, 1, "hello")
 
 	waitUntil(t, func() bool {
-		text, stop := fc.snapshot(1)
-		return text == "final answer" && !stop
+		text, stop := fc.snapshot()
+		return text == finalAnswer && !stop
 	})
 
 	fc.mu.Lock()
@@ -404,7 +418,7 @@ func TestRunFallsBackToEditsWhenDraftFails(t *testing.T) {
 	fc.draftErr = errors.New("drafts unsupported")
 	fr := &fakeRunner{events: []claude.Event{
 		{Type: claude.ToolUse, Tool: "Bash"},
-		{Type: claude.Result, Result: &claude.RunResult{Text: "final answer"}},
+		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer}},
 	}}
 	svc, d := newTestService(t, fr, fc)
 	defer d.Close()
@@ -413,8 +427,8 @@ func TestRunFallsBackToEditsWhenDraftFails(t *testing.T) {
 
 	// Despite drafts failing, the answer still lands — delivered by editing the anchor.
 	waitUntil(t, func() bool {
-		text, stop := fc.snapshot(1)
-		return text == "final answer" && !stop
+		text, stop := fc.snapshot()
+		return text == finalAnswer && !stop
 	})
 
 	fc.mu.Lock()
@@ -468,7 +482,7 @@ func TestEditFallbackRespectsMinInterval(t *testing.T) {
 
 	// Wait until the anchor exists (the run is up and in fallback mode).
 	waitUntil(t, func() bool {
-		_, stop := fc.snapshot(1)
+		_, stop := fc.snapshot()
 		return stop
 	})
 
@@ -493,11 +507,11 @@ func TestEditFallbackRespectsMinInterval(t *testing.T) {
 
 	// The counter advanced across windows: the anchor text shows the elapsed seconds
 	// climbing past the first window, proving the throttle didn't park render().
-	text, _ := fc.snapshot(1)
+	text, _ := fc.snapshot()
 	if !strings.Contains(text, "Working") {
 		t.Fatalf("anchor not showing progress: %q", text)
 	}
-	wantSecs := int((windows * 5 * int(step)) / int(time.Second))
+	wantSecs := (windows * 5 * int(step)) / int(time.Second)
 	if wantSecs > 0 && !strings.Contains(text, "("+strconv.Itoa(wantSecs)+"s)") &&
 		!strings.Contains(text, "("+strconv.Itoa(wantSecs-1)+"s)") &&
 		!strings.Contains(text, "("+strconv.Itoa(wantSecs-2)+"s)") {
@@ -525,7 +539,7 @@ func TestRunChunksLongFinal(t *testing.T) {
 	})
 
 	// First chunk replaces the progress message; the remainder is a new Send.
-	first, _ := fc.snapshot(1)
+	first, _ := fc.snapshot()
 	if utf8.RuneCountInString(first) > tgui.TelegramMaxMessage {
 		t.Fatalf("first chunk too big: %d", utf8.RuneCountInString(first))
 	}
@@ -541,7 +555,7 @@ func TestRunErrorEvent(t *testing.T) {
 	svc.Handle(context.Background(), 100, 100, 1, "go")
 
 	waitUntil(t, func() bool {
-		text, _ := fc.snapshot(1)
+		text, _ := fc.snapshot()
 		return strings.Contains(text, "boom")
 	})
 }
@@ -562,7 +576,7 @@ func TestStopCancelsRun(t *testing.T) {
 	waitUntil(t, func() bool { return svc.Stop("1") })
 
 	waitUntil(t, func() bool {
-		text, stop := fc.snapshot(1)
+		text, stop := fc.snapshot()
 		return strings.Contains(text, "Stopped") && !stop
 	})
 	close(gate) // unblock any lingering goroutine
@@ -578,7 +592,7 @@ func TestWorkspaceErrorSurfaced(t *testing.T) {
 		Chat:       fc,
 		Dispatcher: d,
 		Workspace:  &fakeWorkspace{err: errors.New("no workspace")},
-		Logger:     slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})),
+		Logger:     slog.New(slog.DiscardHandler),
 	})
 	svc.tick = 5 * time.Millisecond
 
@@ -606,7 +620,7 @@ func TestSerialWithinChat(t *testing.T) {
 	// behind it (serial), so only one progress message exists while the first runs.
 	svc.Handle(context.Background(), 100, 100, 1, "first")
 	waitUntil(t, func() bool {
-		_, stop := fc.snapshot(1)
+		_, stop := fc.snapshot()
 		return stop // first run posted its progress message
 	})
 
@@ -778,7 +792,7 @@ func TestSessionPersistedAndResumed(t *testing.T) {
 	// captured session_id is persisted.
 	svc.Handle(context.Background(), 100, 100, 1, "hello")
 	waitUntil(t, func() bool {
-		id, ok := sess.get(100)
+		id, ok := sess.get()
 		return ok && id == "sess-xyz"
 	})
 
@@ -813,13 +827,13 @@ func TestSessionPreservedOnTimeout(t *testing.T) {
 	// Despite the run timing out before any Result, the SystemInit session_id must
 	// remain stored (NOT discarded/deleted).
 	waitUntil(t, func() bool {
-		id, ok := sess.get(100)
+		id, ok := sess.get()
 		return ok && id == "sess-timeout"
 	})
 
 	// And the user sees a terminal "Stopped" notice (timeout cancels delivery).
 	waitUntil(t, func() bool {
-		text, stop := fc.snapshot(1)
+		text, stop := fc.snapshot()
 		return strings.Contains(text, "Stopped") && !stop
 	})
 
@@ -872,15 +886,15 @@ func TestSessionPreservedOnShutdown(t *testing.T) {
 	sess := newFakeSessions()
 	// gate is never closed: the run blocks after SystemInit until Shutdown cancels
 	// its context, mimicking a SIGTERM mid-run.
-	fr := &sessionRunner{emitInit: "sess-shutdown", emitFinal: "sess-shutdown", gate: make(chan struct{})}
+	fr := &sessionRunner{emitInit: sessShutdown, emitFinal: sessShutdown, gate: make(chan struct{})}
 	svc, d := newTestServiceWithSessions(t, fr, fc, sess, 0)
 
 	svc.Handle(context.Background(), 100, 100, 1, "long task")
 
 	// Wait until the run has emitted SystemInit and persisted the session id.
 	waitUntil(t, func() bool {
-		id, ok := sess.get(100)
-		return ok && id == "sess-shutdown"
+		id, ok := sess.get()
+		return ok && id == sessShutdown
 	})
 
 	// Drain: cancel in-flight runs within a bounded budget (as main does on
@@ -892,12 +906,12 @@ func TestSessionPreservedOnShutdown(t *testing.T) {
 	}
 
 	// The session id captured at SystemInit must survive the shutdown intact.
-	if id, ok := sess.get(100); !ok || id != "sess-shutdown" {
-		t.Fatalf("after shutdown Get = (%q, %v), want (%q, true)", id, ok, "sess-shutdown")
+	if id, ok := sess.get(); !ok || id != sessShutdown {
+		t.Fatalf("after shutdown Get = (%q, %v), want (%q, true)", id, ok, sessShutdown)
 	}
 	// And it was Set before the cancel delivered (storeSession-on-SystemInit), so
 	// exactly the init id is recorded.
-	if log := sess.sets(); len(log) == 0 || log[0] != "sess-shutdown" {
+	if log := sess.sets(); len(log) == 0 || log[0] != sessShutdown {
 		t.Fatalf("setLog = %v, want first = sess-shutdown", log)
 	}
 }
@@ -910,7 +924,9 @@ func (f fixedOutbox) OutboxDir(int64) (string, error) { return f.dir, nil }
 
 // newTestServiceWithOutbox builds a Service wired to a Sweeper over a fixed
 // outbox dir (and an optional per-run timeout) for the AC2 finish-path tests.
-func newTestServiceWithOutbox(t *testing.T, r claude.Runner, c chat, dir string, timeout time.Duration) (*Service, *dispatch.Dispatcher) {
+func newTestServiceWithOutbox(
+	t *testing.T, r claude.Runner, c chat, dir string, timeout time.Duration,
+) (*Service, *dispatch.Dispatcher) {
 	t.Helper()
 	d := dispatch.New(4)
 	s := New(Config{
@@ -918,9 +934,9 @@ func newTestServiceWithOutbox(t *testing.T, r claude.Runner, c chat, dir string,
 		Chat:       c,
 		Dispatcher: d,
 		Workspace:  &fakeWorkspace{},
-		Outbox:     NewSweeper(fixedOutbox{dir: dir}, 0, 0, slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))),
+		Outbox:     NewSweeper(fixedOutbox{dir: dir}, 0, 0, slog.New(slog.DiscardHandler)),
 		Timeout:    timeout,
-		Logger:     slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})),
+		Logger:     slog.New(slog.DiscardHandler),
 	})
 	s.tick = 5 * time.Millisecond
 	return s, d
@@ -930,12 +946,12 @@ func newTestServiceWithOutbox(t *testing.T, r claude.Runner, c chat, dir string,
 // is delivered as a document AND the text answer is still delivered (AC2).
 func TestOutboxSweptOnNormalResult(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "report.txt"), []byte("hi"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "report.txt"), []byte("hi"), 0o600); err != nil {
 		t.Fatalf("seed outbox: %v", err)
 	}
 	fc := newFakeChat()
 	fr := &fakeRunner{events: []claude.Event{
-		{Type: claude.Result, Result: &claude.RunResult{Text: "final answer"}},
+		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer}},
 	}}
 	svc, d := newTestServiceWithOutbox(t, fr, fc, dir, 0)
 	defer d.Close()
@@ -944,8 +960,8 @@ func TestOutboxSweptOnNormalResult(t *testing.T) {
 
 	// The text answer reaches the progress message.
 	waitUntil(t, func() bool {
-		text, _ := fc.snapshot(1)
-		return text == "final answer"
+		text, _ := fc.snapshot()
+		return text == finalAnswer
 	})
 	// And the outbox file is delivered as a document and archived.
 	waitUntil(t, func() bool {
@@ -963,7 +979,7 @@ func TestOutboxSweptOnNormalResult(t *testing.T) {
 // because finish uses deliverCtx (context.WithoutCancel).
 func TestOutboxSweptOnStopCancel(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "partial.txt"), []byte("data"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "partial.txt"), []byte("data"), 0o600); err != nil {
 		t.Fatalf("seed outbox: %v", err)
 	}
 	fc := newFakeChat()
@@ -980,7 +996,7 @@ func TestOutboxSweptOnStopCancel(t *testing.T) {
 
 	// The terminal "Stopped" notice is delivered.
 	waitUntil(t, func() bool {
-		text, _ := fc.snapshot(1)
+		text, _ := fc.snapshot()
 		return strings.Contains(text, "Stopped")
 	})
 	// Despite the cancelled run ctx, the outbox file is still swept on deliverCtx.

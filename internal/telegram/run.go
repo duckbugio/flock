@@ -54,17 +54,17 @@ type chat interface {
 	// Send posts a new message with optional Stop markup and returns its id. When
 	// asMarkdown is true the text is rendered as Telegram HTML (with a plain-text
 	// fallback on a parse error); false sends it verbatim as plain text.
-	Send(ctx context.Context, chatID int64, text string, stopRunID string, asMarkdown bool) (messageID int, err error)
+	Send(ctx context.Context, chatID int64, text, stopRunID string, asMarkdown bool) (messageID int, err error)
 	// Edit updates an existing message's text (and Stop markup, when stopRunID
 	// is non-empty; empty clears the markup). asMarkdown behaves as for Send.
-	Edit(ctx context.Context, chatID int64, messageID int, text string, stopRunID string, asMarkdown bool) error
+	Edit(ctx context.Context, chatID int64, messageID int, text, stopRunID string, asMarkdown bool) error
 	// StreamDraft streams text as an ephemeral live "draft" preview keyed by
 	// draftID: repeated calls update the same preview (rate-limit-free, unlike
 	// Edit) and an empty text clears it. Used for live run progress; the answer is
 	// persisted with Send/Edit. asMarkdown behaves as for Send/Edit (ignored when
 	// text is empty). Returns an error when the chat can't stream a draft,
 	// so the caller can fall back to editing a normal message.
-	StreamDraft(ctx context.Context, chatID int64, draftID string, text string, asMarkdown bool) error
+	StreamDraft(ctx context.Context, chatID int64, draftID, text string, asMarkdown bool) error
 	// Delete removes a message; failures are non-fatal to the caller.
 	Delete(ctx context.Context, chatID int64, messageID int) error
 	// SendDocument uploads a file to the chat as a Telegram document. The data is
@@ -184,6 +184,9 @@ func New(cfg Config) *Service {
 // sending Telegram user, carried through so the run can attribute its cost to
 // that user for the cumulative per-user cost cap (plan §9b).
 func (s *Service) Handle(_ context.Context, chatID, userID int64, msgID int, prompt string) {
+	// context.Background is deliberate: the run must outlive the per-update context
+	// (it runs under the Dispatcher's per-chat context, not the handler's).
+	//nolint:contextcheck // intentionally detached; see doc comment.
 	s.HandleMedia(context.Background(), chatID, userID, msgID, prompt, nil)
 }
 
@@ -272,6 +275,8 @@ func (s *Service) Stop(runID string) bool {
 // into the renderer, edit on a wall-clock tick, and replace the progress message
 // with the final (chunked) answer. The ctx is cancelled by Stop / Dispatcher
 // shutdown.
+//
+//nolint:gocyclo // orchestrates the single-run lifecycle with best-effort fallbacks.
 func (s *Service) run(ctx context.Context, chatID, userID int64, prompt string, images []claude.ImageInput) {
 	runID := strconv.FormatUint(s.runSeq.Add(1), 10)
 	s.mu.Lock()
@@ -379,14 +384,14 @@ func (s *Service) run(ctx context.Context, chatID, userID int64, prompt string, 
 			return
 		}
 		if draftStreaming {
-			if err := s.chat.StreamDraft(ctx, chatID, runID, frame, true); err != nil {
-				// Drafts unsupported here: edit the anchor for the rest of the run.
-				draftStreaming = false
-				s.log.Debug("draft stream failed; falling back to edits", "error", err)
-			} else {
+			err := s.chat.StreamDraft(ctx, chatID, runID, frame, true)
+			if err == nil {
 				lastSent = frame
 				return
 			}
+			// Drafts unsupported here: edit the anchor for the rest of the run.
+			draftStreaming = false
+			s.log.Debug("draft stream failed; falling back to edits", "error", err)
 		}
 		// Fallback: edit the anchor. Skip while rate-limited so we don't hammer the
 		// throttled endpoint (which prolongs the back-off and starves final delivery).
@@ -490,7 +495,9 @@ func (s *Service) storeSession(chatID int64, sessionID string) {
 
 // finish renders the terminal message and replaces the progress message with it
 // (chunked when the answer exceeds the Telegram size limit).
-func (s *Service) finish(ctx context.Context, chatID int64, progressMsgID int, runID string, res *claude.RunResult, runErr, ctxErr error) {
+func (s *Service) finish(
+	ctx context.Context, chatID int64, progressMsgID int, runID string, res *claude.RunResult, runErr, ctxErr error,
+) {
 	// Use a background context for delivery: the run ctx may be cancelled by Stop
 	// or shutdown, but the final message should still reach the user.
 	deliverCtx := context.WithoutCancel(ctx)
@@ -511,6 +518,7 @@ func (s *Service) finish(ctx context.Context, chatID int64, progressMsgID int, r
 
 	// Replace the progress message with the first chunk (clearing Stop markup);
 	// send any further chunks as new messages.
+	//nolint:nestif // the edit-then-resend fallback is a single cohesive delivery path.
 	if progressMsgID != 0 {
 		if err := s.deliverWithBackoff(deliverCtx, "edit final", func() error {
 			return s.chat.Edit(deliverCtx, chatID, progressMsgID, chunks[0], "", true)

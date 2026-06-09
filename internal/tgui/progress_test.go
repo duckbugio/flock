@@ -1,3 +1,4 @@
+//nolint:testpackage // intentionally whitebox to test unexported tgui progress rendering internals
 package tgui
 
 import (

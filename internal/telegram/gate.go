@@ -160,7 +160,7 @@ func entitySlice(text string, ent Entity) string {
 // characters.
 func utf16Slice(text string, start, end int) string {
 	units := 0
-	var startByte, endByte = -1, len(text)
+	startByte, endByte := -1, len(text)
 	if start == 0 {
 		startByte = 0
 	}

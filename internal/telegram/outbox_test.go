@@ -1,3 +1,4 @@
+//nolint:testpackage // intentionally whitebox to test unexported telegram outbox internals
 package telegram
 
 import (
@@ -47,7 +48,7 @@ type fakeOutbox struct{ dir string }
 func (f fakeOutbox) OutboxDir(int64) (string, error) { return f.dir, nil }
 
 func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	return slog.New(slog.DiscardHandler)
 }
 
 func newTestSweeper(dir string, maxBytes int64, maxFiles int) *Sweeper {
@@ -56,7 +57,7 @@ func newTestSweeper(dir string, maxBytes int64, maxFiles int) *Sweeper {
 
 func writeFile(t *testing.T, dir, name string, data []byte) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
 		t.Fatalf("write %s: %v", name, err)
 	}
 }
@@ -91,7 +92,7 @@ func TestSweepSkipsSubdirsAndSymlinks(t *testing.T) {
 
 	// A subdirectory with a file inside: must NOT be recursed into.
 	sub := filepath.Join(dir, "nested")
-	if err := os.MkdirAll(sub, 0o755); err != nil {
+	if err := os.MkdirAll(sub, 0o750); err != nil {
 		t.Fatalf("mkdir nested: %v", err)
 	}
 	writeFile(t, sub, "deep.txt", []byte("deep"))
@@ -99,7 +100,7 @@ func TestSweepSkipsSubdirsAndSymlinks(t *testing.T) {
 	// A pre-existing sent/ archive dir with a file: must be skipped (never
 	// re-swept).
 	sentDir := filepath.Join(dir, "sent")
-	if err := os.MkdirAll(sentDir, 0o755); err != nil {
+	if err := os.MkdirAll(sentDir, 0o750); err != nil {
 		t.Fatalf("mkdir sent: %v", err)
 	}
 	writeFile(t, sentDir, "old.txt", []byte("old"))
@@ -107,7 +108,7 @@ func TestSweepSkipsSubdirsAndSymlinks(t *testing.T) {
 	// A symlink pointing OUTSIDE the outbox (to a secret file): must never be
 	// followed/sent.
 	outside := filepath.Join(t.TempDir(), "secret.txt")
-	if err := os.WriteFile(outside, []byte("secret"), 0o644); err != nil {
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
 		t.Fatalf("write outside: %v", err)
 	}
 	if err := os.Symlink(outside, filepath.Join(dir, "link.txt")); err != nil {

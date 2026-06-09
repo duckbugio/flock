@@ -1,3 +1,4 @@
+//nolint:testpackage // intentionally whitebox to test unexported gitsetup helpers
 package gitsetup
 
 import (
@@ -10,6 +11,7 @@ import (
 // gitConfigGet reads a global git config value with HOME pointed at dir.
 func gitConfigGet(t *testing.T, home, key string) (string, bool) {
 	t.Helper()
+	//nolint:gosec,noctx // G204/noctx: test invokes git/sh with controlled args; no ctx needed in a test helper
 	cmd := exec.Command("git", "config", "--global", "--get", key)
 	cmd.Env = append([]string{"HOME=" + home}, "GIT_CONFIG_NOSYSTEM=1")
 	out, err := cmd.Output()
@@ -111,6 +113,7 @@ func TestHelperReadsEnv(t *testing.T) {
 	// leading "!" is git's own marker (run via shell) and is stripped before the
 	// command reaches the shell, so we strip it here too.
 	shellCmd := strings.TrimPrefix(credentialHelperValue, "!")
+	//nolint:gosec,noctx // G204/noctx: test invokes git/sh with controlled args; no ctx needed in a test helper
 	cmd := exec.Command("sh", "-c", shellCmd+" get")
 	cmd.Env = []string{"GIT_USER=alice", "GIT_TOKEN=s3cr3t"}
 	out, err := cmd.Output()

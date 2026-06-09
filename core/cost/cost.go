@@ -14,6 +14,7 @@ package cost
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,9 +40,9 @@ type Store struct {
 // is how accumulated totals survive a process restart.
 func Open(path string) (*Store, error) {
 	if path == "" {
-		return nil, fmt.Errorf("cost: store path is empty")
+		return nil, errors.New("cost: store path is empty")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("cost: create store dir: %w", err)
 	}
 	s := &Store{path: path, totals: map[int64]float64{}}

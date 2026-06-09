@@ -1,3 +1,4 @@
+//nolint:testpackage // intentionally whitebox to test unexported session store internals
 package session
 
 import (

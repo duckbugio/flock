@@ -1,3 +1,4 @@
+//nolint:testpackage // intentionally whitebox to test unexported dispatch routing internals
 package dispatch
 
 import (
@@ -28,7 +29,7 @@ func TestParallelAcrossChats(t *testing.T) {
 	release := make(chan struct{})
 
 	for _, id := range []int64{1, 2} {
-		d.Submit(id, func(ctx context.Context) {
+		d.Submit(id, func(_ context.Context) {
 			entered <- struct{}{}
 			<-release
 		})
@@ -175,7 +176,7 @@ func TestCancelDrainsQueued(t *testing.T) {
 }
 
 // TestCancelUnknownChatNoop ensures Cancel on an idle/unknown chat is harmless.
-func TestCancelUnknownChatNoop(t *testing.T) {
+func TestCancelUnknownChatNoop(_ *testing.T) {
 	d := New(2)
 	defer d.Close()
 	d.Cancel(999) // must not panic
@@ -210,7 +211,7 @@ func TestShutdownDrains(t *testing.T) {
 // channels; selecting the send against rootCtx.Done()) means no Submit can ever
 // send on a closed/abandoned channel, so the only acceptable outcome is "no
 // panic, every call returns". Run under -race -count=N to make the race likely.
-func TestSubmitRacesShutdown(t *testing.T) {
+func TestSubmitRacesShutdown(_ *testing.T) {
 	// Repeat internally so a single `go test -race` run still hits the window
 	// many times even without -count.
 	for iter := 0; iter < 50; iter++ {

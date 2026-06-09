@@ -11,8 +11,8 @@ type tail struct {
 	max int
 }
 
-func newTail(max int) *tail {
-	return &tail{max: max}
+func newTail(maxBytes int) *tail {
+	return &tail{max: maxBytes}
 }
 
 func (t *tail) Write(p []byte) (int, error) {

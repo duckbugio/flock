@@ -1,3 +1,4 @@
+//nolint:testpackage // intentionally whitebox to test unexported telegram voice handling internals
 package telegram
 
 import (

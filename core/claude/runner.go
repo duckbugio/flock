@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -121,7 +122,11 @@ func (r *runner) Run(ctx context.Context, prompt string, o Options) (<-chan Even
 
 	args := buildArgs(o, prompt, stdinMode)
 
-	cmd := exec.Command(r.bin, args...) //nolint:gosec // bin+args are caller-controlled, not user input
+	// exec.Command (not CommandContext) is deliberate: cancellation is handled in
+	// stream() by killing the whole process GROUP, since CommandContext would only
+	// signal the direct child and leak the CLI's Node + tool subprocesses.
+	//nolint:gosec,noctx // bin+args are caller-controlled; ctx drives a process-group kill in stream().
+	cmd := exec.Command(r.bin, args...)
 	cmd.Dir = o.Workdir
 	if len(o.Env) > 0 {
 		cmd.Env = o.Env
@@ -229,8 +234,8 @@ func userMessageEnvelope(prompt string, images []ImageInput) ([]byte, error) {
 			},
 		})
 	}
-	env := inputEnvelope{Type: "user"}
-	env.Message.Role = "user"
+	env := inputEnvelope{Type: roleUser}
+	env.Message.Role = roleUser
 	env.Message.Content = content
 	b, err := json.Marshal(env)
 	if err != nil {
@@ -259,7 +264,7 @@ type inputBlock struct {
 
 type inputImageSource struct {
 	Type      string `json:"type"`
-	MediaType string `json:"media_type"`
+	MediaType string `json:"media_type"` //nolint:tagliatelle // Claude CLI emits snake_case.
 	Data      string `json:"data"`
 }
 
@@ -411,7 +416,7 @@ func exitError(waitErr error, stderrTail *tail, scanErr error) error {
 		if tail != "" {
 			return fmt.Errorf("claude ended without a result event: %s", tail)
 		}
-		return fmt.Errorf("claude ended without a result event")
+		return errors.New("claude ended without a result event")
 	}
 }
 

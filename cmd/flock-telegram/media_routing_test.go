@@ -60,7 +60,7 @@ type fakeUploads struct{ root string }
 
 func (f *fakeUploads) UploadsDir(chatID int64) (string, error) {
 	dir := filepath.Join(f.root, "chat_"+strconv.FormatInt(chatID, 10), "uploads")
-	return dir, os.MkdirAll(dir, 0o755)
+	return dir, os.MkdirAll(dir, 0o750)
 }
 
 // fakeWorkspace returns a fixed workdir.
@@ -102,10 +102,12 @@ func newMediaHarness(t *testing.T, maxUpload int64) *mediaTestHarness {
 	})
 	// sendMessage / editMessageText: progress + final delivery (always ok).
 	okResult := func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		if err := json.NewEncoder(w).Encode(map[string]any{
 			"ok":     true,
 			"result": map[string]any{"message_id": 1, "chat": map[string]any{"id": 1}, "date": 0},
-		})
+		}); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
 	}
 	mux.HandleFunc("/bot123:ABC/sendMessage", okResult)
 	mux.HandleFunc("/bot123:ABC/editMessageText", okResult)
@@ -117,7 +119,7 @@ func newMediaHarness(t *testing.T, maxUpload int64) *mediaTestHarness {
 		t.Fatalf("bot.New: %v", err)
 	}
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	logger := slog.New(slog.DiscardHandler)
 	uploadsRoot := t.TempDir()
 	up := telegram.NewUploader(telegram.NewBotFileSource(b), srv.Client(), &fakeUploads{root: uploadsRoot}, maxUpload, logger)
 
@@ -159,7 +161,8 @@ func TestMediaGateRejectionZeroWork(t *testing.T) {
 		Document: &models.Document{FileID: "fid", FileName: "doc.pdf"},
 	}
 
-	handleMessage(context.Background(), h.b, cfg, h.svc, nil, h.up, nil, nil, telegram.GuardConfig{}, msg, false)
+	deps := messageDeps{cfg: cfg, service: h.svc, up: h.up, guards: telegram.GuardConfig{}}
+	handleMessage(context.Background(), deps, h.b, msg, false)
 
 	// Give any erroneous async work a brief chance to run, then assert nothing did.
 	time.Sleep(50 * time.Millisecond)
@@ -186,7 +189,8 @@ func TestDocumentRoutingSubmitsPromptWithPath(t *testing.T) {
 		Document: &models.Document{FileID: "fid", FileName: "report.pdf"},
 	}
 
-	handleMessage(context.Background(), h.b, cfg, h.svc, nil, h.up, nil, nil, telegram.GuardConfig{}, msg, false)
+	deps := messageDeps{cfg: cfg, service: h.svc, up: h.up, guards: telegram.GuardConfig{}}
+	handleMessage(context.Background(), deps, h.b, msg, false)
 
 	waitFor(t, func() bool {
 		prompts, _ := h.runner.seen()
@@ -226,7 +230,8 @@ func TestPhotoRoutingAttachesImageAndPath(t *testing.T) {
 		},
 	}
 
-	handleMessage(context.Background(), h.b, cfg, h.svc, nil, h.up, nil, nil, telegram.GuardConfig{}, msg, false)
+	deps := messageDeps{cfg: cfg, service: h.svc, up: h.up, guards: telegram.GuardConfig{}}
+	handleMessage(context.Background(), deps, h.b, msg, false)
 
 	waitFor(t, func() bool {
 		prompts, _ := h.runner.seen()

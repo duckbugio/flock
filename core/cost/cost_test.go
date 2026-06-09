@@ -1,3 +1,4 @@
+//nolint:testpackage // intentionally whitebox to test unexported cost ledger internals
 package cost
 
 import (
@@ -22,24 +23,24 @@ func openTemp(t *testing.T) (*Store, string) {
 func TestAddAccumulatesAndCaps(t *testing.T) {
 	s, _ := openTemp(t)
 	const (
-		user int64   = 100
-		cap  float64 = 1.0
+		user     int64   = 100
+		capLimit float64 = 1.0
 	)
 
-	if !s.Allowed(user, cap) {
+	if !s.Allowed(user, capLimit) {
 		t.Fatal("fresh user should be under the cap")
 	}
 	if err := s.Add(user, 0.4); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	if !s.Allowed(user, cap) {
+	if !s.Allowed(user, capLimit) {
 		t.Fatal("0.4 < 1.0 cap, should still be allowed")
 	}
 	if err := s.Add(user, 0.6); err != nil {
 		t.Fatalf("add: %v", err)
 	}
 	// Total is now exactly 1.0 == cap: Allowed denies at >= cap (reactive cap).
-	if s.Allowed(user, cap) {
+	if s.Allowed(user, capLimit) {
 		t.Fatal("total == cap should deny the next request")
 	}
 }

@@ -35,7 +35,7 @@ type botFileSource struct {
 }
 
 // NewBotFileSource adapts a *bot.Bot to the fileSource used by VoiceTranscriber.
-func NewBotFileSource(b *bot.Bot) fileSource { //nolint:revive // returns unexported interface by design
+func NewBotFileSource(b *bot.Bot) fileSource {
 	return &botFileSource{b: b}
 }
 
@@ -67,7 +67,9 @@ type VoiceTranscriber struct {
 // NewVoiceTranscriber builds a VoiceTranscriber. A nil client defaults to
 // http.DefaultClient, a non-positive maxBytes to defaultMaxVoiceBytes, and a nil
 // logger to slog.Default().
-func NewVoiceTranscriber(source fileSource, client *http.Client, transcriber voice.Transcriber, maxBytes int64, logger *slog.Logger) *VoiceTranscriber {
+func NewVoiceTranscriber(
+	source fileSource, client *http.Client, transcriber voice.Transcriber, maxBytes int64, logger *slog.Logger,
+) *VoiceTranscriber {
 	if client == nil {
 		client = http.DefaultClient
 	}

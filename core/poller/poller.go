@@ -87,10 +87,10 @@ type notification struct {
 	ID      json.Number `json:"id"`
 	Subject struct {
 		URL              string `json:"url"`
-		LatestCommentURL string `json:"latest_comment_url"`
+		LatestCommentURL string `json:"latest_comment_url"` //nolint:tagliatelle // Gitea API uses snake_case.
 	} `json:"subject"`
 	Repository struct {
-		FullName string `json:"full_name"`
+		FullName string `json:"full_name"` //nolint:tagliatelle // Gitea API uses snake_case.
 	} `json:"repository"`
 }
 
@@ -104,7 +104,7 @@ type pull struct {
 	} `json:"head"`
 	Base struct {
 		Repo struct {
-			FullName string `json:"full_name"`
+			FullName string `json:"full_name"` //nolint:tagliatelle // Gitea API uses snake_case.
 		} `json:"repo"`
 	} `json:"base"`
 }

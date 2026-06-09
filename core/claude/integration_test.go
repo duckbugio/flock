@@ -1,5 +1,6 @@
 //go:build integration
 
+//nolint:testpackage // intentionally whitebox to test unexported runner internals
 package claude
 
 import (
@@ -48,6 +49,8 @@ func TestIntegration_RealCLI(t *testing.T) {
 			result = e.Result
 		case RunError:
 			runErr = e.Err
+		default:
+			// Other event types are not asserted by this test.
 		}
 	}
 

@@ -49,7 +49,9 @@ type uploadsDirResolver interface {
 // NewUploader builds an Uploader. A nil client defaults to http.DefaultClient, a
 // non-positive maxBytes to defaultMaxUploadBytes, and a nil logger to
 // slog.Default().
-func NewUploader(source fileSource, client *http.Client, uploads uploadsDirResolver, maxBytes int64, logger *slog.Logger) *Uploader {
+func NewUploader(
+	source fileSource, client *http.Client, uploads uploadsDirResolver, maxBytes int64, logger *slog.Logger,
+) *Uploader {
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -158,7 +160,8 @@ func (u *Uploader) uniquePrefix() string {
 // source is longer than the cap the file is rejected as oversize rather than
 // silently truncated: we read one extra byte and fail when it is present.
 func (u *Uploader) writeCapped(dest string, src io.Reader) (string, error) {
-	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	//nolint:gosec // G304: dest is a workspace upload path we construct, not raw user input.
+	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("create upload file: %w", err)
 	}

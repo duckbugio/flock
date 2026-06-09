@@ -175,7 +175,7 @@ func (s *Sweeper) deliver(ctx context.Context, chatID int64, outboxDir, name str
 // (created on first use), preserving it rather than deleting it (AC1/AC5).
 func (s *Sweeper) archive(outboxDir, name string) error {
 	sentDir := filepath.Join(outboxDir, sentSubdir)
-	if err := os.MkdirAll(sentDir, 0o755); err != nil {
+	if err := os.MkdirAll(sentDir, 0o750); err != nil {
 		return fmt.Errorf("create sent dir: %w", err)
 	}
 	if err := os.Rename(filepath.Join(outboxDir, name), filepath.Join(sentDir, name)); err != nil {

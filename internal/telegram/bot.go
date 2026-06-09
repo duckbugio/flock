@@ -17,7 +17,7 @@ type botChat struct {
 }
 
 // NewBotChat adapts a *bot.Bot to the chat interface used by Service.
-func NewBotChat(b *bot.Bot) chat { //nolint:revive // returns unexported interface by design
+func NewBotChat(b *bot.Bot) chat {
 	return &botChat{b: b}
 }
 

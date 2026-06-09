@@ -1,9 +1,9 @@
+//nolint:testpackage // intentionally whitebox to test unexported poller internals
 package poller
 
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +15,7 @@ import (
 
 // slogDiscard returns a logger that drops all output, keeping test output clean.
 func slogDiscard() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+	return slog.New(slog.DiscardHandler)
 }
 
 // fakeGitea serves canned notifications, a pull, a comment, and records PATCH
@@ -35,7 +35,7 @@ func newFakeGitea(t *testing.T, pr pull, c comment) *fakeGitea {
 	f := &fakeGitea{pull: pr, comment: c, commentOK: true}
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/notifications", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/notifications", func(w http.ResponseWriter, _ *http.Request) {
 		base := strings.TrimRight(f.server.URL, "/")
 		threads := []map[string]any{{
 			"id": "42",
@@ -48,11 +48,11 @@ func newFakeGitea(t *testing.T, pr pull, c comment) *fakeGitea {
 		writeJSON(w, threads)
 	})
 
-	mux.HandleFunc("/repos/owner/repo/pulls/7", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/owner/repo/pulls/7", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, f.pull)
 	})
 
-	mux.HandleFunc("/repos/owner/repo/issues/comments/100", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/owner/repo/issues/comments/100", func(w http.ResponseWriter, _ *http.Request) {
 		if f.commentHijack {
 			// Hijack and immediately close the connection so the client sees a
 			// transport error (EOF) rather than an HTTP status — simulating the
@@ -93,11 +93,16 @@ func (f *fakeGitea) markedRead() []string {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		panic(err)
+	}
 }
 
+// selfLogin is the bot's own Gitea login used across the poller tests.
+const selfLogin = "duckbot"
+
 // newPoller builds a poller pointed at the fake server.
-func newPoller(f *fakeGitea, selfLogin string) *poller {
+func newPoller(f *fakeGitea) *poller {
 	return &poller{
 		base:      strings.TrimRight(f.server.URL, "/"),
 		token:     "tok",
@@ -123,7 +128,7 @@ func TestPollOnceEmitsComment(t *testing.T) {
 			Login string `json:"login"`
 		}{Login: "Reviewer"}},
 	)
-	p := newPoller(f, "duckbot")
+	p := newPoller(f)
 
 	out := make(chan PRComment, 1)
 	ctx := context.Background()
@@ -162,7 +167,7 @@ func TestPollOnceSkipsSelfComment(t *testing.T) {
 			Login string `json:"login"`
 		}{Login: "DuckBot"}},
 	)
-	p := newPoller(f, "duckbot")
+	p := newPoller(f)
 
 	out := make(chan PRComment, 1)
 	p.pollOnce(context.Background(), out)
@@ -184,7 +189,7 @@ func TestPollOnceSkipsNonDuckBranch(t *testing.T) {
 			Login string `json:"login"`
 		}{Login: "Reviewer"}},
 	)
-	p := newPoller(f, "duckbot")
+	p := newPoller(f)
 
 	out := make(chan PRComment, 1)
 	p.pollOnce(context.Background(), out)
@@ -207,7 +212,7 @@ func TestPollOnceSkipsClosedPR(t *testing.T) {
 			Login string `json:"login"`
 		}{Login: "Reviewer"}},
 	)
-	p := newPoller(f, "duckbot")
+	p := newPoller(f)
 
 	out := make(chan PRComment, 1)
 	p.pollOnce(context.Background(), out)
@@ -230,7 +235,7 @@ func TestPollOnceSkipsMergedPR(t *testing.T) {
 			Login string `json:"login"`
 		}{Login: "Reviewer"}},
 	)
-	p := newPoller(f, "duckbot")
+	p := newPoller(f)
 
 	out := make(chan PRComment, 1)
 	p.pollOnce(context.Background(), out)
@@ -257,7 +262,7 @@ func TestPollOnceCommentTransportErrorLeavesUnread(t *testing.T) {
 		}{Login: "Reviewer"}},
 	)
 	f.commentHijack = true
-	p := newPoller(f, "duckbot")
+	p := newPoller(f)
 
 	out := make(chan PRComment, 1)
 	p.pollOnce(context.Background(), out)

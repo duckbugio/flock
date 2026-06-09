@@ -166,12 +166,12 @@ func (p *Progress) Frame() string {
 	// frameBudgetMax. Drop the OLDEST lines first until it fits.
 	assemble := func(ringLines []string) string {
 		var b strings.Builder
-		b.WriteString(header)
+		_, _ = b.WriteString(header)
 		// A blank line sets the activity ("thoughts") apart from the Working header.
-		b.WriteString("\n")
+		_, _ = b.WriteString("\n")
 		for _, line := range ringLines {
-			b.WriteByte('\n')
-			b.WriteString(line)
+			_ = b.WriteByte('\n')
+			_, _ = b.WriteString(line)
 		}
 		return b.String()
 	}
@@ -257,9 +257,9 @@ func truncateRunes(s string, maxRunes int) string {
 		if n >= maxRunes-1 {
 			break
 		}
-		b.WriteRune(r)
+		_, _ = b.WriteRune(r)
 		n++
 	}
-	b.WriteRune('…')
+	_, _ = b.WriteRune('…')
 	return b.String()
 }
