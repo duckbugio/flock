@@ -362,6 +362,17 @@ func TestFinalErrorResult(t *testing.T) {
 		t.Fatalf("empty error result not flagged: %q", empty)
 	}
 
+	// Diagnostic: an empty-bodied error Result surfaces the subtype so the cause
+	// isn't fully opaque.
+	withSub := Final(&claude.RunResult{Text: "", IsError: true, Subtype: "error_max_turns"})
+	if !strings.Contains(withSub, "error_max_turns") {
+		t.Fatalf("empty error result should include the subtype: %q", withSub)
+	}
+	// With no subtype the plain fallback is kept (no empty parentheses).
+	if empty != "⚠️ the run ended with an error" {
+		t.Fatalf("empty error result without subtype should use the plain fallback: %q", empty)
+	}
+
 	if got := Final(&claude.RunResult{Text: "", IsError: false}); got != "(empty response)" {
 		t.Fatalf("empty success placeholder: %q", got)
 	}

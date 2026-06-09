@@ -271,7 +271,13 @@ func Final(res *claude.RunResult) string {
 	text := strings.TrimSpace(res.Text)
 	if res.IsError {
 		if text == "" {
-			text = "the run ended with an error"
+			// Surface the result subtype (e.g. "error_max_turns") when present so the
+			// cause isn't fully opaque; fall back to the plain message otherwise.
+			if res.Subtype != "" {
+				text = "the run ended with an error (" + res.Subtype + ")"
+			} else {
+				text = "the run ended with an error"
+			}
 		}
 		return "⚠️ " + text
 	}

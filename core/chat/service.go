@@ -313,10 +313,14 @@ func (s *Service) run(ctx context.Context, chatID ChatID, userID int64, prompt s
 
 	// Resume this chat's stored Claude session so the run continues its context
 	// (empty = a fresh session). Continuity survives restarts because the store is
-	// durable and reloaded on startup.
+	// durable and reloaded on startup. resuming records whether THIS run carried a
+	// non-empty resume id, so a terminal is_error Result can self-heal a stale/
+	// poisoned session id (see the clear after the event loop).
+	resuming := false
 	if s.sessions != nil {
-		if sid, ok := s.sessions.Get(chatID); ok {
+		if sid, ok := s.sessions.Get(chatID); ok && sid != "" {
 			opts.SessionID = sid
+			resuming = true
 		}
 	}
 
@@ -470,6 +474,20 @@ loop:
 	s.recordCost(userID, finalResult)
 
 	s.finish(ctx, chatID, progressMsgID, runID, finalResult, finalErr, ctx.Err())
+
+	// Self-heal a stale/poisoned resume id: when a run that USED a resume session
+	// id terminates with an is_error Result, drop the stored session for this chat
+	// so the NEXT message starts fresh (no --resume) instead of re-failing forever.
+	// This fires ONLY on an is_error Result while resuming — never on a clean
+	// Result, a RunError (a process/transport crash, likely transient — keep the
+	// context for a retry), or a Stop/timeout (finalResult nil). storeSession may
+	// have just re-persisted the id from this Result, so clear it here regardless.
+	if resuming && finalErr == nil && ctx.Err() == nil && finalResult != nil && finalResult.IsError {
+		s.log.Info("clearing session after error during resume; next message starts fresh", "chat_id", chatID)
+		if err := s.sessions.Delete(chatID); err != nil {
+			s.log.Error("clear session after error", "chat_id", chatID, "error", err)
+		}
+	}
 
 	// Post-task GitHub star nudge. Fire ONLY on a cleanly successful run (a
 	// terminal Result with no error and no cancel/timeout) so a failed, stopped,

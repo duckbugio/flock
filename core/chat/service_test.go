@@ -921,6 +921,161 @@ func TestSessionPreservedOnShutdown(t *testing.T) {
 	}
 }
 
+// errorResultRunner emits a SystemInit (so the session id is captured) followed
+// by a terminal Result whose IsError flag is configurable. It lets the
+// stale-session self-heal tests drive an is_error vs a clean Result. When init is
+// empty no SystemInit is emitted (a fresh run with no captured session id).
+type errorResultRunner struct {
+	init    string
+	isError bool
+}
+
+func (r *errorResultRunner) Run(ctx context.Context, _ string, _ claude.Options) (<-chan claude.Event, error) {
+	out := make(chan claude.Event)
+	go func() {
+		defer close(out)
+		if r.init != "" {
+			if !emit(ctx, out, claude.Event{Type: claude.SystemInit, SessionID: r.init}) {
+				return
+			}
+		}
+		emit(ctx, out, claude.Event{Type: claude.Result, Result: &claude.RunResult{
+			Text:      "done",
+			SessionID: r.init,
+			IsError:   r.isError,
+		}})
+	}()
+	return out, nil
+}
+
+// runErrorRunner emits a SystemInit (capturing the session id) then a RunError —
+// a process/transport crash, distinct from an is_error Result.
+type runErrorRunner struct{ init string }
+
+func (r *runErrorRunner) Run(ctx context.Context, _ string, _ claude.Options) (<-chan claude.Event, error) {
+	out := make(chan claude.Event)
+	go func() {
+		defer close(out)
+		if !emit(ctx, out, claude.Event{Type: claude.SystemInit, SessionID: r.init}) {
+			return
+		}
+		emit(ctx, out, claude.Event{Type: claude.RunError, Err: errors.New("transport crash")})
+	}()
+	return out, nil
+}
+
+// TestSessionClearedOnErrorResultWhileResuming is the stale-session self-heal: when a run
+// that USED a resume session id terminates with an is_error Result, the stored
+// session is cleared so the NEXT message starts fresh (no --resume) and recovers
+// from a stale/poisoned session id.
+func TestSessionClearedOnErrorResultWhileResuming(t *testing.T) {
+	fc := newFakeChat()
+	sess := newFakeSessions()
+	// Pre-seed a stored session id so this run resumes (opts.SessionID non-empty).
+	if err := sess.Set(testChatID, "stale-id"); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	fr := &errorResultRunner{init: "stale-id", isError: true}
+	svc, d := newTestServiceWithSessions(t, fr, fc, sess, 0)
+	defer d.Close()
+
+	svc.Handle(context.Background(), testChatID, 100, "1", "hello")
+
+	// The poisoned session must be cleared so the next message self-heals.
+	waitUntil(t, func() bool {
+		_, ok := sess.get()
+		return !ok
+	})
+	if dels := sess.deletes(); len(dels) != 1 || dels[0] != testChatID {
+		t.Fatalf("Delete calls = %v, want [%q]", dels, testChatID)
+	}
+}
+
+// TestSessionNotClearedOnCleanResultWhileResuming asserts a CLEAN Result while
+// resuming leaves the stored session intact (normal continuity).
+func TestSessionNotClearedOnCleanResultWhileResuming(t *testing.T) {
+	fc := newFakeChat()
+	sess := newFakeSessions()
+	if err := sess.Set(testChatID, "good-id"); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	fr := &errorResultRunner{init: "good-id", isError: false}
+	svc, d := newTestServiceWithSessions(t, fr, fc, sess, 0)
+	defer d.Close()
+
+	svc.Handle(context.Background(), testChatID, 100, "1", "hello")
+
+	// The terminal answer lands.
+	waitUntil(t, func() bool {
+		text, _ := fc.snapshot()
+		return strings.Contains(text, "done")
+	})
+	// The session is preserved (and never deleted).
+	if id, ok := sess.get(); !ok || id != "good-id" {
+		t.Fatalf("session Get = (%q, %v), want (good-id, true)", id, ok)
+	}
+	if dels := sess.deletes(); len(dels) != 0 {
+		t.Fatalf("Delete calls = %v, want none on a clean result", dels)
+	}
+}
+
+// TestSessionNotClearedOnErrorResultFreshRun asserts an is_error Result on a FRESH
+// run (no prior session id, so no resume) is a no-op: nothing to clear, no panic.
+func TestSessionNotClearedOnErrorResultFreshRun(t *testing.T) {
+	fc := newFakeChat()
+	sess := newFakeSessions()
+	// No pre-seeded session: the run starts fresh (opts.SessionID empty). The
+	// runner still emits a captured init id, which the run persists.
+	fr := &errorResultRunner{init: "new-id", isError: true}
+	svc, d := newTestServiceWithSessions(t, fr, fc, sess, 0)
+	defer d.Close()
+
+	svc.Handle(context.Background(), testChatID, 100, "1", "hello")
+
+	// The terminal answer lands (an is_error Result renders with the warning prefix).
+	waitUntil(t, func() bool {
+		text, _ := fc.snapshot()
+		return strings.Contains(text, "done")
+	})
+	// No Delete happened (the run was not resuming), and the freshly-captured id is
+	// kept so a genuinely new session continues.
+	if dels := sess.deletes(); len(dels) != 0 {
+		t.Fatalf("Delete calls = %v, want none on a fresh run", dels)
+	}
+	if id, ok := sess.get(); !ok || id != "new-id" {
+		t.Fatalf("session Get = (%q, %v), want (new-id, true)", id, ok)
+	}
+}
+
+// TestSessionNotClearedOnRunErrorWhileResuming asserts a RunError (process/
+// transport crash) while resuming does NOT clear the session — it is likely
+// transient, so the context is kept for a retry.
+func TestSessionNotClearedOnRunErrorWhileResuming(t *testing.T) {
+	fc := newFakeChat()
+	sess := newFakeSessions()
+	if err := sess.Set(testChatID, "keep-id"); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	fr := &runErrorRunner{init: "keep-id"}
+	svc, d := newTestServiceWithSessions(t, fr, fc, sess, 0)
+	defer d.Close()
+
+	svc.Handle(context.Background(), testChatID, 100, "1", "hello")
+
+	// The terminal error notice lands.
+	waitUntil(t, func() bool {
+		text, _ := fc.snapshot()
+		return strings.Contains(text, "transport crash")
+	})
+	// The session is preserved for a retry.
+	if id, ok := sess.get(); !ok || id != "keep-id" {
+		t.Fatalf("session Get = (%q, %v), want (keep-id, true)", id, ok)
+	}
+	if dels := sess.deletes(); len(dels) != 0 {
+		t.Fatalf("Delete calls = %v, want none on a RunError", dels)
+	}
+}
+
 // fixedOutbox resolves every chat to one fixed directory, for the finish-path
 // sweep tests.
 type fixedOutbox struct{ dir string }
