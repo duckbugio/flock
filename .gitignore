@@ -20,6 +20,7 @@ __pycache__/
 *.pyc
 
 # Go build artifacts
+/bin/
 /flock-telegram
 cmd/flock-telegram/flock-telegram
 *.test

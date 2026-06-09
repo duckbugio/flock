@@ -22,14 +22,16 @@ type Transcriber interface {
 
 // Config selects and configures the transcription provider.
 type Config struct {
-	Provider      string       // "mistral" | "openai" | "local"
-	MistralAPIKey string       // provider=mistral
-	OpenAIAPIKey  string       // provider=openai
-	MistralModel  string       // default "voxtral-mini-latest"
-	OpenAIModel   string       // default "whisper-1"
-	LocalCommand  string       // provider=local: a binary that reads an audio file path as its last arg and prints the transcript to stdout
-	HTTPClient    *http.Client // injectable for tests; default 60s timeout
-	Logger        *slog.Logger // optional; defaults to slog.Default()
+	Provider      string // "mistral" | "openai" | "local"
+	MistralAPIKey string // provider=mistral
+	OpenAIAPIKey  string // provider=openai
+	MistralModel  string // default "voxtral-mini-latest"
+	OpenAIModel   string // default "whisper-1"
+	// LocalCommand (provider=local) is a binary that reads an audio file path as
+	// its last arg and prints the transcript to stdout.
+	LocalCommand string
+	HTTPClient   *http.Client // injectable for tests; default 60s timeout
+	Logger       *slog.Logger // optional; defaults to slog.Default()
 }
 
 // Default provider models and the hosted transcription endpoints.

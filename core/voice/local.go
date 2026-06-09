@@ -41,6 +41,7 @@ func (t *localTranscriber) Transcribe(ctx context.Context, audio io.Reader, file
 		return "", fmt.Errorf("voice: close temp audio: %w", err)
 	}
 
+	//nolint:gosec // G204: command is the configured transcriber binary and a controlled temp path, not raw user input.
 	cmd := exec.CommandContext(ctx, t.command, tmpPath)
 	out, err := cmd.Output()
 	if err != nil {

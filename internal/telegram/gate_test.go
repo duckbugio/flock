@@ -1,3 +1,4 @@
+//nolint:testpackage // intentionally whitebox to test unexported telegram gate internals
 package telegram
 
 import (
@@ -5,8 +6,10 @@ import (
 	"testing"
 )
 
-const botUser = "DuckBot"
-const botUID int64 = 4242
+const (
+	botUser       = "DuckBot"
+	botUID  int64 = 4242
+)
 
 // mentionEntity builds a "mention" entity covering the leading "@username" of
 // text. The offset/length are computed assuming an ASCII prefix, which the test

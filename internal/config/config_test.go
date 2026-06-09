@@ -1,3 +1,4 @@
+//nolint:testpackage // intentionally whitebox to test unexported config parsing internals
 package config
 
 import (

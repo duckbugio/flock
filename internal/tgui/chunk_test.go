@@ -1,3 +1,4 @@
+//nolint:testpackage // intentionally whitebox to test unexported tgui chunking internals
 package tgui
 
 import (

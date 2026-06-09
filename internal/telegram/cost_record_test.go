@@ -1,9 +1,9 @@
+//nolint:testpackage // intentionally whitebox to test unexported telegram cost recording internals
 package telegram
 
 import (
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"strings"
 	"testing"
@@ -25,7 +25,7 @@ func newTestServiceWithCosts(t *testing.T, r claude.Runner, c chat, costs *cost.
 		Dispatcher: d,
 		Workspace:  &fakeWorkspace{},
 		Costs:      costs,
-		Logger:     slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})),
+		Logger:     slog.New(slog.DiscardHandler),
 	})
 	s.tick = 5 * time.Millisecond
 	return s, d
@@ -80,7 +80,7 @@ func TestRunRecordsZeroCostOnError(t *testing.T) {
 	// Wait for the terminal error to surface, then assert nothing was charged: even
 	// a tiny positive cap still allows.
 	waitUntil(t, func() bool {
-		text, _ := fc.snapshot(1)
+		text, _ := fc.snapshot()
 		return strings.Contains(text, "boom")
 	})
 	if !costs.Allowed(user, 0.0001) {

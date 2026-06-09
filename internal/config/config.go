@@ -217,6 +217,10 @@ func (c Config) PRReviewEnabled() bool {
 	}
 }
 
+// minGiteaPollInterval floors the Gitea poll period, mirroring the Python
+// max(30, ...).
+const minGiteaPollInterval = 30 * time.Second
+
 // GiteaPollDuration returns the poll period as a Duration, floored to 30s (like
 // the Python max(30, ...)), or 0 when the configured interval is not positive.
 func (c Config) GiteaPollDuration() time.Duration {
@@ -224,8 +228,8 @@ func (c Config) GiteaPollDuration() time.Duration {
 		return 0
 	}
 	d := time.Duration(c.GiteaPollInterval) * time.Second
-	if d < 30*time.Second {
-		return 30 * time.Second
+	if d < minGiteaPollInterval {
+		return minGiteaPollInterval
 	}
 	return d
 }

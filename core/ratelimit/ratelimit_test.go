@@ -1,3 +1,4 @@
+//nolint:testpackage // intentionally whitebox to test unexported ratelimit internals
 package ratelimit
 
 import (
@@ -115,10 +116,10 @@ func TestAllowNilLimiterAllows(t *testing.T) {
 // race detector and asserts exactly max requests are admitted within one window.
 func TestAllowConcurrent(t *testing.T) {
 	const (
-		max     = 50
+		maxReqs = 50
 		workers = 500
 	)
-	l := New(max, time.Minute)
+	l := New(maxReqs, time.Minute)
 	now := time.Unix(3_000_000, 0)
 
 	var allowed atomic.Int64
@@ -134,7 +135,7 @@ func TestAllowConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 
-	if got := allowed.Load(); got != max {
-		t.Fatalf("admitted %d requests within one window, want exactly %d", got, max)
+	if got := allowed.Load(); got != maxReqs {
+		t.Fatalf("admitted %d requests within one window, want exactly %d", got, maxReqs)
 	}
 }

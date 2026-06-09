@@ -12,6 +12,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,6 +35,9 @@ type Store interface {
 	Delete(chatID int64) error
 }
 
+// dirPerm is the owner-only permission for bot-created directories.
+const dirPerm os.FileMode = 0o750
+
 // FileStore is a JSON-file-backed Store. The whole map is held in memory and the
 // file is rewritten atomically on every mutation. It is safe for concurrent use.
 type FileStore struct {
@@ -49,9 +53,9 @@ type FileStore struct {
 // persisted, which is how sessions survive a process restart.
 func Open(path string) (*FileStore, error) {
 	if path == "" {
-		return nil, fmt.Errorf("session: store path is empty")
+		return nil, errors.New("session: store path is empty")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), dirPerm); err != nil {
 		return nil, fmt.Errorf("session: create store dir: %w", err)
 	}
 	s := &FileStore{path: path, sessions: map[int64]string{}}

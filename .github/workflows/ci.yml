@@ -1,0 +1,73 @@
+name: CI
+
+# Single pipeline: lint + tests + build on every push/PR, plus dependency and
+# filesystem security scanning. Mirrors the sibling `agent` repo's CI canon,
+# dropping the agent-specific Docker Hub publish and SSH deploy jobs (flock's
+# release path lives in publish-telegram.yml).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: Lint & Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Task
+        uses: go-task/setup-task@v2
+        with:
+          version: 3.x
+
+      - name: Build dev-tools image
+        run: task dev-tools:build
+
+      - name: Lint
+        run: task lint
+
+      - name: Tests
+        run: task tests
+
+      - name: Build
+        run: task build
+
+  security-scan:
+    name: Security & Dependency Scanning
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Task
+        uses: go-task/setup-task@v2
+        with:
+          version: 3.x
+
+      - name: Build dev-tools image
+        run: task dev-tools:build
+
+      - name: Run govulncheck (Go vulnerability scanner)
+        run: task security-scan
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+          format: "table"

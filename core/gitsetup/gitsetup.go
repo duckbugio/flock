@@ -18,6 +18,8 @@ import (
 // git config. The leading "!" tells git to run it via the shell; git appends
 // the operation (e.g. "get"), so $1 is the operation and $GIT_USER/$GIT_TOKEN
 // expand from the live environment at call time — the token is never persisted.
+//
+//nolint:gosec // G101: identifier name, not a credential value.
 const credentialHelperValue = `!f() { test "$1" = get && echo "username=$GIT_USER" && echo "password=$GIT_TOKEN"; }; f`
 
 // Config is the git startup configuration derived from the environment.
@@ -71,6 +73,7 @@ func Apply(ctx context.Context, cfg Config) error {
 // setGlobal runs `git config --global <key> <value>`, inheriting the ambient
 // environment (so tests can override HOME to redirect the global config).
 func setGlobal(ctx context.Context, key, value string) error {
+	//nolint:gosec // G204: args are internal git config keys/values, not raw user input.
 	cmd := exec.CommandContext(ctx, "git", "config", "--global", key, value)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git config --global %s: %w: %s", key, err, out)

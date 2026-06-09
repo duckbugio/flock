@@ -1,17 +1,200 @@
+version: "2"
+
 run:
-  timeout: 5m
+  tests: true
+  build-tags:
+    - integration
+
+issues:
+  max-same-issues: 0
 
 linters:
-  disable-all: true
+  exclusions:
+    paths:
+      - (^|/)docs(/|$)
+
+  default: none
   enable:
-    - govet
+    - asasalint
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - containedctx
+    - contextcheck
+    - depguard
+    - dogsled
+    - dupl
+    - durationcheck
     - errcheck
-    - staticcheck
+    - errchkjson
+    - errname
+    - errorlint
+    - exhaustive
+    - copyloopvar
+    - forbidigo
+    - ginkgolinter
+    - goconst
+    - gocritic
+    - gocyclo
+    - godot
+    - godox
+    - goheader
+    - gomoddirectives
+    - gomodguard
+    - goprintffuncname
+    - gosec
+    - govet
+    - importas
     - ineffassign
+    - inamedparam
+    - lll
+    - makezero
+    - misspell
+    - mnd
+    - musttag
+    - nakedret
+    - nestif
+    - nilerr
+    - nilnil
+    - noctx
+    - nolintlint
+    - nosprintfhostport
+    - perfsprint
+    - prealloc
+    - predeclared
+    - promlinter
+    - reassign
+    - revive
+    - rowserrcheck
+    - sloglint
+    - staticcheck
+    - sqlclosecheck
+    - tagliatelle
+    - testableexamples
+    - testifylint
+    - testpackage
+    - thelper
+    - tparallel
+    - unconvert
+    - unparam
     - unused
+    - usestdlibvars
+    - usetesting
+    - wastedassign
+    - whitespace
+
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: true
+
+    depguard:
+      rules:
+        main:
+          deny:
+            - pkg: "github.com/pkg/errors"
+              desc: Should be replaced by standard lib errors package
+
+    forbidigo:
+      forbid:
+        - pattern: '^(fmt\.Print(|f|ln)|print|println)$'
+          msg: "Remove debug prints; use a logger."
+        - pattern: 'errors\.Wrap'
+          msg: "Use fmt.Errorf(\"%w\", err) or errors.Join."
+        - pattern: 'errors\.Cause'
+          msg: "Use errors.Is / errors.As."
+
+    godox:
+      keywords: [FIXME, TODO, HACK, BUG, OPTIMIZE]
+
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+        - shadow
+
+    lll:
+      line-length: 130
+      tab-width: 1
+
+    nolintlint:
+      allow-no-explanation: ["lll"]
+      require-explanation: true
+
+    revive:
+      severity: error
+      rules:
+        - name: argument-limit
+        - name: atomic
+        - name: bare-return
+        - name: blank-imports
+        - name: bool-literal-in-expr
+        - name: comment-spacings
+        - name: confusing-results
+        - name: context-as-argument
+          arguments:
+            - allowTypesBefore: "*testing.T"
+        - name: context-keys-type
+        - name: datarace
+        - name: deep-exit
+        - name: defer
+        - name: dot-imports
+        - name: duplicated-imports
+        - name: early-return
+        - name: empty-lines
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: exported
+        - name: identical-branches
+        - name: if-return
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: package-comments
+        - name: range
+        - name: range-val-address
+        - name: range-val-in-closure
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: string-of-int
+        - name: superfluous-else
+        - name: time-equal
+        - name: time-naming
+        - name: unexported-return
+        - name: unhandled-error
+          arguments: ["fmt.Fprint", "fmt.Printf", "fmt.Println"]
+        - name: unreachable-code
+        - name: use-any
+        - name: unused-parameter
+        - name: var-declaration
+        - name: var-naming
+        - name: waitgroup-by-value
+
+    tagliatelle:
+      case:
+        rules:
+          json: camel
+          toml: snake
+        use-field-name: false
+
+formatters:
+  exclusions:
+    paths:
+      - (^|/)docs(/|$)
+
+  enable:
+    - gci
     - gofmt
+    - gofumpt
     - goimports
 
-linters-settings:
-  goimports:
-    local-prefixes: github.com/duckbugio/flock
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - localmodule
+    gofumpt:
+      module-path: github.com/duckbugio/flock
+      extra-rules: true

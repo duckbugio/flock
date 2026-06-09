@@ -2,18 +2,21 @@ package claude
 
 import "encoding/json"
 
+// roleUser is the stream-json role/type value for user-authored messages.
+const roleUser = "user"
+
 // envelope is the tolerant top-level shape of a stream-json line. Only the
 // fields we act on are decoded; unknown fields and event types are ignored.
 type envelope struct {
 	Type      string       `json:"type"`
 	Subtype   string       `json:"subtype"`
-	SessionID string       `json:"session_id"`
+	SessionID string       `json:"session_id"` //nolint:tagliatelle // Claude CLI emits snake_case.
 	Message   *messageBody `json:"message"`
-	IsError   bool         `json:"is_error"`
+	IsError   bool         `json:"is_error"` //nolint:tagliatelle // Claude CLI emits snake_case.
 	Result    string       `json:"result"`
-	NumTurns  int          `json:"num_turns"`
-	CostUSD   float64      `json:"total_cost_usd"`
-	Duration  int64        `json:"duration_ms"`
+	NumTurns  int          `json:"num_turns"`      //nolint:tagliatelle // Claude CLI emits snake_case.
+	CostUSD   float64      `json:"total_cost_usd"` //nolint:tagliatelle // Claude CLI emits snake_case.
+	Duration  int64        `json:"duration_ms"`    //nolint:tagliatelle // Claude CLI emits snake_case.
 }
 
 // messageBody is the assistant/user message wrapper holding content blocks.
@@ -49,7 +52,7 @@ func decode(line []byte) ([]Event, bool) {
 	case "assistant":
 		return assistantEvents(env.Message), true
 
-	case "user":
+	case roleUser:
 		return userEvents(env.Message), true
 
 	case "result":

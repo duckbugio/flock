@@ -38,6 +38,14 @@ type Config struct {
 // minInterval floors the poll period, mirroring the Python max(30, ...).
 const minInterval = 30 * time.Second
 
+// defaultClientTimeout is the request timeout for the default HTTP client used
+// when Config.Client is nil.
+const defaultClientTimeout = 20 * time.Second
+
+// minRefParts is the minimum number of "/"-separated segments a team branch ref
+// must have to carry a chatID: duck/<chatid>[/<slug>].
+const minRefParts = 2
+
 // poller holds the resolved runtime state for one Run.
 type poller struct {
 	base      string
@@ -57,7 +65,7 @@ func Run(ctx context.Context, cfg Config, out chan<- PRComment) error {
 	}
 	client := cfg.Client
 	if client == nil {
-		client = &http.Client{Timeout: 20 * time.Second}
+		client = &http.Client{Timeout: defaultClientTimeout}
 	}
 	log := cfg.Logger
 	if log == nil {
@@ -87,10 +95,10 @@ type notification struct {
 	ID      json.Number `json:"id"`
 	Subject struct {
 		URL              string `json:"url"`
-		LatestCommentURL string `json:"latest_comment_url"`
+		LatestCommentURL string `json:"latest_comment_url"` //nolint:tagliatelle // Gitea API uses snake_case.
 	} `json:"subject"`
 	Repository struct {
-		FullName string `json:"full_name"`
+		FullName string `json:"full_name"` //nolint:tagliatelle // Gitea API uses snake_case.
 	} `json:"repository"`
 }
 
@@ -104,7 +112,7 @@ type pull struct {
 	} `json:"head"`
 	Base struct {
 		Repo struct {
-			FullName string `json:"full_name"`
+			FullName string `json:"full_name"` //nolint:tagliatelle // Gitea API uses snake_case.
 		} `json:"repo"`
 	} `json:"base"`
 }
@@ -127,7 +135,7 @@ func (p *poller) pollOnce(ctx context.Context, out chan<- PRComment) {
 		p.log.Warn("gitea notifications poll failed", "error", err)
 		return
 	}
-	if status >= 400 {
+	if status >= http.StatusBadRequest {
 		p.log.Warn("gitea notifications poll failed", "status", status)
 		return
 	}
@@ -155,7 +163,7 @@ func (p *poller) handleThread(ctx context.Context, t *notification, out chan<- P
 	if err != nil {
 		return err
 	}
-	if status >= 400 {
+	if status >= http.StatusBadRequest {
 		// Transient — leave unread, retry next cycle.
 		return nil
 	}
@@ -176,7 +184,7 @@ func (p *poller) handleThread(ctx context.Context, t *notification, out chan<- P
 		if cErr != nil {
 			return cErr // transient — leave unread, retry next cycle (matches the Python spec)
 		}
-		if cStatus >= 400 {
+		if cStatus >= http.StatusBadRequest {
 			c = comment{} // server-side error on the comment endpoint: proceed with empty comment, like Python
 		}
 	}
@@ -195,7 +203,7 @@ func (p *poller) handleThread(ctx context.Context, t *notification, out chan<- P
 
 	// Parse chatID from duck/<chatid>/<slug>.
 	parts := strings.Split(ref, "/")
-	if len(parts) < 2 {
+	if len(parts) < minRefParts {
 		p.markRead(ctx, threadID)
 		return nil
 	}
@@ -252,7 +260,7 @@ func (p *poller) getJSON(ctx context.Context, url string, v any) (int, error) {
 		return 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= http.StatusBadRequest {
 		return resp.StatusCode, nil
 	}
 	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {

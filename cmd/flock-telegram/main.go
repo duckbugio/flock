@@ -35,11 +35,30 @@ import (
 	"github.com/duckbugio/flock/internal/telegram"
 )
 
+// shutdownDrainTimeout bounds how long Shutdown waits for in-flight runs to
+// deliver their final message during graceful drain.
+const shutdownDrainTimeout = 5 * time.Second
+
+// voiceClientTimeout is the shared budget for the voice file download plus the
+// transcription provider call.
+const voiceClientTimeout = 60 * time.Second
+
+// uploadClientTimeout is the budget for a (potentially large) inbound file
+// download.
+const uploadClientTimeout = 120 * time.Second
+
 func main() {
+	os.Exit(run())
+}
+
+// run holds the adapter's startup and serve logic, returning a process exit code.
+// Splitting it out of main lets deferred cleanups (signal context, dispatcher
+// drain) run before the process exits, which a direct os.Exit in main would skip.
+func run() int {
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("load config", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
@@ -88,7 +107,7 @@ func main() {
 	sessions, err := session.Open(cfg.SessionStoreFile())
 	if err != nil {
 		logger.Error("open session store", "path", cfg.SessionStoreFile(), "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Guardrails (plan §9b): a per-user fixed-window rate limiter (in-memory) and a
@@ -116,7 +135,7 @@ func main() {
 	// message before exit (graceful drain) rather than dropping them with the
 	// non-waiting Close(). Close() remains available for callers that don't drain.
 	defer func() {
-		drainCtx, cancelDrain := context.WithTimeout(context.Background(), 5*time.Second)
+		drainCtx, cancelDrain := context.WithTimeout(context.Background(), shutdownDrainTimeout)
 		defer cancelDrain()
 		if err := disp.Shutdown(drainCtx); err != nil {
 			logger.Warn("dispatcher drain timed out", "error", err)
@@ -140,7 +159,7 @@ func main() {
 	b, err := bot.New(cfg.TelegramBotToken, opts2...)
 	if err != nil {
 		logger.Error("create bot", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Voice transcription is optional and OFF by default. A provider
@@ -149,7 +168,7 @@ func main() {
 	if cfg.EnableVoiceMessages {
 		// One HTTP client shared by the file download and the provider call, so the
 		// timeout is a single budget rather than two stacked 60s windows.
-		voiceClient := &http.Client{Timeout: 60 * time.Second}
+		voiceClient := &http.Client{Timeout: voiceClientTimeout}
 		tr, terr := voice.New(voice.Config{
 			Provider:      cfg.VoiceProvider,
 			MistralAPIKey: cfg.MistralAPIKey,
@@ -178,7 +197,7 @@ func main() {
 	// the per-chat uploads dir (a sibling of the repos, outside every git tree) and
 	// reuses the same token-redacting download seam as voice. A dedicated HTTP
 	// client gives the (potentially large) file download its own timeout budget.
-	uploadClient := &http.Client{Timeout: 120 * time.Second}
+	uploadClient := &http.Client{Timeout: uploadClientTimeout}
 	up = telegram.NewUploader(
 		telegram.NewBotFileSource(b),
 		uploadClient,
@@ -258,6 +277,7 @@ func main() {
 	logger.Info("starting telegram adapter", "username", cfg.TelegramBotUsername)
 	b.Start(ctx)
 	logger.Info("telegram adapter stopped")
+	return 0
 }
 
 // textHandler dispatches an allowed user's text message to the run Service,
@@ -268,7 +288,15 @@ func main() {
 // own goroutine), so the long-poll loop keeps receiving updates (including the
 // Stop callback). Per-chat serialization and the global concurrency cap are
 // enforced by the Dispatcher.
-func textHandler(cfg config.Config, svc **telegram.Service, vt **telegram.VoiceTranscriber, up **telegram.Uploader, limiter *ratelimit.Limiter, costs *cost.Store, guards telegram.GuardConfig) bot.HandlerFunc {
+func textHandler(
+	cfg config.Config,
+	svc **telegram.Service,
+	vt **telegram.VoiceTranscriber,
+	up **telegram.Uploader,
+	limiter *ratelimit.Limiter,
+	costs *cost.Store,
+	guards telegram.GuardConfig,
+) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		service := *svc
 		if service == nil {
@@ -279,20 +307,37 @@ func textHandler(cfg config.Config, svc **telegram.Service, vt **telegram.VoiceT
 		// Voice and media uploads apply only to new messages, never edits, so
 		// neither the transcriber nor the uploader is threaded here.
 		if edited := update.EditedMessage; edited != nil {
-			handleMessage(ctx, b, cfg, service, nil, nil, limiter, costs, guards, edited, true)
+			deps := messageDeps{cfg: cfg, service: service, limiter: limiter, costs: costs, guards: guards}
+			handleMessage(ctx, deps, b, edited, true)
 			return
 		}
 		if msg := update.Message; msg != nil {
-			handleMessage(ctx, b, cfg, service, *vt, *up, limiter, costs, guards, msg, false)
+			deps := messageDeps{cfg: cfg, service: service, vt: *vt, up: *up, limiter: limiter, costs: costs, guards: guards}
+			handleMessage(ctx, deps, b, msg, false)
 		}
 	}
+}
+
+// messageDeps bundles the long-lived dependencies a single message handler needs,
+// keeping the per-message entry points to a small, stable argument list. Edited
+// messages leave vt/up nil (voice and media uploads apply only to new messages).
+type messageDeps struct {
+	cfg     config.Config
+	service *telegram.Service
+	vt      *telegram.VoiceTranscriber
+	up      *telegram.Uploader
+	limiter *ratelimit.Limiter
+	costs   *cost.Store
+	guards  telegram.GuardConfig
 }
 
 // handleMessage applies the allow-list and the group mention-gate to one message
 // (new or edited) and routes it to the Service. The mention-gate decision is the
 // pure telegram.ShouldHandle; this function only extracts its transport-agnostic
 // inputs from the Telegram message.
-func handleMessage(ctx context.Context, b *bot.Bot, cfg config.Config, service *telegram.Service, vt *telegram.VoiceTranscriber, up *telegram.Uploader, limiter *ratelimit.Limiter, costs *cost.Store, guards telegram.GuardConfig, msg *models.Message, isEdit bool) {
+func handleMessage(ctx context.Context, deps messageDeps, b *bot.Bot, msg *models.Message, isEdit bool) {
+	cfg, service, vt, up := deps.cfg, deps.service, deps.vt, deps.up
+	limiter, costs, guards := deps.limiter, deps.costs, deps.guards
 	if msg.From == nil {
 		return
 	}
@@ -405,7 +450,9 @@ func handleMessage(ctx context.Context, b *bot.Bot, cfg config.Config, service *
 // prompt references the saved path plus the user's caption. The download runs on
 // this update's own goroutine, so the blocking call does not stall the poll loop.
 // Oversize/undownloadable yields one notice (never a silent drop).
-func handleDocument(ctx context.Context, b *bot.Bot, up *telegram.Uploader, service *telegram.Service, msg *models.Message, isEdit bool) {
+func handleDocument(
+	ctx context.Context, b *bot.Bot, up *telegram.Uploader, service *telegram.Service, msg *models.Message, isEdit bool,
+) {
 	doc := msg.Document
 	// Reject an oversize file before downloading when Telegram reports its size.
 	if doc.FileSize > 0 && doc.FileSize > up.MaxBytes() {
@@ -426,7 +473,9 @@ func handleDocument(ctx context.Context, b *bot.Bot, up *telegram.Uploader, serv
 // a vision run: the prompt references the saved path plus caption, and the image
 // is attached as a content block so Claude can see it. The photo is ALWAYS saved
 // to uploads too, giving a no-commit-safe on-disk copy even in vision mode.
-func handlePhoto(ctx context.Context, b *bot.Bot, up *telegram.Uploader, service *telegram.Service, msg *models.Message, isEdit bool) {
+func handlePhoto(
+	ctx context.Context, b *bot.Bot, up *telegram.Uploader, service *telegram.Service, msg *models.Message, isEdit bool,
+) {
 	photo := largestPhoto(msg.Photo)
 	if photo == nil {
 		return
@@ -459,7 +508,9 @@ func handlePhoto(ctx context.Context, b *bot.Bot, up *telegram.Uploader, service
 
 // submitMedia routes a media-derived run through the Service, mirroring the
 // new-vs-edit split of the text path. Images are non-nil only for a vision run.
-func submitMedia(ctx context.Context, service *telegram.Service, msg *models.Message, prompt string, images []claude.ImageInput, isEdit bool) {
+func submitMedia(
+	ctx context.Context, service *telegram.Service, msg *models.Message, prompt string, images []claude.ImageInput, isEdit bool,
+) {
 	if isEdit {
 		service.HandleEditMedia(ctx, msg.Chat.ID, msg.From.ID, msg.ID, prompt, images)
 		return
@@ -537,6 +588,8 @@ func toGateEntities(entities []models.MessageEntity) []telegram.Entity {
 				Length: e.Length,
 				UserID: uid,
 			})
+		default:
+			// Other entity kinds (bold, code, URLs, …) are irrelevant to the gate.
 		}
 	}
 	return out

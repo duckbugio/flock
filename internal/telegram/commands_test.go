@@ -1,8 +1,8 @@
+//nolint:testpackage // intentionally whitebox to test unexported telegram command handlers
 package telegram
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -93,7 +93,7 @@ func newCommandService(disp dispatcher, sess sessionStore) *Service {
 		Dispatcher: disp,
 		Workspace:  &fakeWorkspace{},
 		Sessions:   sess,
-		Logger:     slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})),
+		Logger:     slog.New(slog.DiscardHandler),
 	})
 }
 
@@ -126,7 +126,7 @@ func TestNewSessionResets(t *testing.T) {
 	if err := svc.NewSession(100); err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	if _, ok := sess.get(100); ok {
+	if _, ok := sess.get(); ok {
 		t.Fatal("session 100 still present after NewSession")
 	}
 	if got := sess.deletes(); len(got) != 1 || got[0] != 100 {

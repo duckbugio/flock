@@ -1,3 +1,4 @@
+//nolint:testpackage // intentionally whitebox to test unexported voice transcription internals
 package voice
 
 import (
@@ -20,7 +21,7 @@ func TestHostedProviders(t *testing.T) {
 		key       string
 		wantPath  string
 		wantModel string
-		makeCfg   func(srv string, key string) Config
+		makeCfg   func(srv, key string) Config
 	}{
 		{
 			name:      "mistral default model",
@@ -28,7 +29,7 @@ func TestHostedProviders(t *testing.T) {
 			key:       "mk-secret",
 			wantPath:  "/v1/audio/transcriptions",
 			wantModel: defaultMistralModel,
-			makeCfg: func(srv, key string) Config {
+			makeCfg: func(_, key string) Config {
 				return Config{Provider: "Mistral", MistralAPIKey: key}
 			},
 		},
@@ -38,7 +39,7 @@ func TestHostedProviders(t *testing.T) {
 			key:       "ok-secret",
 			wantPath:  "/v1/audio/transcriptions",
 			wantModel: defaultOpenAIModel,
-			makeCfg: func(srv, key string) Config {
+			makeCfg: func(_, key string) Config {
 				return Config{Provider: "OPENAI", OpenAIAPIKey: key}
 			},
 		},
@@ -55,9 +56,11 @@ func TestHostedProviders(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotPath = r.URL.Path
 				gotAuth = r.Header.Get("Authorization")
+				//nolint:gosec // G120: request body is bounded; acceptable in test context
 				if err := r.ParseMultipartForm(1 << 20); err != nil {
 					t.Errorf("ParseMultipartForm: %v", err)
 				}
+				//nolint:gosec // G120: request body is bounded; acceptable in test context
 				gotModel = r.FormValue("model")
 				if f, _, err := r.FormFile("file"); err == nil {
 					b, _ := io.ReadAll(f)
@@ -151,6 +154,7 @@ func TestLocalProvider(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "transcribe.sh")
 	// Ignores its input file and prints a fixed transcript.
+	//nolint:gosec // G306: test fixture permissions are acceptable in test context
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'local transcript\\n'\n"), 0o755); err != nil {
 		t.Fatalf("write script: %v", err)
 	}

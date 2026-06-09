@@ -39,6 +39,10 @@ const (
 // Telegram's 4096 limit counts) is <= source length. The limit therefore still holds.
 const frameBudgetMax = 3500
 
+// separatorRunes is the rune count of the "\n\n" that separates the header from
+// the activity lines in a frame.
+const separatorRunes = 2
+
 // Activity-line prefixes: a thought balloon for the model's text, a wrench for a
 // tool call.
 const (
@@ -166,12 +170,12 @@ func (p *Progress) Frame() string {
 	// frameBudgetMax. Drop the OLDEST lines first until it fits.
 	assemble := func(ringLines []string) string {
 		var b strings.Builder
-		b.WriteString(header)
+		_, _ = b.WriteString(header)
 		// A blank line sets the activity ("thoughts") apart from the Working header.
-		b.WriteString("\n")
+		_, _ = b.WriteString("\n")
 		for _, line := range ringLines {
-			b.WriteByte('\n')
-			b.WriteString(line)
+			_ = b.WriteByte('\n')
+			_, _ = b.WriteString(line)
 		}
 		return b.String()
 	}
@@ -190,7 +194,7 @@ func (p *Progress) Frame() string {
 	// two separating newlines, and the line's emoji prefix all ride on top of the
 	// text budget, so subtract them so capLine's TEXT cap keeps the whole frame in
 	// bounds.
-	overhead := utf8.RuneCountInString(header) + 2
+	overhead := utf8.RuneCountInString(header) + separatorRunes
 	for _, prefix := range []string{thoughtPrefix, toolPrefix} {
 		if strings.HasPrefix(lines[0], prefix) {
 			overhead += utf8.RuneCountInString(prefix)
@@ -257,9 +261,9 @@ func truncateRunes(s string, maxRunes int) string {
 		if n >= maxRunes-1 {
 			break
 		}
-		b.WriteRune(r)
+		_, _ = b.WriteRune(r)
 		n++
 	}
-	b.WriteRune('…')
+	_, _ = b.WriteRune('…')
 	return b.String()
 }

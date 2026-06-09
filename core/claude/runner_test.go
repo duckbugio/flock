@@ -1,3 +1,4 @@
+//nolint:testpackage // intentionally whitebox to test unexported claude runner/stream internals
 package claude
 
 import (
@@ -184,8 +185,9 @@ func TestRun_NoResultCleanExit(t *testing.T) {
 	// Emit an init and an assistant text block, then exit 0 with no result line.
 	body := "#!/bin/sh\n" +
 		"printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"nr-session\"}'\n" +
-		"printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}'\n" +
+		"printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}'\n" + //nolint:lll // inline JSON test fixture; splitting would obscure the payload
 		"exit 0\n"
+	//nolint:gosec // G306: test fixture permissions are acceptable in test context
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatalf("write script: %v", err)
 	}
@@ -204,6 +206,8 @@ func TestRun_NoResultCleanExit(t *testing.T) {
 			sawText = true
 		case RunError:
 			runErr = e.Err
+		default:
+			// Other event types are not asserted by this test.
 		}
 	}
 	if !sawText {
@@ -226,6 +230,7 @@ func TestRun_Cancellation(t *testing.T) {
 	// Trap signals so a naive SIGTERM-ignore can't keep it alive; the runner
 	// escalates to SIGKILL on the process group regardless.
 	body := "#!/bin/sh\ntrap '' TERM\nsleep 30\n"
+	//nolint:gosec // G306: test fixture permissions are acceptable in test context
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatalf("write script: %v", err)
 	}
@@ -258,8 +263,9 @@ func TestRun_LargeLine(t *testing.T) {
 	lines := []string{
 		`{"type":"system","subtype":"init","session_id":"big-session"}`,
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"` + big + `"}]}}`,
-		`{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"big-session","num_turns":1,"total_cost_usd":0,"duration_ms":1}`,
+		`{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"big-session","num_turns":1,"total_cost_usd":0,"duration_ms":1}`, //nolint:lll // inline JSON test fixture; splitting would obscure the payload
 	}
+	//nolint:gosec // G306: test fixture permissions are acceptable in test context
 	if err := os.WriteFile(stream, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
 		t.Fatalf("write stream: %v", err)
 	}
@@ -295,8 +301,9 @@ func TestRun_TextArgMode(t *testing.T) {
 		"args=\"$*\"\n" +
 		"n=$(cat | wc -c | tr -d ' ')\n" +
 		"printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"arg-session\"}'\n" +
-		"printf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"stdin=%s args=%s\",\"session_id\":\"arg-session\",\"num_turns\":1,\"total_cost_usd\":0,\"duration_ms\":1}\\n' \"$n\" \"$args\"\n" +
+		"printf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"stdin=%s args=%s\",\"session_id\":\"arg-session\",\"num_turns\":1,\"total_cost_usd\":0,\"duration_ms\":1}\\n' \"$n\" \"$args\"\n" + //nolint:lll // inline JSON test fixture; splitting would obscure the payload
 		"exit 0\n"
+	//nolint:gosec // G306: test fixture permissions are acceptable in test context
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatalf("write script: %v", err)
 	}
@@ -380,8 +387,9 @@ func TestRun_ImageStdinMode(t *testing.T) {
 		"printf '%s' \"$*\" > " + argsFile + "\n" +
 		"cat > " + captured + "\n" +
 		"printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"img-session\"}'\n" +
-		"printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ok\",\"session_id\":\"img-session\",\"num_turns\":1,\"total_cost_usd\":0,\"duration_ms\":1}'\n" +
+		"printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ok\",\"session_id\":\"img-session\",\"num_turns\":1,\"total_cost_usd\":0,\"duration_ms\":1}'\n" + //nolint:lll // inline JSON test fixture; splitting would obscure the payload
 		"exit 0\n"
+	//nolint:gosec // G306: test fixture permissions are acceptable in test context
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatalf("write script: %v", err)
 	}
@@ -405,6 +413,7 @@ func TestRun_ImageStdinMode(t *testing.T) {
 	}
 
 	// Args: --input-format stream-json present, prompt NOT a trailing arg.
+	//nolint:gosec // G304: test reads a controlled testdata/temp path
 	argsRaw, err := os.ReadFile(argsFile)
 	if err != nil {
 		t.Fatalf("read args: %v", err)
@@ -419,6 +428,7 @@ func TestRun_ImageStdinMode(t *testing.T) {
 
 	// Stdin: a valid user-message envelope with a text block and a base64 image
 	// block whose decoded bytes round-trip to the original image.
+	//nolint:gosec // G304: test reads a controlled testdata/temp path
 	raw, err := os.ReadFile(captured)
 	if err != nil {
 		t.Fatalf("read stdin capture: %v", err)
@@ -432,7 +442,7 @@ func TestRun_ImageStdinMode(t *testing.T) {
 				Text   string `json:"text"`
 				Source *struct {
 					Type      string `json:"type"`
-					MediaType string `json:"media_type"`
+					MediaType string `json:"media_type"` //nolint:tagliatelle // Claude CLI emits snake_case.
 					Data      string `json:"data"`
 				} `json:"source"`
 			} `json:"content"`
@@ -473,6 +483,7 @@ func TestRun_NoResultNonZeroExit(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "boom.sh")
 	body := "#!/bin/sh\necho 'fatal: kaboom' >&2\nexit 7\n"
+	//nolint:gosec // G306: test fixture permissions are acceptable in test context
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatalf("write script: %v", err)
 	}
