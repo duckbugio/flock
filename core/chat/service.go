@@ -56,15 +56,16 @@ type dispatcher interface {
 
 // sessionStore persists each chat's Claude session_id so the next message can
 // resume context via --resume. *session.FileStore satisfies it. A timeout/cancel
-// must NOT discard the stored id (plan §7.3), so the run path only ever Get/Set;
-// the sole Delete caller is the explicit /new reset (NewSession), never the run
-// or timeout path.
+// must NOT discard the stored id (plan §7.3), so the run path only ever Get/Set
+// on those paths. Delete has exactly two callers: the explicit /new reset
+// (NewSession) and the run path's self-heal when a RESUMED run ends in an
+// is_error result (a likely-stale id) — never a timeout, cancel, or RunError.
 type sessionStore interface {
 	Get(chatID ChatID) (sessionID string, ok bool)
 	Set(chatID ChatID, sessionID string) error
 	// Delete drops chatID's stored session id so the next message starts fresh
-	// (no --resume). Deleting an absent chat is a harmless no-op. Only the
-	// explicit /new reset calls this.
+	// (no --resume). Deleting an absent chat is a harmless no-op. Called by the
+	// explicit /new reset and by the run path's is_error-while-resuming self-heal.
 	Delete(chatID ChatID) error
 }
 
