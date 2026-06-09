@@ -421,3 +421,73 @@ func TestCostStoreFile(t *testing.T) {
 		t.Errorf("CostStoreFile() = %q, want /workspace/costs.json", got)
 	}
 }
+
+func TestStarNudgeStoreFile(t *testing.T) {
+	// Explicit path wins.
+	c := Config{StarNudgeStorePath: "/var/lib/duck/s.json", ApprovedDirectory: "/workspace"}
+	if got := c.StarNudgeStoreFile(); got != "/var/lib/duck/s.json" {
+		t.Errorf("StarNudgeStoreFile() = %q, want explicit path", got)
+	}
+	// Otherwise derive from APPROVED_DIRECTORY.
+	c = Config{ApprovedDirectory: "/workspace"}
+	if got := c.StarNudgeStoreFile(); got != "/workspace/star_nudge.json" {
+		t.Errorf("StarNudgeStoreFile() = %q, want /workspace/star_nudge.json", got)
+	}
+}
+
+func TestStarNudgeRepoParts(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		repo      string
+		wantOwner string
+		wantRepo  string
+		wantOK    bool
+	}{
+		{name: "valid", repo: "duckbugio/flock", wantOwner: "duckbugio", wantRepo: "flock", wantOK: true},
+		{name: "trims spaces", repo: " duckbugio / flock ", wantOwner: "duckbugio", wantRepo: "flock", wantOK: true},
+		{name: "empty", repo: "", wantOK: false},
+		{name: "no slash", repo: "flock", wantOK: false},
+		{name: "too many parts", repo: "a/b/c", wantOK: false},
+		{name: "blank owner", repo: "/flock", wantOK: false},
+		{name: "blank repo", repo: "duckbugio/", wantOK: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := Config{StarNudgeRepo: tt.repo}
+			owner, repo, ok := c.StarNudgeRepoParts()
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if ok && (owner != tt.wantOwner || repo != tt.wantRepo) {
+				t.Errorf("parts = %q/%q, want %q/%q", owner, repo, tt.wantOwner, tt.wantRepo)
+			}
+		})
+	}
+}
+
+func TestStarNudgeEnabled(t *testing.T) {
+	base := Config{GitHost: "github.com", GitToken: "tok", StarNudgeRepo: "duckbugio/flock"}
+	if !base.StarNudgeEnabled() {
+		t.Errorf("StarNudgeEnabled() = false, want true when fully configured")
+	}
+	// Host match is case-insensitive.
+	c := base
+	c.GitHost = "GitHub.com"
+	if !c.StarNudgeEnabled() {
+		t.Errorf("StarNudgeEnabled() = false for case-variant host, want true")
+	}
+	for _, tt := range []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"gitea host", func(c *Config) { c.GitHost = "git.example.com" }},
+		{"empty host", func(c *Config) { c.GitHost = "" }},
+		{"no token", func(c *Config) { c.GitToken = "" }},
+		{"bad repo", func(c *Config) { c.StarNudgeRepo = "flock" }},
+	} {
+		c := base
+		tt.mutate(&c)
+		if c.StarNudgeEnabled() {
+			t.Errorf("StarNudgeEnabled() = true for %q, want false", tt.name)
+		}
+	}
+}
