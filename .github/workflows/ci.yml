@@ -102,3 +102,32 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  vk-image:
+    name: Build vk image (no push)
+    runs-on: ubuntu-latest
+    # PR-only dry run: prove the VK runtime image still builds before merge, the same
+    # way the telegram image job does (a base-image/dependency bump could land green in
+    # the Go lint/tests yet break the Dockerfile, which otherwise only runs post-merge
+    # in publish-vk.yml). Mirrors that workflow's build EXACTLY (same context/file/
+    # platforms/cache) but with push: false. On push to main the actual publish covers it.
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build vk image (no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./adapters/vk/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

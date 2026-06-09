@@ -63,6 +63,10 @@ func run() int {
 		slog.Error("load config", "error", err)
 		return 1
 	}
+	if err := cfg.ValidateTelegram(); err != nil {
+		slog.Error("invalid telegram config", "error", err)
+		return 1
+	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: cfg.SlogLevel(),
