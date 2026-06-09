@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
 	"time"
 )
 
@@ -129,7 +130,7 @@ func (c *Client) Star(ctx context.Context, owner, repo string) error {
 // body (the endpoints return no body the caller needs). The PUT carries an
 // explicit zero Content-Length, as the stars endpoint expects an empty body.
 func (c *Client) do(ctx context.Context, method, owner, repo string) (int, error) {
-	url := c.base + "/user/starred/" + owner + "/" + repo
+	url := c.base + "/user/starred/" + neturl.PathEscape(owner) + "/" + neturl.PathEscape(repo)
 	req, err := http.NewRequestWithContext(ctx, method, url, http.NoBody)
 	if err != nil {
 		return 0, fmt.Errorf("ghstar: build request: %w", err)
