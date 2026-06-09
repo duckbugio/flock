@@ -4,8 +4,6 @@
 # Behaviour is toggled at RUNTIME via env (see .env.example).
 # Built & published by .github/workflows/publish-telegram.yml -> ghcr.io/duckbugio/flock-telegram
 # Build context is the REPO ROOT (COPY paths are root-relative): docker build -f adapters/telegram/Dockerfile .
-#
-# The previous Python image is preserved as Dockerfile.python for rollback.
 
 # --- Build stage: compile the Go binary ---------------------------------------
 # Build on the native BUILDPLATFORM and cross-compile to TARGETARCH (CGO off), so
