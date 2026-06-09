@@ -8,7 +8,7 @@
 # --- Build stage: compile the Go binary ---------------------------------------
 # Build on the native BUILDPLATFORM and cross-compile to TARGETARCH (CGO off), so
 # multi-arch builds don't pay for emulation.
-FROM --platform=$BUILDPLATFORM golang:1.23-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS build
 
 WORKDIR /src
 
