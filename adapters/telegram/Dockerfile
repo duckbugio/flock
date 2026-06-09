@@ -30,7 +30,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 # node:22 supplies Node (for the `claude` CLI). Add git/ripgrep/ffmpeg (the CLI
 # shells out to them), the GitHub CLI (`gh`, for PR creation on github.com) + the
 # Docker CLI (talks to the optional dind sidecar).
-FROM node:22-bookworm-slim
+FROM node:26-bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
