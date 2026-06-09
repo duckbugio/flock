@@ -1,11 +1,13 @@
 package vk
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"path"
 
 	"github.com/duckbugio/flock/core/voice"
@@ -62,6 +64,25 @@ func (vt *VoiceTranscriber) Transcribe(ctx context.Context, url string) (string,
 		return "", fmt.Errorf("download voice file: status %d", resp.StatusCode)
 	}
 
-	limited := io.LimitReader(resp.Body, vt.maxBytes)
-	return vt.transcriber.Transcribe(ctx, limited, path.Base(url))
+	// Read one byte past the cap so an oversized file is rejected, not silently
+	// truncated to a misleading transcript (mirrors upload.go's writeCapped).
+	limited := io.LimitReader(resp.Body, vt.maxBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return "", fmt.Errorf("download voice file: %w", redactURLError(err))
+	}
+	if int64(len(data)) > vt.maxBytes {
+		return "", ErrUploadTooLarge
+	}
+	return vt.transcriber.Transcribe(ctx, bytes.NewReader(data), voiceFilename(url))
+}
+
+// voiceFilename derives a clean filename hint from a VK audio URL, dropping any
+// query string (the self-keyed link carries one) so the transcriber sees a bare
+// basename.
+func voiceFilename(rawURL string) string {
+	if u, err := url.Parse(rawURL); err == nil && u.Path != "" {
+		return path.Base(u.Path)
+	}
+	return path.Base(rawURL)
 }
