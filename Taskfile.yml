@@ -1,0 +1,97 @@
+version: '3'
+
+silent: true
+
+env:
+  GOFLAGS: -buildvcs=false
+
+vars:
+  DEV_TOOLS: docker run --rm -e GOFLAGS -v "$PWD:/app" -w /app dev-tools
+
+tasks:
+  # ============================================================================
+  # MAIN COMMANDS
+  # ============================================================================
+  default:
+    cmds:
+      - task: info
+      - task: tidy
+      - task: fmt
+      - task: lint
+      - task: tests
+      - task: build
+
+  # ============================================================================
+  # INFORMATION
+  # ============================================================================
+  info:
+    cmds:
+      - echo "- Info"
+      - "{{.DEV_TOOLS}} go version"
+
+  # ============================================================================
+  # GO DEPENDENCIES MANAGEMENT
+  # ============================================================================
+  tidy:
+    cmds:
+      - echo "- Tidy"
+      - "{{.DEV_TOOLS}} go mod tidy"
+
+  dev-tools:build:
+    cmds:
+      - echo "- Building dev-tools image"
+      - docker build -t dev-tools -f ./tools/Dockerfile .
+
+  # ============================================================================
+  # DEVELOPMENT AND CODE QUALITY
+  # ============================================================================
+  fmt:
+    cmds:
+      - echo "- Format"
+      - task: lint:cmd
+        vars: { CLI_ARGS: "fmt ./..." }
+      - task: lint:cmd
+        vars: { CLI_ARGS: "run --fix --timeout=5m ./..." }
+
+  lint:
+    cmds:
+      - echo "- Lint"
+      - task: lint:cmd
+        vars: { CLI_ARGS: "run --timeout=5m ./..." }
+
+  lint:cmd:
+    cmds:
+      - "{{.DEV_TOOLS}} golangci-lint {{.CLI_ARGS}}"
+
+  security-scan:
+    cmds:
+      - echo "- Security scan"
+      - "{{.DEV_TOOLS}} go run golang.org/x/vuln/cmd/govulncheck@latest ./..."
+
+  vet:
+    desc: Static analysis via go vet.
+    cmds:
+      - echo "- go vet"
+      - "{{.DEV_TOOLS}} go vet ./..."
+
+  # ============================================================================
+  # TESTING
+  # ============================================================================
+  tests:
+    cmds:
+      - echo "- Tests"
+      - "{{.DEV_TOOLS}} go test -race ./..."
+
+  tests:short:
+    desc: Fast feedback loop — no race detector.
+    cmds:
+      - echo "- Tests (short, no -race)"
+      - "{{.DEV_TOOLS}} go test -short ./..."
+
+  # ============================================================================
+  # BUILD
+  # ============================================================================
+  build:
+    cmds:
+      - echo "- Build"
+      - "{{.DEV_TOOLS}} go build -o bin/flock-telegram ./cmd/flock-telegram"
