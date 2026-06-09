@@ -1,27 +1,23 @@
-// Package telegram wires the claude Runner to the Telegram transport: it
-// receives a text message from an allowed user, resolves that chat's isolated
-// workspace, runs the message through the Runner, and renders the event stream
-// into one live "Working… (Ns)" progress message with a Stop button, replacing
-// it with the final answer on completion. Stage 3 replaces Stage 2's single
-// per-process serial guard with a Dispatcher: runs are parallel across chats
-// (capped) and serial within a chat, each in its own per-chat workspace.
-package telegram
+// Package chat is the transport-neutral conversation layer: it receives a text
+// message from an allowed user, resolves that chat's isolated workspace, runs
+// the message through the claude Runner, and renders the event stream into one
+// live "Working… (Ns)" progress message with a Stop button, replacing it with
+// the final answer on completion. Runs are parallel across chats (capped) and
+// serial within a chat (core/dispatch), each in its own per-chat workspace. It
+// drives any platform through the Transport interface (see transport.go); the
+// platform-specific glue lives in adapters/<name>.
+package chat
 
 import (
 	"context"
-	"errors"
-	"io"
 	"log/slog"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/go-telegram/bot"
-
 	"github.com/duckbugio/flock/core/claude"
 	"github.com/duckbugio/flock/core/cost"
-	"github.com/duckbugio/flock/internal/tgui"
 )
 
 // tickInterval is how often the wall-clock ticker refreshes the progress frame
@@ -44,53 +40,18 @@ const minEditInterval = 3 * time.Second
 // answer; the live progress streams separately as a draft.
 const anchorText = "⏳ Working…"
 
-// stopCallbackPrefix is the inline-button callback_data prefix carrying the run
-// id so a Stop press maps back to the right in-flight run.
-const stopCallbackPrefix = "stop:"
-
-// chat abstracts the Telegram operations the run loop needs, so the loop can be
-// driven by a fake in tests. The real implementation wraps *bot.Bot.
-type chat interface {
-	// Send posts a new message with optional Stop markup and returns its id. When
-	// asMarkdown is true the text is rendered as Telegram HTML (with a plain-text
-	// fallback on a parse error); false sends it verbatim as plain text.
-	Send(ctx context.Context, chatID int64, text, stopRunID string, asMarkdown bool) (messageID int, err error)
-	// Edit updates an existing message's text (and Stop markup, when stopRunID
-	// is non-empty; empty clears the markup). asMarkdown behaves as for Send.
-	Edit(ctx context.Context, chatID int64, messageID int, text, stopRunID string, asMarkdown bool) error
-	// StreamDraft streams text as an ephemeral live "draft" preview keyed by
-	// draftID: repeated calls update the same preview (rate-limit-free, unlike
-	// Edit) and an empty text clears it. Used for live run progress; the answer is
-	// persisted with Send/Edit. asMarkdown behaves as for Send/Edit (ignored when
-	// text is empty). Returns an error when the chat can't stream a draft,
-	// so the caller can fall back to editing a normal message.
-	StreamDraft(ctx context.Context, chatID int64, draftID, text string, asMarkdown bool) error
-	// Delete removes a message; failures are non-fatal to the caller.
-	Delete(ctx context.Context, chatID int64, messageID int) error
-	// SendDocument uploads a file to the chat as a Telegram document. The data is
-	// streamed (the go-telegram lib uploads via multipart), so no token-bearing
-	// URL is ever constructed for it. Used by the outbox sweeper to deliver files
-	// a run produced.
-	SendDocument(ctx context.Context, chatID int64, name string, data io.Reader) error
-	// SendStarNudge posts the post-task star-nudge message carrying the inline
-	// confirm button (a callback button, so pressing it triggers the server-side
-	// star). It is a separate seam from Send because the nudge needs the star
-	// markup, not the Stop markup. Returns the new message id.
-	SendStarNudge(ctx context.Context, chatID int64, text string) (messageID int, err error)
-}
-
 // workspaceEnsurer resolves a chat's isolated workspace path, creating it (and
 // rendering CLAUDE.md + agents) on first use. *workspace.Renderer satisfies it;
 // tests use a fake.
 type workspaceEnsurer interface {
-	Ensure(chatID int64) (string, error)
+	Ensure(chatID ChatID) (string, error)
 }
 
 // dispatcher submits per-chat jobs (serial within a chat, parallel across chats,
 // capped) and cancels a chat's in-flight job. *dispatch.Dispatcher satisfies it.
 type dispatcher interface {
-	Submit(chatID int64, run func(ctx context.Context))
-	Cancel(chatID int64)
+	Submit(chatID ChatID, run func(ctx context.Context))
+	Cancel(chatID ChatID)
 }
 
 // sessionStore persists each chat's Claude session_id so the next message can
@@ -99,42 +60,53 @@ type dispatcher interface {
 // the sole Delete caller is the explicit /new reset (NewSession), never the run
 // or timeout path.
 type sessionStore interface {
-	Get(chatID int64) (sessionID string, ok bool)
-	Set(chatID int64, sessionID string) error
+	Get(chatID ChatID) (sessionID string, ok bool)
+	Set(chatID ChatID, sessionID string) error
 	// Delete drops chatID's stored session id so the next message starts fresh
 	// (no --resume). Deleting an absent chat is a harmless no-op. Only the
 	// explicit /new reset calls this.
-	Delete(chatID int64) error
+	Delete(chatID ChatID) error
 }
+
+// retryAfterFunc classifies a transport delivery error as a rate-limit back-off:
+// it returns the duration to wait and true when the error is a "too many
+// requests" signal the Service should honor before retrying, or false otherwise.
+// It is supplied per transport (Telegram maps its 429 here); a nil func is
+// treated as "never a rate limit", which is correct for transports without a
+// rate-limit signal.
+type retryAfterFunc func(err error) (time.Duration, bool)
 
 // Service runs messages through the Runner and renders progress to a chat. It
 // submits each message to the Dispatcher, which enforces per-chat serialization
 // and the global concurrency cap, and resolves a per-chat workspace for each run.
 type Service struct {
-	runner    claude.Runner
-	chat      chat
-	dispatch  dispatcher
-	workspace workspaceEnsurer
-	sessions  sessionStore
-	costs     *cost.Store
-	outbox    *Sweeper
-	nudge     *starNudge
-	opts      claude.Options
-	timeout   time.Duration
-	log       *slog.Logger
-	tick      time.Duration
-	nowFunc   func() time.Time
+	runner     claude.Runner
+	chat       Transport
+	caps       Capabilities
+	retryAfter retryAfterFunc
+	maxRunes   int
+	dispatch   dispatcher
+	workspace  workspaceEnsurer
+	sessions   sessionStore
+	costs      *cost.Store
+	outbox     *Sweeper
+	nudge      *starNudge
+	opts       claude.Options
+	timeout    time.Duration
+	log        *slog.Logger
+	tick       time.Duration
+	nowFunc    func() time.Time
 
-	mu      sync.Mutex       // guards runChat and lastMsg
-	runChat map[string]int64 // active runID -> chatID, for mapping Stop back to a chat
-	lastMsg map[int64]int    // chatID -> the source message id of its latest submitted run
+	mu      sync.Mutex           // guards runChat and lastMsg
+	runChat map[string]ChatID    // active runID -> chatID, for mapping Stop back to a chat
+	lastMsg map[ChatID]MessageID // chatID -> the source message id of its latest submitted run
 	runSeq  atomic.Uint64
 }
 
 // Config bundles the dependencies of a Service.
 type Config struct {
 	Runner     claude.Runner
-	Chat       chat
+	Transport  Transport
 	Dispatcher dispatcher
 	Workspace  workspaceEnsurer
 	// Sessions persists chatID -> session_id for --resume continuity. May be nil
@@ -155,8 +127,17 @@ type Config struct {
 	// Timeout bounds a single run's delivery; 0 means no deadline. On timeout the
 	// run is cancelled but the captured session_id is still stored (plan §7.3).
 	Timeout time.Duration
-	Logger  *slog.Logger
+	// RetryAfter classifies a transport delivery error as a rate-limit back-off
+	// (Telegram supplies its 429 detector here). Nil means the transport has no
+	// rate-limit signal, so a delivery error is never treated as throttling.
+	RetryAfter func(err error) (time.Duration, bool)
+	Logger     *slog.Logger
 }
+
+// defaultMaxMessageRunes is the chunk limit used when a Transport reports a
+// non-positive Capabilities.MaxMessageRunes. It matches Telegram's 4096-rune cap
+// so the default behavior is unchanged.
+const defaultMaxMessageRunes = TelegramMaxMessage
 
 // New builds a Service from cfg.
 func New(cfg Config) *Service {
@@ -164,22 +145,33 @@ func New(cfg Config) *Service {
 	if log == nil {
 		log = slog.Default()
 	}
+	caps := Capabilities{}
+	if cfg.Transport != nil {
+		caps = cfg.Transport.Capabilities()
+	}
+	maxRunes := caps.MaxMessageRunes
+	if maxRunes <= 0 {
+		maxRunes = defaultMaxMessageRunes
+	}
 	return &Service{
-		runner:    cfg.Runner,
-		chat:      cfg.Chat,
-		dispatch:  cfg.Dispatcher,
-		workspace: cfg.Workspace,
-		sessions:  cfg.Sessions,
-		costs:     cfg.Costs,
-		outbox:    cfg.Outbox,
-		nudge:     newStarNudge(cfg.StarNudge, cfg.Chat, log),
-		opts:      cfg.Opts,
-		timeout:   cfg.Timeout,
-		log:       log,
-		tick:      tickInterval,
-		nowFunc:   time.Now,
-		runChat:   map[string]int64{},
-		lastMsg:   map[int64]int{},
+		runner:     cfg.Runner,
+		chat:       cfg.Transport,
+		caps:       caps,
+		retryAfter: cfg.RetryAfter,
+		maxRunes:   maxRunes,
+		dispatch:   cfg.Dispatcher,
+		workspace:  cfg.Workspace,
+		sessions:   cfg.Sessions,
+		costs:      cfg.Costs,
+		outbox:     cfg.Outbox,
+		nudge:      newStarNudge(cfg.StarNudge, cfg.Transport, log),
+		opts:       cfg.Opts,
+		timeout:    cfg.Timeout,
+		log:        log,
+		tick:       tickInterval,
+		nowFunc:    time.Now,
+		runChat:    map[string]ChatID{},
+		lastMsg:    map[ChatID]MessageID{},
 	}
 }
 
@@ -191,9 +183,9 @@ func New(cfg Config) *Service {
 //
 // msgID is recorded as the chat's latest source message so a later edit of that
 // same message can be matched and superseded (see HandleEdit). userID is the
-// sending Telegram user, carried through so the run can attribute its cost to
-// that user for the cumulative per-user cost cap (plan §9b).
-func (s *Service) Handle(_ context.Context, chatID, userID int64, msgID int, prompt string) {
+// sending user, carried through so the run can attribute its cost to that user
+// for the cumulative per-user cost cap (plan §9b).
+func (s *Service) Handle(_ context.Context, chatID ChatID, userID int64, msgID MessageID, prompt string) {
 	// context.Background is deliberate: the run must outlive the per-update context
 	// (it runs under the Dispatcher's per-chat context, not the handler's).
 	//nolint:contextcheck // intentionally detached; see doc comment.
@@ -205,7 +197,9 @@ func (s *Service) Handle(_ context.Context, chatID, userID int64, msgID int, pro
 // (text + image content blocks) enabling Claude vision; an empty images slice
 // behaves exactly like Handle (trailing-arg text path). Edit-tracking and
 // dispatch semantics are identical to Handle.
-func (s *Service) HandleMedia(_ context.Context, chatID, userID int64, msgID int, prompt string, images []claude.ImageInput) {
+func (s *Service) HandleMedia(
+	_ context.Context, chatID ChatID, userID int64, msgID MessageID, prompt string, images []claude.ImageInput,
+) {
 	s.mu.Lock()
 	s.lastMsg[chatID] = msgID
 	s.mu.Unlock()
@@ -221,35 +215,38 @@ func (s *Service) HandleMedia(_ context.Context, chatID, userID int64, msgID int
 // Telegram user, so its cost is attributed to user 0 (a sentinel that no real
 // allow-listed user holds); these synthetic relays are rare and are not rate-/
 // cost-gated on the inbound path.
-func (s *Service) Inject(chatID int64, prompt string) {
+func (s *Service) Inject(chatID ChatID, prompt string) {
 	s.dispatch.Submit(chatID, func(ctx context.Context) {
 		s.run(ctx, chatID, 0, prompt, nil)
 	})
 }
 
-// HandleEdit processes an edited Telegram message. When the edit targets the
-// chat's latest submitted message (the one currently in-flight or queued), the
+// HandleEdit processes an edited message. When the edit targets the chat's
+// latest submitted message (the one currently in-flight or queued), the
 // in-flight run is cancelled and a fresh run is submitted with the new text,
 // superseding the stale one (plan §4 / §7.4). When the edit targets an older,
 // already-superseded or finished message it is treated as a fresh message: a new
 // run is submitted so the user still gets an answer to their edit. Deletions are
 // not delivered to bots and are not handled here.
-func (s *Service) HandleEdit(ctx context.Context, chatID, userID int64, msgID int, prompt string) {
+func (s *Service) HandleEdit(ctx context.Context, chatID ChatID, userID int64, msgID MessageID, prompt string) {
 	s.HandleEditMedia(ctx, chatID, userID, msgID, prompt, nil)
 }
 
 // HandleEditMedia is HandleEdit with optional image attachments (see
 // HandleMedia). An empty images slice behaves exactly like HandleEdit.
-func (s *Service) HandleEditMedia(_ context.Context, chatID, userID int64, msgID int, prompt string, images []claude.ImageInput) {
+func (s *Service) HandleEditMedia(
+	_ context.Context, chatID ChatID, userID int64, msgID MessageID, prompt string, images []claude.ImageInput,
+) {
 	s.mu.Lock()
 	last, ok := s.lastMsg[chatID]
 	supersede := ok && last == msgID
 	// Only advance the chat's "latest" message id when this edit targets/becomes
 	// the latest. Editing an OLDER message (while a newer message's run is in
 	// flight) must NOT rewind lastMsg, or a later edit of the newer message would
-	// fail to supersede it and queue a duplicate run instead. Telegram message ids
-	// increase monotonically per chat, so a larger msgID is genuinely newer.
-	if supersede || !ok || msgID > last {
+	// fail to supersede it and queue a duplicate run instead. Message ids increase
+	// monotonically per chat, so a "newer" msgID is genuinely later (newerMessage
+	// compares numeric ids numerically, preserving the original int64 ordering).
+	if supersede || !ok || newerMessage(msgID, last) {
 		s.lastMsg[chatID] = msgID
 	}
 	s.mu.Unlock()
@@ -287,7 +284,7 @@ func (s *Service) Stop(runID string) bool {
 // shutdown.
 //
 //nolint:gocyclo // orchestrates the single-run lifecycle with best-effort fallbacks.
-func (s *Service) run(ctx context.Context, chatID, userID int64, prompt string, images []claude.ImageInput) {
+func (s *Service) run(ctx context.Context, chatID ChatID, userID int64, prompt string, images []claude.ImageInput) {
 	runID := strconv.FormatUint(s.runSeq.Add(1), 10)
 	s.mu.Lock()
 	s.runChat[runID] = chatID
@@ -307,7 +304,7 @@ func (s *Service) run(ctx context.Context, chatID, userID int64, prompt string, 
 	workdir, err := s.workspace.Ensure(chatID)
 	if err != nil {
 		s.log.Error("ensure workspace", "chat_id", chatID, "error", err)
-		if _, sErr := s.chat.Send(ctx, chatID, tgui.FinalError(err), "", true); sErr != nil {
+		if _, sErr := s.chat.Send(ctx, chatID, FinalError(err), "", true); sErr != nil {
 			s.log.Error("send workspace error", "error", sErr)
 		}
 		return
@@ -336,23 +333,24 @@ func (s *Service) run(ctx context.Context, chatID, userID int64, prompt string, 
 	events, err := s.runner.Run(ctx, prompt, opts)
 	if err != nil {
 		s.log.Error("start run", "error", err)
-		if _, sErr := s.chat.Send(ctx, chatID, tgui.FinalError(err), "", true); sErr != nil {
+		if _, sErr := s.chat.Send(ctx, chatID, FinalError(err), "", true); sErr != nil {
 			s.log.Error("send start error", "error", sErr)
 		}
 		return
 	}
 
 	start := s.nowFunc()
-	prog := tgui.NewProgress(func() time.Duration { return s.nowFunc().Sub(start) }, 0)
+	prog := NewProgress(func() time.Duration { return s.nowFunc().Sub(start) }, 0)
 
 	// The anchor: a persistent message that carries the Stop button (a draft can't)
 	// and is later edited into the final answer. It stays static while live progress
-	// streams as a draft; only the fallback path (no draft support) edits it.
+	// streams as a draft; only the fallback path (no draft support) edits it. An
+	// empty id means no anchor was created (Send failed) — we can still deliver.
 	progressMsgID, err := s.chat.Send(ctx, chatID, anchorText, runID, false)
 	if err != nil {
 		// Without an anchor we can still deliver the result; keep going.
 		s.log.Error("send anchor message", "error", err)
-		progressMsgID = 0
+		progressMsgID = ""
 	}
 
 	ticker := time.NewTicker(s.tick)
@@ -368,7 +366,7 @@ func (s *Service) run(ctx context.Context, chatID, userID int64, prompt string, 
 		// draftStreaming holds while we push live progress as an ephemeral draft (the
 		// rate-limit-free path). The first failed StreamDraft flips it off and the run
 		// falls back to editing the anchor for its remainder.
-		draftStreaming = progressMsgID != 0
+		draftStreaming = progressMsgID != ""
 		finalResult    *claude.RunResult
 		finalErr       error
 	)
@@ -386,7 +384,7 @@ func (s *Service) run(ctx context.Context, chatID, userID int64, prompt string, 
 	// render pushes the current progress frame: as a rate-limit-free draft preview
 	// while draftStreaming holds, else by editing the anchor (rate-limit aware).
 	render := func() {
-		if progressMsgID == 0 {
+		if progressMsgID == "" {
 			return
 		}
 		frame := prog.Frame()
@@ -415,7 +413,7 @@ func (s *Service) run(ctx context.Context, chatID, userID int64, prompt string, 
 			return
 		}
 		if err := s.chat.Edit(ctx, chatID, progressMsgID, frame, runID, true); err != nil {
-			if d, ok := retryAfter(err); ok {
+			if d, ok := s.retryAfterErr(err); ok {
 				throttledUntil = s.nowFunc().Add(d)
 			}
 			s.log.Debug("edit progress", "error", err)
@@ -505,7 +503,7 @@ func (s *Service) recordCost(userID int64, res *claude.RunResult) {
 // next message its resume, it does not break delivery. Crucially this is called
 // on SystemInit (not only on Result), so a run that later times out or is
 // stopped still leaves a resumable session behind (plan §7.3).
-func (s *Service) storeSession(chatID int64, sessionID string) {
+func (s *Service) storeSession(chatID ChatID, sessionID string) {
 	if s.sessions == nil || sessionID == "" {
 		return
 	}
@@ -515,9 +513,9 @@ func (s *Service) storeSession(chatID int64, sessionID string) {
 }
 
 // finish renders the terminal message and replaces the progress message with it
-// (chunked when the answer exceeds the Telegram size limit).
+// (chunked when the answer exceeds the platform's message size limit).
 func (s *Service) finish(
-	ctx context.Context, chatID int64, progressMsgID int, runID string, res *claude.RunResult, runErr, ctxErr error,
+	ctx context.Context, chatID ChatID, progressMsgID MessageID, runID string, res *claude.RunResult, runErr, ctxErr error,
 ) {
 	// Use a background context for delivery: the run ctx may be cancelled by Stop
 	// or shutdown, but the final message should still reach the user.
@@ -530,17 +528,17 @@ func (s *Service) finish(
 	case ctxErr != nil && res == nil && runErr == nil:
 		text = "⏹ Stopped."
 	case runErr != nil:
-		text = tgui.FinalError(runErr)
+		text = FinalError(runErr)
 	default:
-		text = tgui.Final(res)
+		text = Final(res)
 	}
 
-	chunks := tgui.Chunk(text)
+	chunks := ChunkSize(text, s.maxRunes)
 
 	// Replace the progress message with the first chunk (clearing Stop markup);
 	// send any further chunks as new messages.
 	//nolint:nestif // the edit-then-resend fallback is a single cohesive delivery path.
-	if progressMsgID != 0 {
+	if progressMsgID != "" {
 		if err := s.deliverWithBackoff(deliverCtx, "edit final", func() error {
 			return s.chat.Edit(deliverCtx, chatID, progressMsgID, chunks[0], "", true)
 		}); err != nil {
@@ -577,34 +575,33 @@ func (s *Service) finish(
 	}
 
 	// After the text answer is delivered, sweep the per-chat outbox and send any
-	// files the run produced as Telegram documents. This runs on EVERY terminal
-	// path (normal Result, RunError, Stop/timeout) because finish is the single
-	// terminal funnel, and on deliverCtx so a cancelled run still delivers files
-	// produced before the cancel (AC2). A nil sweeper or an empty/absent outbox is
-	// a no-op that leaves the text-only behavior byte-identical.
-	if s.outbox != nil {
+	// files the run produced as documents. This runs on EVERY terminal path
+	// (normal Result, RunError, Stop/timeout) because finish is the single terminal
+	// funnel, and on deliverCtx so a cancelled run still delivers files produced
+	// before the cancel (AC2). A nil sweeper or an empty/absent outbox is a no-op
+	// that leaves the text-only behavior byte-identical. Platforms that cannot send
+	// documents (Capabilities.CanSendDocument == false) skip the sweep; Telegram
+	// reports true, so its behavior is unchanged.
+	if s.outbox != nil && s.caps.CanSendDocument {
 		s.outbox.Sweep(deliverCtx, chatID, s.chat)
 	}
 }
 
-// retryAfter reports the server-requested back-off when err is a Telegram 429
-// (rate limit), flooring a missing/zero value to 1s so callers still wait.
-func retryAfter(err error) (time.Duration, bool) {
-	var tmr *bot.TooManyRequestsError
-	if errors.As(err, &tmr) {
-		if d := time.Duration(tmr.RetryAfter) * time.Second; d > 0 {
-			return d, true
-		}
-		return time.Second, true
+// retryAfterErr classifies a transport delivery error as a rate-limit back-off
+// via the per-transport RetryAfter func. A nil func (transport without a
+// rate-limit signal) reports "not a rate limit".
+func (s *Service) retryAfterErr(err error) (time.Duration, bool) {
+	if s.retryAfter == nil {
+		return 0, false
 	}
-	return 0, false
+	return s.retryAfter(err)
 }
 
-// deliverWithBackoff runs do, retrying on a Telegram 429 after the server's
+// deliverWithBackoff runs do, retrying on a transport rate-limit signal after the
 // requested delay (bounded by maxWait, a few attempts) so the final answer is
-// never lost to a transient rate limit. It returns on success, a non-429 error,
-// or ctx cancellation. Used for terminal delivery on a background ctx — never on
-// the event loop, which must not block.
+// never lost to a transient rate limit. It returns on success, a non-rate-limit
+// error, or ctx cancellation. Used for terminal delivery on a background ctx —
+// never on the event loop, which must not block.
 func (s *Service) deliverWithBackoff(ctx context.Context, what string, do func() error) error {
 	const (
 		maxAttempts = 4
@@ -615,14 +612,14 @@ func (s *Service) deliverWithBackoff(ctx context.Context, what string, do func()
 		if err = do(); err == nil {
 			return nil
 		}
-		d, ok := retryAfter(err)
+		d, ok := s.retryAfterErr(err)
 		if !ok {
 			return err
 		}
 		if d > maxWait {
 			d = maxWait
 		}
-		s.log.Warn("telegram rate-limited; backing off", "what", what, "retry_after", d, "attempt", attempt)
+		s.log.Warn("transport rate-limited; backing off", "what", what, "retry_after", d, "attempt", attempt)
 		t := time.NewTimer(d)
 		select {
 		case <-t.C:
@@ -632,4 +629,18 @@ func (s *Service) deliverWithBackoff(ctx context.Context, what string, do func()
 		}
 	}
 	return err
+}
+
+// newerMessage reports whether message id a is later than b within a chat.
+// Platform message ids increase monotonically per chat; Telegram (and VK peer)
+// ids are numeric, so when both parse as integers they are compared numerically
+// — preserving the original int64 ordering exactly (so "9" is older than "10").
+// Ids that are not both numeric fall back to a lexicographic compare.
+func newerMessage(a, b MessageID) bool {
+	ai, aErr := strconv.ParseInt(a, 10, 64)
+	bi, bErr := strconv.ParseInt(b, 10, 64)
+	if aErr == nil && bErr == nil {
+		return ai > bi
+	}
+	return a > b
 }

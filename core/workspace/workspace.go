@@ -50,8 +50,8 @@ type Renderer struct {
 // dropped first, mirroring the entrypoint) and the agents are re-copied, so a
 // second call simply rewrites the same files. The returned path is
 // <BaseDir>/chat_<id>.
-func (r *Renderer) Ensure(chatID int64) (string, error) {
-	ws := filepath.Join(r.BaseDir, fmt.Sprintf("chat_%d", chatID))
+func (r *Renderer) Ensure(chatID string) (string, error) {
+	ws := filepath.Join(r.BaseDir, "chat_"+chatID)
 	agentsDst := filepath.Join(ws, ".claude", "agents")
 	if err := os.MkdirAll(agentsDst, dirPerm); err != nil {
 		return "", fmt.Errorf("create workspace dirs: %w", err)
@@ -73,8 +73,8 @@ func (r *Renderer) Ensure(chatID int64) (string, error) {
 // every repo working tree and can never end up in a git commit/PR. The directory
 // is created with 0o755 and the call is idempotent. The returned path is absolute
 // when BaseDir is absolute.
-func (r *Renderer) UploadsDir(chatID int64) (string, error) {
-	dir := filepath.Join(r.BaseDir, fmt.Sprintf("chat_%d", chatID), "uploads")
+func (r *Renderer) UploadsDir(chatID string) (string, error) {
+	dir := filepath.Join(r.BaseDir, "chat_"+chatID, "uploads")
 	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return "", fmt.Errorf("create uploads dir: %w", err)
 	}
@@ -90,8 +90,8 @@ func (r *Renderer) UploadsDir(chatID int64) (string, error) {
 // <outbox>/sent subdirectory (created on first archive). The directory is
 // created with 0o755 and the call is idempotent. The returned path is absolute
 // when BaseDir is absolute.
-func (r *Renderer) OutboxDir(chatID int64) (string, error) {
-	dir := filepath.Join(r.BaseDir, fmt.Sprintf("chat_%d", chatID), "outbox")
+func (r *Renderer) OutboxDir(chatID string) (string, error) {
+	dir := filepath.Join(r.BaseDir, "chat_"+chatID, "outbox")
 	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return "", fmt.Errorf("create outbox dir: %w", err)
 	}

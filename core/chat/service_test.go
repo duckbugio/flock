@@ -1,5 +1,5 @@
-//nolint:testpackage // intentionally whitebox to test unexported telegram run loop internals
-package telegram
+//nolint:testpackage // intentionally whitebox to test unexported chat run loop internals
+package chat
 
 import (
 	"context"
@@ -15,12 +15,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/go-telegram/bot"
-
 	"github.com/duckbugio/flock/core/claude"
 	"github.com/duckbugio/flock/core/dispatch"
 	"github.com/duckbugio/flock/core/session"
-	"github.com/duckbugio/flock/internal/tgui"
 )
 
 // Shared fixture values used across multiple run-loop tests.
@@ -29,25 +26,10 @@ const (
 	sessShutdown = "sess-shutdown"
 	// anchorMsgID is the id of the first message the fake chat hands out, which is
 	// the progress/answer anchor every single-run test inspects.
-	anchorMsgID = 1
+	anchorMsgID = "1"
 	// testChatID is the chat id the shutdown tests submit under.
-	testChatID = 100
+	testChatID = "100"
 )
-
-// TestRetryAfter checks the Telegram-429 detector that drives the rate-limit
-// back-off: a TooManyRequestsError yields its RetryAfter (zero floored to 1s);
-// any other error yields no back-off.
-func TestRetryAfter(t *testing.T) {
-	if d, ok := retryAfter(&bot.TooManyRequestsError{RetryAfter: 19}); !ok || d != 19*time.Second {
-		t.Fatalf("retryAfter(429, 19) = %v, %v; want 19s, true", d, ok)
-	}
-	if d, ok := retryAfter(&bot.TooManyRequestsError{RetryAfter: 0}); !ok || d != time.Second {
-		t.Fatalf("retryAfter(429, 0) = %v, %v; want 1s, true", d, ok)
-	}
-	if _, ok := retryAfter(errors.New("boom")); ok {
-		t.Fatal("retryAfter(non-429) reported a back-off")
-	}
-}
 
 // openRealStore opens the real file-backed session store; it is a thin alias so
 // the test body reads clearly.
@@ -61,9 +43,9 @@ func openRealStore(path string) (*session.FileStore, error) {
 type fakeChat struct {
 	mu       sync.Mutex
 	nextID   int
-	texts    map[int]string // current text per message id
-	hasStop  map[int]bool   // whether the message currently shows a Stop button
-	deleted  map[int]bool
+	texts    map[MessageID]string // current text per message id
+	hasStop  map[MessageID]bool   // whether the message currently shows a Stop button
+	deleted  map[MessageID]bool
 	sent     []string // every Send'd text, in order
 	docs     []string // every SendDocument'd filename, in order
 	nudges   []string // every SendStarNudge'd text, in order
@@ -76,24 +58,30 @@ type fakeChat struct {
 
 func newFakeChat() *fakeChat {
 	return &fakeChat{
-		texts:   map[int]string{},
-		hasStop: map[int]bool{},
-		deleted: map[int]bool{},
+		texts:   map[MessageID]string{},
+		hasStop: map[MessageID]bool{},
+		deleted: map[MessageID]bool{},
 	}
 }
 
-func (f *fakeChat) Send(_ context.Context, _ int64, text, stopRunID string, _ bool) (int, error) {
+// Capabilities reports a full-capability transport so the fake drives the same
+// run-loop path Telegram does (live edits, inline Stop, documents, 4096 cap).
+func (f *fakeChat) Capabilities() Capabilities {
+	return Capabilities{CanEditMessages: true, CanInlineStop: true, CanSendDocument: true, MaxMessageRunes: TelegramMaxMessage}
+}
+
+func (f *fakeChat) Send(_ context.Context, _ ChatID, text, stopRunID string, _ bool) (MessageID, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nextID++
-	id := f.nextID
+	id := strconv.Itoa(f.nextID)
 	f.texts[id] = text
 	f.hasStop[id] = stopRunID != ""
 	f.sent = append(f.sent, text)
 	return id, nil
 }
 
-func (f *fakeChat) Edit(_ context.Context, _ int64, messageID int, text, stopRunID string, _ bool) error {
+func (f *fakeChat) Edit(_ context.Context, _ ChatID, messageID MessageID, text, stopRunID string, _ bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.edits++
@@ -112,7 +100,7 @@ func (f *fakeChat) editCount() int {
 	return f.edits
 }
 
-func (f *fakeChat) StreamDraft(_ context.Context, _ int64, _, text string, asMarkdown bool) error {
+func (f *fakeChat) StreamDraft(_ context.Context, _ ChatID, _, text string, asMarkdown bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.draftErr != nil {
@@ -123,14 +111,14 @@ func (f *fakeChat) StreamDraft(_ context.Context, _ int64, _, text string, asMar
 	return nil
 }
 
-func (f *fakeChat) Delete(_ context.Context, _ int64, messageID int) error {
+func (f *fakeChat) Delete(_ context.Context, _ ChatID, messageID MessageID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deleted[messageID] = true
 	return nil
 }
 
-func (f *fakeChat) SendDocument(_ context.Context, _ int64, name string, data io.Reader) error {
+func (f *fakeChat) SendDocument(_ context.Context, _ ChatID, name string, data io.Reader) error {
 	// Drain the reader so the fake behaves like a real upload (and so the source
 	// file is read to completion before the sweeper closes it).
 	_, _ = io.Copy(io.Discard, data)
@@ -140,11 +128,11 @@ func (f *fakeChat) SendDocument(_ context.Context, _ int64, name string, data io
 	return nil
 }
 
-func (f *fakeChat) SendStarNudge(_ context.Context, _ int64, text string) (int, error) {
+func (f *fakeChat) SendStarNudge(_ context.Context, _ ChatID, text string) (MessageID, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nextID++
-	id := f.nextID
+	id := strconv.Itoa(f.nextID)
 	f.texts[id] = text
 	f.nudges = append(f.nudges, text)
 	return id, nil
@@ -171,18 +159,18 @@ func (f *fakeChat) snapshot() (string, bool) {
 // fakeWorkspace returns a fixed path and records the chat ids it was asked for.
 type fakeWorkspace struct {
 	mu    sync.Mutex
-	calls []int64
+	calls []ChatID
 	err   error
 }
 
-func (w *fakeWorkspace) Ensure(chatID int64) (string, error) {
+func (w *fakeWorkspace) Ensure(chatID ChatID) (string, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.calls = append(w.calls, chatID)
 	if w.err != nil {
 		return "", w.err
 	}
-	return "/tmp/chat_" + strconv.FormatInt(chatID, 10), nil
+	return "/tmp/chat_" + chatID, nil
 }
 
 // fakeRunner emits a scripted slice of events on a channel the test controls.
@@ -220,23 +208,23 @@ func (r *fakeRunner) Run(ctx context.Context, _ string, _ claude.Options) (<-cha
 // persisted (and when).
 type fakeSessions struct {
 	mu     sync.Mutex
-	store  map[int64]string
+	store  map[ChatID]string
 	setLog []string // sessionIDs passed to Set, in order
-	delLog []int64  // chatIDs passed to Delete, in order
+	delLog []ChatID // chatIDs passed to Delete, in order
 }
 
 func newFakeSessions() *fakeSessions {
-	return &fakeSessions{store: map[int64]string{}}
+	return &fakeSessions{store: map[ChatID]string{}}
 }
 
-func (f *fakeSessions) Get(chatID int64) (string, bool) {
+func (f *fakeSessions) Get(chatID ChatID) (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	id, ok := f.store[chatID]
 	return id, ok
 }
 
-func (f *fakeSessions) Set(chatID int64, sessionID string) error {
+func (f *fakeSessions) Set(chatID ChatID, sessionID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if sessionID == "" {
@@ -247,7 +235,7 @@ func (f *fakeSessions) Set(chatID int64, sessionID string) error {
 	return nil
 }
 
-func (f *fakeSessions) Delete(chatID int64) error {
+func (f *fakeSessions) Delete(chatID ChatID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.store, chatID)
@@ -262,10 +250,10 @@ func (f *fakeSessions) get() (string, bool) {
 	return id, ok
 }
 
-func (f *fakeSessions) deletes() []int64 {
+func (f *fakeSessions) deletes() []ChatID {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]int64(nil), f.delLog...)
+	return append([]ChatID(nil), f.delLog...)
 }
 
 func (f *fakeSessions) sets() []string {
@@ -275,12 +263,12 @@ func (f *fakeSessions) sets() []string {
 }
 
 // newTestService builds a Service over a real Dispatcher and a fake workspace.
-func newTestService(t *testing.T, r claude.Runner, c chat) (*Service, *dispatch.Dispatcher) {
+func newTestService(t *testing.T, r claude.Runner, c Transport) (*Service, *dispatch.Dispatcher) {
 	t.Helper()
 	d := dispatch.New(4)
 	s := New(Config{
 		Runner:     r,
-		Chat:       c,
+		Transport:  c,
 		Dispatcher: d,
 		Workspace:  &fakeWorkspace{},
 		Logger:     slog.New(slog.DiscardHandler),
@@ -292,13 +280,13 @@ func newTestService(t *testing.T, r claude.Runner, c chat) (*Service, *dispatch.
 // newTestServiceWithSessions builds a Service wired to a session store (and an
 // optional per-run timeout) for the Stage 5 continuity/timeout tests.
 func newTestServiceWithSessions(
-	t *testing.T, r claude.Runner, c chat, sess sessionStore, timeout time.Duration,
+	t *testing.T, r claude.Runner, c Transport, sess sessionStore, timeout time.Duration,
 ) (*Service, *dispatch.Dispatcher) {
 	t.Helper()
 	d := dispatch.New(4)
 	s := New(Config{
 		Runner:     r,
-		Chat:       c,
+		Transport:  c,
 		Dispatcher: d,
 		Workspace:  &fakeWorkspace{},
 		Sessions:   sess,
@@ -371,7 +359,7 @@ func TestRunRendersProgressThenFinal(t *testing.T) {
 	svc, d := newTestService(t, fr, fc)
 	defer d.Close()
 
-	svc.Handle(context.Background(), 100, 100, 1, "hello")
+	svc.Handle(context.Background(), "100", 100, "1", "hello")
 
 	// The progress message (id 1) should eventually hold the final answer with no
 	// Stop button.
@@ -394,7 +382,7 @@ func TestRunStreamsProgressAsDraftThenClears(t *testing.T) {
 	svc, d := newTestService(t, fr, fc)
 	defer d.Close()
 
-	svc.Handle(context.Background(), 100, 100, 1, "hello")
+	svc.Handle(context.Background(), "100", 100, "1", "hello")
 
 	waitUntil(t, func() bool {
 		text, stop := fc.snapshot()
@@ -440,7 +428,7 @@ func TestRunFallsBackToEditsWhenDraftFails(t *testing.T) {
 	svc, d := newTestService(t, fr, fc)
 	defer d.Close()
 
-	svc.Handle(context.Background(), 100, 100, 1, "hello")
+	svc.Handle(context.Background(), "100", 100, "1", "hello")
 
 	// Despite drafts failing, the answer still lands — delivered by editing the anchor.
 	waitUntil(t, func() bool {
@@ -455,21 +443,21 @@ func TestRunFallsBackToEditsWhenDraftFails(t *testing.T) {
 	}
 }
 
-// fakeClock is a thread-safe, manually-advanced clock for nowFunc injection.
-type fakeClock struct {
+// manualClock is a thread-safe, manually-advanced clock for nowFunc injection.
+type manualClock struct {
 	mu sync.Mutex
 	t  time.Time
 }
 
-func newFakeClock() *fakeClock { return &fakeClock{t: time.Unix(0, 0)} }
+func newManualClock() *manualClock { return &manualClock{t: time.Unix(0, 0)} }
 
-func (c *fakeClock) now() time.Time {
+func (c *manualClock) now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.t
 }
 
-func (c *fakeClock) advance(d time.Duration) {
+func (c *manualClock) advance(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.t = c.t.Add(d)
@@ -491,11 +479,11 @@ func TestEditFallbackRespectsMinInterval(t *testing.T) {
 	svc, d := newTestService(t, fr, fc)
 	defer d.Close()
 
-	clk := newFakeClock()
+	clk := newManualClock()
 	svc.nowFunc = clk.now
 	svc.tick = time.Millisecond // tick fast so many ticks land per clock window
 
-	svc.Handle(context.Background(), 100, 100, 1, "go")
+	svc.Handle(context.Background(), "100", 100, "1", "go")
 
 	// Wait until the anchor exists (the run is up and in fallback mode).
 	waitUntil(t, func() bool {
@@ -539,14 +527,14 @@ func TestEditFallbackRespectsMinInterval(t *testing.T) {
 }
 
 func TestRunChunksLongFinal(t *testing.T) {
-	long := strings.Repeat("x", tgui.TelegramMaxMessage+500)
+	long := strings.Repeat("x", TelegramMaxMessage+500)
 	fc := newFakeChat()
 	fr := &fakeRunner{events: []claude.Event{
 		{Type: claude.Result, Result: &claude.RunResult{Text: long}},
 	}}
 	svc, d := newTestService(t, fr, fc)
 	defer d.Close()
-	svc.Handle(context.Background(), 100, 100, 1, "go")
+	svc.Handle(context.Background(), "100", 100, "1", "go")
 
 	// Wait until the tail chunk has been sent (2 sends: progress + tail).
 	waitUntil(t, func() bool {
@@ -557,7 +545,7 @@ func TestRunChunksLongFinal(t *testing.T) {
 
 	// First chunk replaces the progress message; the remainder is a new Send.
 	first, _ := fc.snapshot()
-	if utf8.RuneCountInString(first) > tgui.TelegramMaxMessage {
+	if utf8.RuneCountInString(first) > TelegramMaxMessage {
 		t.Fatalf("first chunk too big: %d", utf8.RuneCountInString(first))
 	}
 }
@@ -569,7 +557,7 @@ func TestRunErrorEvent(t *testing.T) {
 	}}
 	svc, d := newTestService(t, fr, fc)
 	defer d.Close()
-	svc.Handle(context.Background(), 100, 100, 1, "go")
+	svc.Handle(context.Background(), "100", 100, "1", "go")
 
 	waitUntil(t, func() bool {
 		text, _ := fc.snapshot()
@@ -587,7 +575,7 @@ func TestStopCancelsRun(t *testing.T) {
 	svc, d := newTestService(t, fr, fc)
 	defer d.Close()
 
-	svc.Handle(context.Background(), 100, 100, 1, "go")
+	svc.Handle(context.Background(), "100", 100, "1", "go")
 
 	// Wait until the run is registered, then Stop it. runID for the first run is "1".
 	waitUntil(t, func() bool { return svc.Stop("1") })
@@ -606,14 +594,14 @@ func TestWorkspaceErrorSurfaced(t *testing.T) {
 	defer d.Close()
 	svc := New(Config{
 		Runner:     fr,
-		Chat:       fc,
+		Transport:  fc,
 		Dispatcher: d,
 		Workspace:  &fakeWorkspace{err: errors.New("no workspace")},
 		Logger:     slog.New(slog.DiscardHandler),
 	})
 	svc.tick = 5 * time.Millisecond
 
-	svc.Handle(context.Background(), 100, 100, 1, "go")
+	svc.Handle(context.Background(), "100", 100, "1", "go")
 	waitUntil(t, func() bool {
 		fc.mu.Lock()
 		defer fc.mu.Unlock()
@@ -635,18 +623,18 @@ func TestSerialWithinChat(t *testing.T) {
 
 	// First run blocks on its gate; a second message for the same chat must queue
 	// behind it (serial), so only one progress message exists while the first runs.
-	svc.Handle(context.Background(), 100, 100, 1, "first")
+	svc.Handle(context.Background(), "100", 100, "1", "first")
 	waitUntil(t, func() bool {
 		_, stop := fc.snapshot()
 		return stop // first run posted its progress message
 	})
 
-	svc.Handle(context.Background(), 100, 100, 2, "second")
+	svc.Handle(context.Background(), "100", 100, "2", "second")
 	// The second run must not have started while the first is gated: no second
 	// progress message (message id 2) should exist yet.
 	time.Sleep(30 * time.Millisecond)
 	fc.mu.Lock()
-	_, secondStarted := fc.texts[2]
+	_, secondStarted := fc.texts["2"]
 	fc.mu.Unlock()
 	if secondStarted {
 		t.Fatal("second run started before the first finished — not serial")
@@ -697,14 +685,14 @@ func TestHandleEditSupersedesInFlightRun(t *testing.T) {
 	defer d.Close()
 
 	// Original message M (id 7) starts a run that hangs.
-	svc.Handle(context.Background(), 100, 100, 7, "first version")
+	svc.Handle(context.Background(), "100", 100, "7", "first version")
 	waitUntil(t, func() bool {
 		return len(rr.seen()) == 1 && rr.seen()[0] == "first version"
 	})
 
 	// An edit of the SAME message id supersedes: cancel the in-flight run and
 	// resubmit with the new text.
-	svc.HandleEdit(context.Background(), 100, 100, 7, "edited version")
+	svc.HandleEdit(context.Background(), "100", 100, "7", "edited version")
 
 	// The edited run eventually starts (serial: it runs after the cancelled one
 	// unwinds).
@@ -741,7 +729,7 @@ func TestHandleEditOlderMessageDoesNotRewindLatest(t *testing.T) {
 	defer d.Close()
 
 	// Newer message N (id 20) starts a run that hangs in-flight.
-	svc.Handle(context.Background(), 100, 100, 20, "newer version")
+	svc.Handle(context.Background(), "100", 100, "20", "newer version")
 	waitUntil(t, func() bool {
 		return len(rr.seen()) == 1 && rr.seen()[0] == "newer version"
 	})
@@ -750,20 +738,20 @@ func TestHandleEditOlderMessageDoesNotRewindLatest(t *testing.T) {
 	// (not a supersede) and must NOT rewind lastMsg back to 5. The fresh run is
 	// queued behind the still-hanging newer run (serial per chat), so we assert on
 	// lastMsg directly rather than waiting for the queued run to start.
-	svc.HandleEdit(context.Background(), 100, 100, 5, "older edit")
+	svc.HandleEdit(context.Background(), "100", 100, "5", "older edit")
 
 	svc.mu.Lock()
-	last := svc.lastMsg[100]
+	last := svc.lastMsg["100"]
 	svc.mu.Unlock()
-	if last != 20 {
-		t.Fatalf("lastMsg rewound to %d, want 20 (newer message must stay latest)", last)
+	if last != "20" {
+		t.Fatalf("lastMsg rewound to %q, want 20 (newer message must stay latest)", last)
 	}
 
 	// Now editing the newer message (id 20) must still supersede its in-flight
 	// run: because lastMsg was not rewound, this matches the latest and cancels
 	// the in-flight run. With lastMsg left at 5 (the bug) this edit would instead
 	// queue a duplicate run.
-	svc.HandleEdit(context.Background(), 100, 100, 20, "newer edited")
+	svc.HandleEdit(context.Background(), "100", 100, "20", "newer edited")
 
 	close(rr.gate) // let queued runs drain
 	waitUntil(t, func() bool {
@@ -787,7 +775,7 @@ func TestHandleEditUnknownMessageStartsFreshRun(t *testing.T) {
 	defer d.Close()
 
 	// No prior Handle for this chat/message: editing message 99 still runs.
-	svc.HandleEdit(context.Background(), 200, 200, 99, "out of nowhere")
+	svc.HandleEdit(context.Background(), "200", 200, "99", "out of nowhere")
 
 	waitUntil(t, func() bool {
 		seen := rr.seen()
@@ -807,7 +795,7 @@ func TestSessionPersistedAndResumed(t *testing.T) {
 
 	// First run for chat 100: no stored id yet, so it starts fresh and the
 	// captured session_id is persisted.
-	svc.Handle(context.Background(), 100, 100, 1, "hello")
+	svc.Handle(context.Background(), "100", 100, "1", "hello")
 	waitUntil(t, func() bool {
 		id, ok := sess.get()
 		return ok && id == "sess-xyz"
@@ -820,7 +808,7 @@ func TestSessionPersistedAndResumed(t *testing.T) {
 	}
 
 	// Second run for the same chat must resume: it is invoked with the stored id.
-	svc.Handle(context.Background(), 100, 100, 2, "again")
+	svc.Handle(context.Background(), "100", 100, "2", "again")
 	waitUntil(t, func() bool {
 		ids := fr.ids()
 		return len(ids) == 2 && ids[1] == "sess-xyz"
@@ -839,7 +827,7 @@ func TestSessionPreservedOnTimeout(t *testing.T) {
 	svc, d := newTestServiceWithSessions(t, fr, fc, sess, 30*time.Millisecond)
 	defer d.Close()
 
-	svc.Handle(context.Background(), 100, 100, 1, "long task")
+	svc.Handle(context.Background(), "100", 100, "1", "long task")
 
 	// Despite the run timing out before any Result, the SystemInit session_id must
 	// remain stored (NOT discarded/deleted).
@@ -856,7 +844,7 @@ func TestSessionPreservedOnTimeout(t *testing.T) {
 
 	// A subsequent message resumes the preserved session.
 	fr.gate = nil // let later runs complete normally
-	svc.Handle(context.Background(), 100, 100, 2, "resume please")
+	svc.Handle(context.Background(), "100", 100, "2", "resume please")
 	waitUntil(t, func() bool {
 		ids := fr.ids()
 		return len(ids) == 2 && ids[1] == "sess-timeout"
@@ -877,9 +865,9 @@ func TestSessionPersistsWithRealStore(t *testing.T) {
 	svc, d := newTestServiceWithSessions(t, fr, fc, store, 0)
 	defer d.Close()
 
-	svc.Handle(context.Background(), 555, 555, 1, "hi")
+	svc.Handle(context.Background(), "555", 555, "1", "hi")
 	waitUntil(t, func() bool {
-		id, ok := store.Get(555)
+		id, ok := store.Get("555")
 		return ok && id == "sess-real"
 	})
 
@@ -888,7 +876,7 @@ func TestSessionPersistsWithRealStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen store: %v", err)
 	}
-	if id, ok := reopened.Get(555); !ok || id != "sess-real" {
+	if id, ok := reopened.Get("555"); !ok || id != "sess-real" {
 		t.Fatalf("after reopen Get = (%q, %v), want (%q, true)", id, ok, "sess-real")
 	}
 }
@@ -906,7 +894,7 @@ func TestSessionPreservedOnShutdown(t *testing.T) {
 	fr := &sessionRunner{emitInit: sessShutdown, emitFinal: sessShutdown, gate: make(chan struct{})}
 	svc, d := newTestServiceWithSessions(t, fr, fc, sess, 0)
 
-	svc.Handle(context.Background(), 100, 100, 1, "long task")
+	svc.Handle(context.Background(), "100", 100, "1", "long task")
 
 	// Wait until the run has emitted SystemInit and persisted the session id.
 	waitUntil(t, func() bool {
@@ -937,18 +925,18 @@ func TestSessionPreservedOnShutdown(t *testing.T) {
 // sweep tests.
 type fixedOutbox struct{ dir string }
 
-func (f fixedOutbox) OutboxDir(int64) (string, error) { return f.dir, nil }
+func (f fixedOutbox) OutboxDir(ChatID) (string, error) { return f.dir, nil }
 
 // newTestServiceWithOutbox builds a Service wired to a Sweeper over a fixed
 // outbox dir (and an optional per-run timeout) for the AC2 finish-path tests.
 func newTestServiceWithOutbox(
-	t *testing.T, r claude.Runner, c chat, dir string, timeout time.Duration,
+	t *testing.T, r claude.Runner, c Transport, dir string, timeout time.Duration,
 ) (*Service, *dispatch.Dispatcher) {
 	t.Helper()
 	d := dispatch.New(4)
 	s := New(Config{
 		Runner:     r,
-		Chat:       c,
+		Transport:  c,
 		Dispatcher: d,
 		Workspace:  &fakeWorkspace{},
 		Outbox:     NewSweeper(fixedOutbox{dir: dir}, 0, 0, slog.New(slog.DiscardHandler)),
@@ -973,7 +961,7 @@ func TestOutboxSweptOnNormalResult(t *testing.T) {
 	svc, d := newTestServiceWithOutbox(t, fr, fc, dir, 0)
 	defer d.Close()
 
-	svc.Handle(context.Background(), 100, 100, 1, "go")
+	svc.Handle(context.Background(), "100", 100, "1", "go")
 
 	// The text answer reaches the progress message.
 	waitUntil(t, func() bool {
@@ -1008,7 +996,7 @@ func TestOutboxSweptOnStopCancel(t *testing.T) {
 	svc, d := newTestServiceWithOutbox(t, fr, fc, dir, 0)
 	defer d.Close()
 
-	svc.Handle(context.Background(), 100, 100, 1, "go")
+	svc.Handle(context.Background(), "100", 100, "1", "go")
 	waitUntil(t, func() bool { return svc.Stop("1") })
 
 	// The terminal "Stopped" notice is delivered.

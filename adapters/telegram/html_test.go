@@ -1,5 +1,5 @@
 //nolint:testpackage // intentionally whitebox to test unexported tgui HTML rendering internals
-package tgui
+package telegram
 
 import "testing"
 

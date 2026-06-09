@@ -1,5 +1,5 @@
 //nolint:testpackage // intentionally whitebox to test unexported telegram outbox internals
-package telegram
+package chat
 
 import (
 	"context"
@@ -21,7 +21,7 @@ type recordingSender struct {
 	failName string // SendDocument returns an error for this name
 }
 
-func (s *recordingSender) SendDocument(_ context.Context, _ int64, name string, data io.Reader) error {
+func (s *recordingSender) SendDocument(_ context.Context, _ ChatID, name string, data io.Reader) error {
 	// Drain the reader like a real upload would, so the source file is read before
 	// the sweeper closes it.
 	_, _ = io.Copy(io.Discard, data)
@@ -45,7 +45,7 @@ func (s *recordingSender) sent() []string {
 // fakeOutbox resolves every chat to one fixed directory.
 type fakeOutbox struct{ dir string }
 
-func (f fakeOutbox) OutboxDir(int64) (string, error) { return f.dir, nil }
+func (f fakeOutbox) OutboxDir(ChatID) (string, error) { return f.dir, nil }
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
@@ -69,7 +69,7 @@ func TestSweepSendsAndArchives(t *testing.T) {
 	writeFile(t, dir, "report.txt", []byte("hello"))
 
 	sender := &recordingSender{}
-	newTestSweeper(dir, 0, 0).Sweep(context.Background(), 7, sender)
+	newTestSweeper(dir, 0, 0).Sweep(context.Background(), "7", sender)
 
 	if got := sender.sent(); len(got) != 1 || got[0] != "report.txt" {
 		t.Fatalf("sent = %v, want [report.txt]", got)
@@ -116,7 +116,7 @@ func TestSweepSkipsSubdirsAndSymlinks(t *testing.T) {
 	}
 
 	sender := &recordingSender{}
-	newTestSweeper(dir, 0, 0).Sweep(context.Background(), 7, sender)
+	newTestSweeper(dir, 0, 0).Sweep(context.Background(), "7", sender)
 
 	if got := sender.sent(); len(got) != 1 || got[0] != "ok.txt" {
 		t.Fatalf("sent = %v, want only [ok.txt] (subdir/sent/symlink skipped)", got)
@@ -136,7 +136,7 @@ func TestSweepOversizeSkippedSiblingSent(t *testing.T) {
 
 	sender := &recordingSender{}
 	// maxBytes = 10: big.bin (100B) is over, small.txt (2B) is under.
-	newTestSweeper(dir, 10, 0).Sweep(context.Background(), 7, sender)
+	newTestSweeper(dir, 10, 0).Sweep(context.Background(), "7", sender)
 
 	if got := sender.sent(); len(got) != 1 || got[0] != "small.txt" {
 		t.Fatalf("sent = %v, want only [small.txt] (oversize skipped)", got)
@@ -156,7 +156,7 @@ func TestSweepFileCountCap(t *testing.T) {
 	}
 
 	sender := &recordingSender{}
-	newTestSweeper(dir, 0, 2).Sweep(context.Background(), 7, sender)
+	newTestSweeper(dir, 0, 2).Sweep(context.Background(), "7", sender)
 
 	if got := sender.sent(); len(got) != 2 {
 		t.Fatalf("sent %d files, want 2 (count cap)", len(got))
@@ -182,7 +182,7 @@ func TestSweepSendFailureLeavesFile(t *testing.T) {
 	writeFile(t, dir, "ok.txt", []byte("y"))
 
 	sender := &recordingSender{failName: "fail.txt"}
-	newTestSweeper(dir, 0, 0).Sweep(context.Background(), 7, sender)
+	newTestSweeper(dir, 0, 0).Sweep(context.Background(), "7", sender)
 
 	if got := sender.sent(); len(got) != 1 || got[0] != "ok.txt" {
 		t.Fatalf("sent = %v, want [ok.txt] (failed sibling does not block)", got)
@@ -206,7 +206,7 @@ func TestSweepEmptyAndAbsentNoOp(t *testing.T) {
 	// Empty existing dir.
 	empty := t.TempDir()
 	sender := &recordingSender{}
-	newTestSweeper(empty, 0, 0).Sweep(context.Background(), 7, sender)
+	newTestSweeper(empty, 0, 0).Sweep(context.Background(), "7", sender)
 	if got := sender.sent(); len(got) != 0 {
 		t.Fatalf("empty outbox sent %v, want none", got)
 	}
@@ -215,7 +215,7 @@ func TestSweepEmptyAndAbsentNoOp(t *testing.T) {
 	// missing path is a clean no-op too (resolver returns a non-existent path).
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
 	sender2 := &recordingSender{}
-	newTestSweeper(missing, 0, 0).Sweep(context.Background(), 7, sender2)
+	newTestSweeper(missing, 0, 0).Sweep(context.Background(), "7", sender2)
 	if got := sender2.sent(); len(got) != 0 {
 		t.Fatalf("absent outbox sent %v, want none", got)
 	}

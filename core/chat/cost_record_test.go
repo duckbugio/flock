@@ -1,5 +1,5 @@
 //nolint:testpackage // intentionally whitebox to test unexported telegram cost recording internals
-package telegram
+package chat
 
 import (
 	"context"
@@ -16,12 +16,12 @@ import (
 
 // newTestServiceWithCosts builds a Service wired to a real cost store so the
 // post-run cost-record hook can be exercised end to end.
-func newTestServiceWithCosts(t *testing.T, r claude.Runner, c chat, costs *cost.Store) (*Service, *dispatch.Dispatcher) {
+func newTestServiceWithCosts(t *testing.T, r claude.Runner, c Transport, costs *cost.Store) (*Service, *dispatch.Dispatcher) {
 	t.Helper()
 	d := dispatch.New(4)
 	s := New(Config{
 		Runner:     r,
-		Chat:       c,
+		Transport:  c,
 		Dispatcher: d,
 		Workspace:  &fakeWorkspace{},
 		Costs:      costs,
@@ -46,7 +46,7 @@ func TestRunRecordsCostOnResult(t *testing.T) {
 	defer d.Close()
 
 	const user int64 = 42
-	svc.Handle(context.Background(), 100, user, 1, "go")
+	svc.Handle(context.Background(), "100", user, "1", "go")
 
 	// Once the run's cost is recorded, a 0.5 cap is reached (>=) and denies; a 1.0
 	// cap still allows — proving exactly 0.5 was added for THIS user.
@@ -75,7 +75,7 @@ func TestRunRecordsZeroCostOnError(t *testing.T) {
 	defer d.Close()
 
 	const user int64 = 7
-	svc.Handle(context.Background(), 100, user, 1, "go")
+	svc.Handle(context.Background(), "100", user, "1", "go")
 
 	// Wait for the terminal error to surface, then assert nothing was charged: even
 	// a tiny positive cap still allows.

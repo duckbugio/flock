@@ -1,5 +1,5 @@
 //nolint:testpackage // intentionally whitebox to test unexported telegram nudge internals
-package telegram
+package chat
 
 import (
 	"context"
@@ -76,13 +76,13 @@ func (s *fakeNudgeStore) MarkStarred() error {
 // newNudgeService builds a Service wired to the star nudge over a real Dispatcher
 // and fakes. cfg.Chat is the supplied fake chat.
 func newNudgeService(
-	t *testing.T, r claude.Runner, c chat, cfg StarNudgeConfig,
+	t *testing.T, r claude.Runner, c Transport, cfg StarNudgeConfig,
 ) (*Service, *dispatch.Dispatcher) {
 	t.Helper()
 	d := dispatch.New(4)
 	s := New(Config{
 		Runner:     r,
-		Chat:       c,
+		Transport:  c,
 		Dispatcher: d,
 		Workspace:  &fakeWorkspace{},
 		StarNudge:  cfg,
@@ -117,7 +117,7 @@ func TestNudgeFiresAfterSuccessWhenUnstarred(t *testing.T) {
 	svc, d := newNudgeService(t, successRunner(), fc, enabledNudgeConfig(st, &fakeNudgeStore{}))
 	defer d.Close()
 
-	svc.Handle(context.Background(), testChatID, testChatID, 1, "hello")
+	svc.Handle(context.Background(), testChatID, 100, "1", "hello")
 
 	waitUntil(t, func() bool {
 		return len(fc.sentNudges()) == 1
@@ -135,7 +135,7 @@ func TestNudgeDoesNotFireOnError(t *testing.T) {
 	svc, d := newNudgeService(t, fr, fc, enabledNudgeConfig(st, &fakeNudgeStore{}))
 	defer d.Close()
 
-	svc.Handle(context.Background(), testChatID, testChatID, 1, "hello")
+	svc.Handle(context.Background(), testChatID, 100, "1", "hello")
 
 	// Wait for the error to be delivered, then assert no nudge / no API call.
 	waitUntil(t, func() bool {
@@ -160,7 +160,7 @@ func TestNudgeMarksWhenAlreadyStarredAndSendsNothing(t *testing.T) {
 	svc, d := newNudgeService(t, successRunner(), fc, enabledNudgeConfig(st, store))
 	defer d.Close()
 
-	svc.Handle(context.Background(), testChatID, testChatID, 1, "hello")
+	svc.Handle(context.Background(), testChatID, 100, "1", "hello")
 
 	waitUntil(t, func() bool {
 		return store.Starred()
@@ -179,7 +179,7 @@ func TestNudgeSkippedWhenKnownStarred(t *testing.T) {
 	svc, d := newNudgeService(t, successRunner(), fc, enabledNudgeConfig(st, store))
 	defer d.Close()
 
-	svc.Handle(context.Background(), testChatID, testChatID, 1, "hello")
+	svc.Handle(context.Background(), testChatID, 100, "1", "hello")
 
 	waitUntil(t, func() bool {
 		text, _ := fc.snapshot()
@@ -201,7 +201,7 @@ func TestNudgeDisabledIsInert(t *testing.T) {
 	svc, d := newNudgeService(t, successRunner(), fc, StarNudgeConfig{Enabled: false})
 	defer d.Close()
 
-	svc.Handle(context.Background(), testChatID, testChatID, 1, "hello")
+	svc.Handle(context.Background(), testChatID, 100, "1", "hello")
 
 	waitUntil(t, func() bool {
 		text, _ := fc.snapshot()
@@ -286,9 +286,9 @@ func TestNudgeRefiresEachUnstarredRun(t *testing.T) {
 	svc, d := newNudgeService(t, successRunner(), fc, enabledNudgeConfig(st, &fakeNudgeStore{}))
 	defer d.Close()
 
-	svc.Handle(context.Background(), testChatID, testChatID, 1, "first")
+	svc.Handle(context.Background(), testChatID, 100, "1", "first")
 	waitUntil(t, func() bool { return len(fc.sentNudges()) == 1 })
 
-	svc.Handle(context.Background(), testChatID, testChatID, 2, "second")
+	svc.Handle(context.Background(), testChatID, 100, "2", "second")
 	waitUntil(t, func() bool { return len(fc.sentNudges()) == 2 })
 }

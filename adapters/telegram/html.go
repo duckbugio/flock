@@ -1,4 +1,4 @@
-package tgui
+package telegram
 
 import (
 	"html"

@@ -1,9 +1,9 @@
-// Package tgui holds the transport-agnostic rendering logic for the Telegram
-// adapter: turning a claude event stream plus wall-clock ticks into the text of
-// a live "Working… (Ns)" progress message, and splitting a final answer into
-// Telegram-safe chunks. It deliberately knows nothing about the Telegram API so
-// it can be unit-tested in isolation.
-package tgui
+package chat
+
+// This file holds the transport-agnostic progress rendering: turning a claude
+// event stream plus wall-clock ticks into the text of a live "Working… (Ns)"
+// progress message. It knows nothing about any chat platform's API so it can be
+// unit-tested in isolation. Final-answer chunking lives in chunk.go.
 
 import (
 	"fmt"

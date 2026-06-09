@@ -49,7 +49,7 @@ type Dispatcher struct {
 	bufSize int
 
 	mu     sync.Mutex
-	chats  map[int64]*chatQueue
+	chats  map[string]*chatQueue
 	closed bool
 	wg     sync.WaitGroup // tracks per-chat worker goroutines for graceful drain
 	//nolint:containedctx // root context held for the dispatcher's lifecycle; cancelled in Shutdown via rootStop.
@@ -73,7 +73,7 @@ func New(maxConcurrent int) *Dispatcher {
 	return &Dispatcher{
 		sem:      semaphore.NewWeighted(int64(maxConcurrent)),
 		bufSize:  queueBuffer,
-		chats:    make(map[int64]*chatQueue),
+		chats:    make(map[string]*chatQueue),
 		rootCtx:  root,
 		rootStop: stop,
 	}
@@ -88,7 +88,7 @@ func New(maxConcurrent int) *Dispatcher {
 // If the dispatcher is (or becomes) closed the job is cleanly dropped — both the
 // initial fast-path check and the enqueue itself bail out on rootCtx.Done(), so
 // Submit can never send on a queue whose worker has gone away.
-func (d *Dispatcher) Submit(chatID int64, run func(ctx context.Context)) {
+func (d *Dispatcher) Submit(chatID string, run func(ctx context.Context)) {
 	d.mu.Lock()
 	if d.closed {
 		d.mu.Unlock()
@@ -172,7 +172,7 @@ func (d *Dispatcher) runOne(q *chatQueue, j job) {
 // instead of running it as a duplicate. It is a no-op for an unknown or idle chat.
 // Best-effort at the queued→running boundary: a job the worker has just dequeued
 // but not yet registered for cancellation may still run.
-func (d *Dispatcher) Cancel(chatID int64) {
+func (d *Dispatcher) Cancel(chatID string) {
 	d.mu.Lock()
 	q := d.chats[chatID]
 	d.mu.Unlock()

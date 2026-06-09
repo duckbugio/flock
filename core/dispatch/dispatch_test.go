@@ -3,6 +3,7 @@ package dispatch
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -28,7 +29,7 @@ func TestParallelAcrossChats(t *testing.T) {
 	entered := make(chan struct{}, 2)
 	release := make(chan struct{})
 
-	for _, id := range []int64{1, 2} {
+	for _, id := range []string{"1", "2"} {
 		d.Submit(id, func(_ context.Context) {
 			entered <- struct{}{}
 			<-release
@@ -52,13 +53,13 @@ func TestSerialWithinChat(t *testing.T) {
 	first := make(chan struct{})
 	secondStarted := make(chan struct{})
 
-	d.Submit(1, func(_ context.Context) {
+	d.Submit("1", func(_ context.Context) {
 		<-first // hold until the test lets the first finish
 		mu.Lock()
 		order = append(order, 1)
 		mu.Unlock()
 	})
-	d.Submit(1, func(_ context.Context) {
+	d.Submit("1", func(_ context.Context) {
 		mu.Lock()
 		order = append(order, 2)
 		mu.Unlock()
@@ -96,7 +97,7 @@ func TestGlobalCap(t *testing.T) {
 
 	wg.Add(chats)
 	for i := 0; i < chats; i++ {
-		d.Submit(int64(i), func(_ context.Context) {
+		d.Submit(strconv.Itoa(i), func(_ context.Context) {
 			defer wg.Done()
 			cur := running.Add(1)
 			// Track the high-water mark of concurrent jobs.
@@ -133,14 +134,14 @@ func TestCancelStopsInFlight(t *testing.T) {
 	started := make(chan struct{})
 	cancelled := make(chan struct{})
 
-	d.Submit(42, func(ctx context.Context) {
+	d.Submit("42", func(ctx context.Context) {
 		close(started)
 		<-ctx.Done()
 		close(cancelled)
 	})
 
 	recv(t, started, "job did not start")
-	d.Cancel(42)
+	d.Cancel("42")
 	recv(t, cancelled, "Cancel did not cancel the in-flight job")
 }
 
@@ -156,17 +157,17 @@ func TestCancelDrainsQueued(t *testing.T) {
 	var queuedRan atomic.Bool
 
 	// Job 1 holds the (serial) lane open until its ctx is cancelled.
-	d.Submit(7, func(ctx context.Context) {
+	d.Submit("7", func(ctx context.Context) {
 		close(started)
 		<-ctx.Done()
 	})
 	// Jobs 2 and 3 queue behind it on the SAME chat (serial within a chat).
 	for i := 0; i < 2; i++ {
-		d.Submit(7, func(_ context.Context) { queuedRan.Store(true) })
+		d.Submit("7", func(_ context.Context) { queuedRan.Store(true) })
 	}
 
 	recv(t, started, "first job did not start")
-	d.Cancel(7) // cancels job 1 AND drains the two queued jobs
+	d.Cancel("7") // cancels job 1 AND drains the two queued jobs
 
 	// Give a drained job ample time to (wrongly) run after the lane frees.
 	time.Sleep(100 * time.Millisecond)
@@ -179,7 +180,7 @@ func TestCancelDrainsQueued(t *testing.T) {
 func TestCancelUnknownChatNoop(_ *testing.T) {
 	d := New(2)
 	defer d.Close()
-	d.Cancel(999) // must not panic
+	d.Cancel("999") // must not panic
 }
 
 // TestShutdownDrains cancels the in-flight job and waits for workers to drain
@@ -188,7 +189,7 @@ func TestShutdownDrains(t *testing.T) {
 	d := New(2)
 
 	started := make(chan struct{})
-	d.Submit(1, func(ctx context.Context) {
+	d.Submit("1", func(ctx context.Context) {
 		close(started)
 		<-ctx.Done() // exits only because Shutdown cancels the job
 	})
@@ -201,7 +202,7 @@ func TestShutdownDrains(t *testing.T) {
 	}
 
 	// Submitting after shutdown is a dropped no-op (must not panic or run).
-	d.Submit(2, func(context.Context) { t.Fatal("job ran after shutdown") })
+	d.Submit("2", func(context.Context) { t.Fatal("job ran after shutdown") })
 	time.Sleep(20 * time.Millisecond)
 }
 
@@ -229,7 +230,7 @@ func TestSubmitRacesShutdown(_ *testing.T) {
 				for j := 0; j < 50; j++ {
 					// A few chat IDs so buffers fill (back-pressure path) and
 					// new workers spin up concurrently with shutdown.
-					chatID := int64((base + j) % 4)
+					chatID := strconv.Itoa((base + j) % 4)
 					d.Submit(chatID, func(ctx context.Context) {
 						<-ctx.Done() // block until cancelled; exercises the full buffer
 					})
