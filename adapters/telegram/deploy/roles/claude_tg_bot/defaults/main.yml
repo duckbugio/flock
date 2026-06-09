@@ -14,7 +14,7 @@ container_prefix: claude-tg
 # installs (volumes are auto-created and managed by the new project as usual).
 legacy_volume_project: ""
 
-# Prebuilt image — pulled, not built (patches/agents/CLAUDE.md are baked in by CI).
+# Prebuilt image — pulled, not built (agents/CLAUDE.md are baked in by CI).
 # Pin a tag (e.g. :v1) for reproducibility, or :latest to track main.
 bot_image: "ghcr.io/duckbugio/flock-telegram:latest"
 
@@ -31,7 +31,7 @@ approved_directory: /workspace
 # because that is driven by debug + development_mode (both false), not by this string.
 bot_environment: prod
 
-# Swap — the server ships with 0 swap; give Node+Python headroom
+# Swap — the server ships with 0 swap; give Node headroom
 swap_file: /swapfile
 swap_size_gb: 2
 

@@ -60,9 +60,9 @@ type GateInput struct {
 // ShouldHandle decides whether a message should be processed and returns the
 // text to send to Claude with any leading @mention of the bot stripped.
 //
-// It mirrors adapters/telegram/patches/mention_gate.py:
+// Mention-gating rules:
 //   - DMs (private chats) are always handled, unchanged.
-//   - Groups with RequireMention=false are always handled (the Python default).
+//   - Groups with RequireMention=false are always handled (the default).
 //   - Groups with RequireMention=true are handled only when the message either
 //     @mentions the bot (a "mention" entity matching BotUsername, or a
 //     "text_mention" entity matching BotUserID) or replies to the bot.
