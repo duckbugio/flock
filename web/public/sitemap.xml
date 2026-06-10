@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset
+  xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+  xmlns:xhtml="http://www.w3.org/1999/xhtml"
+>
+  <url>
+    <loc>https://flock.duckbug.io/</loc>
+    <xhtml:link rel="alternate" hreflang="en" href="https://flock.duckbug.io/?lng=en"/>
+    <xhtml:link rel="alternate" hreflang="ru" href="https://flock.duckbug.io/?lng=ru"/>
+    <xhtml:link rel="alternate" hreflang="zh" href="https://flock.duckbug.io/?lng=zh"/>
+    <xhtml:link rel="alternate" hreflang="es" href="https://flock.duckbug.io/?lng=es"/>
+    <xhtml:link rel="alternate" hreflang="de" href="https://flock.duckbug.io/?lng=de"/>
+    <xhtml:link rel="alternate" hreflang="fr" href="https://flock.duckbug.io/?lng=fr"/>
+    <xhtml:link rel="alternate" hreflang="pt-BR" href="https://flock.duckbug.io/?lng=pt-BR"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://flock.duckbug.io/?lng=ja"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://flock.duckbug.io/"/>
+  </url>
+</urlset>

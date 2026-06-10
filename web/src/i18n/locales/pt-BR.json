@@ -1,0 +1,108 @@
+{
+  "flock": {
+    "meta": {
+      "title": "flock — um time de dev com IA que você comanda pelo Telegram",
+      "description": "O flock roda um time de cinco papéis sobre o Claude Code: planejador, programador, testador, revisor e árbitro. Descreva uma funcionalidade no chat e receba um pull request pronto. Open source, Go, auto-hospedado."
+    },
+    "nav": {
+      "how": "Como funciona",
+      "features": "Recursos",
+      "deploy": "Implantar",
+      "docs": "Documentação",
+      "github": "GitHub",
+      "cta": "Auto-hospedar"
+    },
+    "hero": {
+      "badge": "Open source • Go • Telegram",
+      "title": "Um time de dev com IA que você comanda pelo Telegram",
+      "subtitle": "O flock roda um time de cinco papéis sobre o Claude Code: planejador, programador, testador, revisor e árbitro. Descreva uma funcionalidade no chat e receba um PR pronto. Cada chat tem seu próprio workspace isolado.",
+      "cta_primary": "Auto-hospedar",
+      "cta_secondary": "Dar estrela no GitHub",
+      "cta_managed": "Não quer ter trabalho? → roost"
+    },
+    "demo": {
+      "title": "Chat → plano → código → testes → revisão → PR",
+      "text": "Você escreve uma tarefa em linguagem natural. O flock planeja, implementa em uma branch, roda os testes, revisa com comentários linha a linha e abre um pull request."
+    },
+    "how": {
+      "title": "Cinco papéis, um só pipeline",
+      "planner": "Planejador — transforma o pedido em uma especificação com critérios de aceitação.",
+      "coder": "Programador — implementa em uma branch; para bugs, escreve primeiro o teste que falha.",
+      "tester": "Testador — roda a suíte afetada mais a regressão.",
+      "reviewer": "Revisor — comentários inline, ancorados por linha, direto no PR.",
+      "arbiter": "Árbitro — governa os ciclos e decide: pronto para merge, ou escalar."
+    },
+    "roles": {
+      "planner": "Planejador",
+      "coder": "Programador",
+      "tester": "Testador",
+      "reviewer": "Revisor",
+      "arbiter": "Árbitro"
+    },
+    "features": {
+      "title": "O que tem dentro",
+      "isolation_title": "Isolamento por chat",
+      "isolation_text": "Cada chat do Telegram tem seu próprio workspace — os projetos nunca colidem.",
+      "parallel_title": "Chats em paralelo",
+      "parallel_text": "Vários chats rodam ao mesmo tempo, com limite definido na configuração.",
+      "git_title": "Qualquer host Git",
+      "git_text": "GitHub, GitLab, Gitea. O polling de PR capta os comentários de revisão sem webhooks de entrada.",
+      "voice_title": "Mensagens de voz",
+      "voice_text": "Opcional: Voxtral, Whisper ou STT local — atribua tarefas por voz.",
+      "auth_title": "Seu Claude",
+      "auth_text": "Assinatura Claude Pro/Max ou uma chave de API da Anthropic — sem cobrança por token.",
+      "docker_title": "Imagem Docker pronta",
+      "docker_text": "ghcr.io/duckbugio/flock-telegram — um compose e você está no ar."
+    },
+    "paths": {
+      "title": "Duas formas de rodar",
+      "self_title": "Auto-hospedado",
+      "self_text": "Gratuito e aberto. Seu servidor, seu Claude, controle total.",
+      "self_cta": "Guia de implantação",
+      "managed_title": "Gerenciado (roost)",
+      "managed_text": "Hospedamos o flock em um VPS dedicado e cuidamos da infraestrutura.",
+      "managed_cta": "Ir para o roost"
+    },
+    "quickstart": {
+      "title": "No ar com alguns comandos",
+      "step1": "Baixe ghcr.io/duckbugio/flock-telegram.",
+      "step2": "Defina o token do seu bot do Telegram e o acesso ao Claude.",
+      "step3": "Suba com docker compose — o bot está online.",
+      "copy": "Copiar",
+      "copied": "Copiado"
+    },
+    "oss": {
+      "title": "Totalmente open source",
+      "text": "Código, imagem e papéis — tudo à vista. Faça fork, audite, contribua.",
+      "cta_star": "Dar estrela no repo",
+      "cta_issues": "Relatar um problema"
+    },
+    "faq": {
+      "title": "Perguntas frequentes",
+      "q1": "É realmente gratuito?",
+      "a1": "Sim. O flock é open source. Você paga apenas pelo seu próprio Claude e pelo seu próprio servidor.",
+      "q2": "Qual a diferença para o Claude Code puro?",
+      "a2": "O flock é um time baseado em papéis com revisão e um árbitro sobre o Claude Code, comandado pelo Telegram, com isolamento por chat.",
+      "q3": "Preciso do meu próprio servidor?",
+      "a3": "Para auto-hospedar, sim. Se preferir não ter, use a hospedagem gerenciada no roost.",
+      "q4": "Quais modelos são suportados?",
+      "a4": "Claude por uma assinatura Pro/Max ou pela API da Anthropic."
+    },
+    "final": {
+      "title": "Coloque seu flock para trabalhar",
+      "subtitle": "Auto-hospede em minutos — ou deixe o roost hospedar.",
+      "cta_primary": "Auto-hospedar",
+      "cta_secondary": "Hospedar no roost"
+    },
+    "footer": {
+      "tagline": "flock — um time de dev com IA no Telegram. Parte do DuckBug.",
+      "product": "Produto",
+      "docs": "Documentação",
+      "github": "GitHub",
+      "license": "Licença"
+    },
+    "language": {
+      "label": "Idioma"
+    }
+  }
+}

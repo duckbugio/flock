@@ -1,0 +1,108 @@
+{
+  "flock": {
+    "meta": {
+      "title": "flock — Telegram から操る AI 開発チーム",
+      "description": "flock は Claude Code 上で 5 つの役割からなるチーム（プランナー、コーダー、テスター、レビュアー、アービター）を動かします。チャットで機能を説明すれば、完成したプルリクエストが手に入ります。オープンソース、Go、セルフホスト。"
+    },
+    "nav": {
+      "how": "仕組み",
+      "features": "機能",
+      "deploy": "デプロイ",
+      "docs": "ドキュメント",
+      "github": "GitHub",
+      "cta": "セルフホスト"
+    },
+    "hero": {
+      "badge": "オープンソース • Go • Telegram",
+      "title": "Telegram から操る AI 開発チーム",
+      "subtitle": "flock は Claude Code 上で 5 つの役割（プランナー、コーダー、テスター、レビュアー、アービター）からなるチームを動かします。チャットで機能を説明すれば、完成した PR が手に入ります。各チャットには独立したワークスペースがあります。",
+      "cta_primary": "セルフホスト",
+      "cta_secondary": "GitHub でスターを付ける",
+      "cta_managed": "手間をかけたくない？ → roost"
+    },
+    "demo": {
+      "title": "チャット → 計画 → コード → テスト → レビュー → PR",
+      "text": "あなたは自然な言葉でタスクを書くだけ。flock が計画し、ブランチ上で実装し、テストを実行し、行単位のコメントでレビューし、プルリクエストを開きます。"
+    },
+    "how": {
+      "title": "5 つの役割、1 つのパイプライン",
+      "planner": "プランナー — 要望を受け入れ基準付きの仕様に変換します。",
+      "coder": "コーダー — ブランチ上で実装します。バグの場合はまず失敗するテストを書きます。",
+      "tester": "テスター — 影響範囲のスイートに加えて回帰テストを実行します。",
+      "reviewer": "レビュアー — PR 内に行単位のインラインコメントを付けます。",
+      "arbiter": "アービター — ループを統括し、マージ可能かエスカレーションかを判断します。"
+    },
+    "roles": {
+      "planner": "プランナー",
+      "coder": "コーダー",
+      "tester": "テスター",
+      "reviewer": "レビュアー",
+      "arbiter": "アービター"
+    },
+    "features": {
+      "title": "中身",
+      "isolation_title": "チャットごとの分離",
+      "isolation_text": "Telegram のチャットごとに専用のワークスペースを持ち、プロジェクトが衝突することはありません。",
+      "parallel_title": "並行チャット",
+      "parallel_text": "複数のチャットを同時に実行でき、上限は設定で制御します。",
+      "git_title": "あらゆる Git ホスト",
+      "git_text": "GitHub、GitLab、Gitea。PR ポーリングが受信 Webhook なしでレビューコメントを取得します。",
+      "voice_title": "ボイスメッセージ",
+      "voice_text": "オプション：Voxtral、Whisper、またはローカル STT — 音声でタスクを割り当てます。",
+      "auth_title": "あなたの Claude",
+      "auth_text": "Claude Pro/Max サブスクリプションまたは Anthropic API キー — トークン単位の課金はありません。",
+      "docker_title": "ビルド済み Docker イメージ",
+      "docker_text": "ghcr.io/duckbugio/flock-telegram — compose 一発で稼働します。"
+    },
+    "paths": {
+      "title": "2 つの実行方法",
+      "self_title": "セルフホスト",
+      "self_text": "無料でオープン。自分のサーバー、自分の Claude、完全なコントロール。",
+      "self_cta": "デプロイガイド",
+      "managed_title": "マネージド（roost）",
+      "managed_text": "専用 VPS 上で flock をホストし、インフラを引き受けます。",
+      "managed_cta": "roost へ"
+    },
+    "quickstart": {
+      "title": "数コマンドで稼働",
+      "step1": "ghcr.io/duckbugio/flock-telegram を取得します。",
+      "step2": "Telegram ボットのトークンと Claude へのアクセスを設定します。",
+      "step3": "docker compose で起動 — ボットがオンラインになります。",
+      "copy": "コピー",
+      "copied": "コピーしました"
+    },
+    "oss": {
+      "title": "完全オープンソース",
+      "text": "コード、イメージ、役割 — すべて公開。フォーク、監査、コントリビュートを。",
+      "cta_star": "リポジトリにスター",
+      "cta_issues": "問題を報告"
+    },
+    "faq": {
+      "title": "よくある質問",
+      "q1": "本当に無料ですか？",
+      "a1": "はい。flock はオープンソースです。支払うのは自分の Claude と自分のサーバーの分だけです。",
+      "q2": "素の Claude Code と何が違いますか？",
+      "a2": "flock は Claude Code の上にレビューとアービターを備えた役割ベースのチームで、Telegram から操作し、チャットごとに分離されています。",
+      "q3": "自分のサーバーは必要ですか？",
+      "a3": "セルフホストには必要です。そうしたくない場合は roost のマネージドホスティングをどうぞ。",
+      "q4": "対応モデルは？",
+      "a4": "Pro/Max サブスクリプションまたは Anthropic API 経由の Claude です。"
+    },
+    "final": {
+      "title": "あなたの flock を働かせよう",
+      "subtitle": "数分でセルフホスト — または roost にホストを任せましょう。",
+      "cta_primary": "セルフホスト",
+      "cta_secondary": "roost でホスト"
+    },
+    "footer": {
+      "tagline": "flock — Telegram の AI 開発チーム。DuckBug の一部。",
+      "product": "プロダクト",
+      "docs": "ドキュメント",
+      "github": "GitHub",
+      "license": "ライセンス"
+    },
+    "language": {
+      "label": "言語"
+    }
+  }
+}
