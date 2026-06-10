@@ -38,8 +38,11 @@ void i18n
     nonExplicitSupportedLngs: true,
     interpolation: { escapeValue: false },
     detection: {
-      // Persisted choice wins, then the browser language.
-      order: ["localStorage", "navigator"],
+      // An explicit ?lng= query wins (so the hreflang/canonical URLs actually
+      // select their language for crawlers and shared links), then the
+      // persisted choice, then the browser language.
+      order: ["querystring", "localStorage", "navigator"],
+      lookupQuerystring: "lng",
       lookupLocalStorage: "flock.lang",
       caches: ["localStorage"],
       convertDetectedLanguage: (lng) => normalizeLanguage(lng),

@@ -1,4 +1,3 @@
-import { useEffect } from "react";
 import { Helmet } from "react-helmet-async";
 import { useTranslation } from "react-i18next";
 import { SITE } from "../config";
@@ -6,7 +5,8 @@ import { LANGUAGE_CODES, normalizeLanguage } from "../i18n/languages";
 
 // Seo emits localized title/description, Open Graph + Twitter card, a canonical
 // link, hreflang alternates for every supported language plus x-default, and
-// keeps <html lang> in sync with the active language.
+// keeps <html lang> in sync (via Helmet's htmlAttributes) with the active
+// language.
 export function Seo() {
   const { t, i18n } = useTranslation();
   const lang = normalizeLanguage(i18n.language);
@@ -15,11 +15,6 @@ export function Seo() {
   const description = t("flock.meta.description");
   const canonical = `${SITE.baseUrl}/?lng=${lang}`;
   const ogImage = `${SITE.baseUrl}${SITE.ogImage}`;
-
-  // Keep the document language attribute in sync for assistive tech and SEO.
-  useEffect(() => {
-    document.documentElement.lang = lang;
-  }, [lang]);
 
   return (
     <Helmet htmlAttributes={{ lang }}>
