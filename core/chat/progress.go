@@ -239,21 +239,29 @@ var secretRedactions = []struct {
 	},
 	// Credential-ish key/value pairs: flags, query params, env assignments. A
 	// strong keyword may be separated from its value by whitespace OR ':' / '='
-	// (covers "--password hunter2", "token: x", "api_key=x").
+	// (covers "--password hunter2", "token: x", "api_key=x"). The keyword is matched
+	// even when it is a segment of a longer identifier — the dominant real-world
+	// shape is an UPPER/snake_case env assignment ("GITHUB_TOKEN=…",
+	// "AWS_SECRET_ACCESS_KEY=…", "DB_PASSWORD=…"). A bare \b would miss those because
+	// '_' is a word char (no boundary before the keyword), so we allow surrounding
+	// identifier chars [\w.-] on both sides and capture the whole left-hand name.
 	{
-		regexp.MustCompile(`(?i)\b(token|secret|password|passwd|api[_-]?key|access[_-]?token)(\s*[:=]\s*|\s+)\S+`),
+		regexp.MustCompile(`(?i)\b([\w.-]*(?:token|secret|password|passwd|api[_-]?key|access[_-]?token)[\w.-]*)(\s*[:=]\s*|\s+)\S+`),
 		"${1}${2}" + redactedMask,
 	},
 	// "auth" alone is too common in benign commands ("go test ./auth", "cd auth
 	// && …") to mask on a bare space, so it ONLY redacts when bound to its value by
-	// ':' / '=' ("--auth=token", "auth: x") — not by whitespace.
+	// ':' / '=' ("--auth=token", "auth: x") — not by whitespace. Like the rule above
+	// it tolerates an identifier prefix so "X_AUTH=…" is still caught.
 	{
-		regexp.MustCompile(`(?i)\b(auth)(\s*[:=]\s*)\S+`),
+		regexp.MustCompile(`(?i)\b([\w.-]*auth)(\s*[:=]\s*)\S+`),
 		"${1}${2}" + redactedMask,
 	},
-	// URL userinfo: scheme://user:pass@host -> scheme://***@host.
+	// URL userinfo: scheme://user:pass@host -> scheme://***@host. The password run
+	// extends to the LAST '@' before the path so a literal '@' inside the password
+	// ("user:p@ss@host") is fully masked rather than leaving a tail visible.
 	{
-		regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@`),
+		regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s]+@`),
 		"${1}" + redactedMask + "@",
 	},
 }

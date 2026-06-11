@@ -243,6 +243,34 @@ func TestToolDetailRedactsSecrets(t *testing.T) {
 			input:   `{"command":"deploy --auth=topSecretValue"}`,
 			wantSub: "auth=***", wantMiss: "topSecretValue",
 		},
+		// Env-var-assignment shape (UPPER/snake_case) — the most common way a real
+		// secret appears in a shell command. The keyword is a segment of a longer
+		// identifier, so a bare \b would miss it ('_' is a word char).
+		{
+			name: "env var token assignment", tool: "Bash",
+			input:   `{"command":"export GITHUB_TOKEN=ghp_realSecretValue123"}`,
+			wantSub: "GITHUB_TOKEN=***", wantMiss: "ghp_realSecretValue123",
+		},
+		{
+			name: "env var secret access key", tool: "Bash",
+			input:   `{"command":"AWS_SECRET_ACCESS_KEY=AKIArealLeak0001 aws s3 ls"}`,
+			wantSub: "AWS_SECRET_ACCESS_KEY=***", wantMiss: "AKIArealLeak0001",
+		},
+		{
+			name: "env var db password", tool: "Bash",
+			input:   `{"command":"DB_PASSWORD=hunter2 ./run"}`,
+			wantSub: "DB_PASSWORD=***", wantMiss: "hunter2",
+		},
+		{
+			name: "snake_case auth assignment", tool: "Bash",
+			input:   `{"command":"deploy --service_auth=topSecretValue"}`,
+			wantSub: "service_auth=***", wantMiss: "topSecretValue",
+		},
+		{
+			name: "url password containing at sign", tool: "Bash",
+			input:   `{"command":"git clone https://bob:` + `my@ssPhrase@example.com/r.git"}`,
+			wantSub: "https://***@example.com", wantMiss: "my@ssPhrase",
+		},
 		{
 			name: "clean command untouched", tool: "Bash",
 			input:   `{"command":"go test ./..."}`,
