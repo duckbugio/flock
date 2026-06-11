@@ -35,7 +35,7 @@ const (
 // before the whole composed line is re-capped at recentSnippetMax.
 const toolDetailMax = 160
 
-// toolDetailSeparator joins the tool name and its extracted detail: "🔧 Read · path".
+// toolDetailSeparator joins the tool name and its extracted detail: "📖 Read · path".
 const toolDetailSeparator = " · "
 
 // frameBudgetMax bounds the WHOLE assembled frame (header + blank + ring lines)
@@ -53,12 +53,62 @@ const frameBudgetMax = 3500
 // the activity lines in a frame.
 const separatorRunes = 2
 
-// Activity-line prefixes: a thought balloon for the model's text, a wrench for a
-// tool call.
+// Activity-line prefixes: a thought balloon for the model's text, and a wrench as
+// the fallback for a tool call that has no more specific emoji (see toolPrefixes).
 const (
 	thoughtPrefix = "💭 "
 	toolPrefix    = "🔧 "
 )
+
+// toolPrefixes maps a lowercased tool name to the emoji prefix shown before its
+// activity line, so the live frame reads "📖 Read · …" / "⌨️ Bash · …" instead of a
+// generic wrench for everything. A tool not listed here falls back to toolPrefix.
+// Several tools deliberately share an emoji (the edit family, the search family)
+// because they are the same kind of action from the user's point of view.
+var toolPrefixes = map[string]string{
+	"read":         "📖 ",
+	"edit":         "✏️ ",
+	"write":        "✏️ ",
+	"notebookedit": "✏️ ",
+	"bash":         "⌨️ ",
+	"grep":         "🔍 ",
+	"glob":         "🔍 ",
+	"task":         "🤖 ",
+	"agent":        "🤖 ",
+	"webfetch":     "🌐 ",
+	"websearch":    "🔎 ",
+	"toolsearch":   "🔎 ",
+	"skill":        "🧩 ",
+}
+
+// toolLinePrefix returns the emoji prefix for a tool's activity line, falling back
+// to the generic wrench for an unknown or empty tool name.
+func toolLinePrefix(tool string) string {
+	if p, ok := toolPrefixes[strings.ToLower(tool)]; ok {
+		return p
+	}
+	return toolPrefix
+}
+
+// activityPrefixes is every emoji prefix an activity line can begin with — the
+// thought balloon, the fallback wrench, and each per-tool emoji. capLine/Frame use
+// it to peel the prefix off before applying the rune budget. It is built once from
+// the renderer's own constants so it can never drift from what activityLine emits.
+// No prefix is a byte-prefix of another (each is a distinct emoji + space), so the
+// scan order does not matter.
+var activityPrefixes = buildActivityPrefixes()
+
+func buildActivityPrefixes() []string {
+	prefixes := []string{thoughtPrefix, toolPrefix}
+	seen := map[string]bool{thoughtPrefix: true, toolPrefix: true}
+	for _, p := range toolPrefixes {
+		if !seen[p] {
+			seen[p] = true
+			prefixes = append(prefixes, p)
+		}
+	}
+	return prefixes
+}
 
 // elidedFormat renders the "+N earlier" indicator prepended to the activity block
 // when older lines have scrolled off above the visible window. It is plain English
@@ -135,7 +185,7 @@ func activityLine(e claude.Event) (string, bool) {
 		if detail := toolDetail(tool, e.ToolInput); detail != "" {
 			line += toolDetailSeparator + detail
 		}
-		return toolPrefix + truncateRunes(line, recentSnippetMax), true
+		return toolLinePrefix(tool) + truncateRunes(line, recentSnippetMax), true
 	case claude.Text:
 		// Model "thought" text is free-form prose, not a CLI-shaped command, so it is
 		// shown verbatim and deliberately NOT run through redactSecrets: the keyword
@@ -294,7 +344,7 @@ func redactSecrets(s string) string {
 // emoji prefix (which is added on top of the budget, never split or counted). A
 // line without a known prefix is capped whole.
 func capLine(line string, maxText int) string {
-	for _, prefix := range []string{thoughtPrefix, toolPrefix} {
+	for _, prefix := range activityPrefixes {
 		if strings.HasPrefix(line, prefix) {
 			return prefix + truncateRunes(line[len(prefix):], maxText)
 		}
@@ -401,7 +451,7 @@ func (p *Progress) Frame() string {
 		// The indicator line plus its leading newline.
 		overhead += 1 + utf8.RuneCountInString(fmt.Sprintf(elidedFormat, hidden))
 	}
-	for _, prefix := range []string{thoughtPrefix, toolPrefix} {
+	for _, prefix := range activityPrefixes {
 		if strings.HasPrefix(lines[0], prefix) {
 			overhead += utf8.RuneCountInString(prefix)
 			break

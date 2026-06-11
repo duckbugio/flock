@@ -41,7 +41,7 @@ func TestFrameCounterDrivenByClockNotEvents(t *testing.T) {
 	if !strings.Contains(frame, "Working… (42s)") {
 		t.Fatalf("counter did not advance during silent tool call: %q", frame)
 	}
-	if !strings.Contains(frame, "🔧 Bash") {
+	if !strings.Contains(frame, "⌨️ Bash") {
 		t.Fatalf("tool activity not shown: %q", frame)
 	}
 }
@@ -106,54 +106,55 @@ func TestToolUseDetailEnrichment(t *testing.T) {
 		{
 			name: "read file_path", tool: "Read",
 			input:   `{"file_path":"internal/config/config.go"}`,
-			wantSub: "🔧 Read · internal/config/config.go", wantSep: true,
+			wantSub: "📖 Read · internal/config/config.go", wantSep: true,
 		},
-		{name: "edit file_path", tool: "Edit", input: `{"file_path":"main.go"}`, wantSub: "🔧 Edit · main.go", wantSep: true},
-		{name: "write file_path", tool: "Write", input: `{"file_path":"out.txt"}`, wantSub: "🔧 Write · out.txt", wantSep: true},
+		{name: "edit file_path", tool: "Edit", input: `{"file_path":"main.go"}`, wantSub: "✏️ Edit · main.go", wantSep: true},
+		{name: "write file_path", tool: "Write", input: `{"file_path":"out.txt"}`, wantSub: "✏️ Write · out.txt", wantSep: true},
 		{
 			name: "notebookedit file_path", tool: "NotebookEdit",
-			input: `{"file_path":"nb.ipynb"}`, wantSub: "🔧 NotebookEdit · nb.ipynb", wantSep: true,
+			input: `{"file_path":"nb.ipynb"}`, wantSub: "✏️ NotebookEdit · nb.ipynb", wantSep: true,
 		},
-		{name: "bash command", tool: "Bash", input: `{"command":"go test ./..."}`, wantSub: "🔧 Bash · go test ./...", wantSep: true},
+		{name: "bash command", tool: "Bash", input: `{"command":"go test ./..."}`, wantSub: "⌨️ Bash · go test ./...", wantSep: true},
 		{
 			name: "grep pattern", tool: "Grep",
-			input: `{"pattern":"func main","path":"core"}`, wantSub: "🔧 Grep · func main", wantSep: true,
+			input: `{"pattern":"func main","path":"core"}`, wantSub: "🔍 Grep · func main", wantSep: true,
 		},
-		{name: "glob pattern", tool: "Glob", input: `{"pattern":"**/*.go"}`, wantSub: "🔧 Glob · **/*.go", wantSep: true},
+		{name: "glob pattern", tool: "Glob", input: `{"pattern":"**/*.go"}`, wantSub: "🔍 Glob · **/*.go", wantSep: true},
 		{
 			name: "task description", tool: "Task",
 			input:   `{"description":"run the tests","subagent_type":"tester"}`,
-			wantSub: "🔧 Task · run the tests", wantSep: true,
+			wantSub: "🤖 Task · run the tests", wantSep: true,
 		},
 		{
 			name: "task subagent fallback", tool: "Task",
-			input: `{"subagent_type":"tester"}`, wantSub: "🔧 Task · tester", wantSep: true,
+			input: `{"subagent_type":"tester"}`, wantSub: "🤖 Task · tester", wantSep: true,
 		},
-		{name: "agent description", tool: "Agent", input: `{"description":"do work"}`, wantSub: "🔧 Agent · do work", wantSep: true},
+		{name: "agent description", tool: "Agent", input: `{"description":"do work"}`, wantSub: "🤖 Agent · do work", wantSep: true},
 		{
 			name: "webfetch url", tool: "WebFetch",
-			input: `{"url":"https://example.com"}`, wantSub: "🔧 WebFetch · https://example.com", wantSep: true,
+			input: `{"url":"https://example.com"}`, wantSub: "🌐 WebFetch · https://example.com", wantSep: true,
 		},
 		{
 			name: "websearch query", tool: "WebSearch",
-			input: `{"query":"golang json"}`, wantSub: "🔧 WebSearch · golang json", wantSep: true,
+			input: `{"query":"golang json"}`, wantSub: "🔎 WebSearch · golang json", wantSep: true,
 		},
-		{name: "skill", tool: "Skill", input: `{"skill":"pdf"}`, wantSub: "🔧 Skill · pdf", wantSep: true},
+		{name: "skill", tool: "Skill", input: `{"skill":"pdf"}`, wantSub: "🧩 Skill · pdf", wantSep: true},
 		{
 			name: "toolsearch query", tool: "ToolSearch",
-			input: `{"query":"search this"}`, wantSub: "🔧 ToolSearch · search this", wantSep: true,
+			input: `{"query":"search this"}`, wantSub: "🔎 ToolSearch · search this", wantSep: true,
 		},
-		// Case-insensitive tool match.
-		{name: "lowercase tool name", tool: "read", input: `{"file_path":"a.go"}`, wantSub: "🔧 read · a.go", wantSep: true},
-		// Fallbacks to name-only (no separator).
+		// Case-insensitive tool match (emoji prefix resolves on the lowercased name).
+		{name: "lowercase tool name", tool: "read", input: `{"file_path":"a.go"}`, wantSub: "📖 read · a.go", wantSep: true},
+		// Fallbacks to name-only (no separator). An unknown tool also falls back to
+		// the generic wrench prefix.
 		{
 			name: "unknown tool", tool: "MysteryTool",
 			input: `{"file_path":"a.go"}`, wantSub: "🔧 MysteryTool", wantSep: false, wantMiss: " · ",
 		},
-		{name: "malformed input", tool: "Read", input: `{not json`, wantSub: "🔧 Read", wantSep: false, wantMiss: " · "},
-		{name: "empty input", tool: "Bash", input: ``, wantSub: "🔧 Bash", wantSep: false, wantMiss: " · "},
-		{name: "missing field", tool: "Read", input: `{"other":"x"}`, wantSub: "🔧 Read", wantSep: false, wantMiss: " · "},
-		{name: "non-string field", tool: "Read", input: `{"file_path":123}`, wantSub: "🔧 Read", wantSep: false, wantMiss: " · "},
+		{name: "malformed input", tool: "Read", input: `{not json`, wantSub: "📖 Read", wantSep: false, wantMiss: " · "},
+		{name: "empty input", tool: "Bash", input: ``, wantSub: "⌨️ Bash", wantSep: false, wantMiss: " · "},
+		{name: "missing field", tool: "Read", input: `{"other":"x"}`, wantSub: "📖 Read", wantSep: false, wantMiss: " · "},
+		{name: "non-string field", tool: "Read", input: `{"file_path":123}`, wantSub: "📖 Read", wantSep: false, wantMiss: " · "},
 	}
 
 	for _, tc := range cases {
@@ -175,6 +176,35 @@ func TestToolUseDetailEnrichment(t *testing.T) {
 	}
 }
 
+func TestToolLinePrefixPerTool(t *testing.T) {
+	cases := map[string]string{
+		"Read":         "📖 ",
+		"Edit":         "✏️ ",
+		"Write":        "✏️ ",
+		"NotebookEdit": "✏️ ",
+		"Bash":         "⌨️ ",
+		"Grep":         "🔍 ",
+		"Glob":         "🔍 ",
+		"Task":         "🤖 ",
+		"Agent":        "🤖 ",
+		"WebFetch":     "🌐 ",
+		"WebSearch":    "🔎 ",
+		"ToolSearch":   "🔎 ",
+		"Skill":        "🧩 ",
+		// Unknown and empty tool names fall back to the generic wrench.
+		"MysteryTool": "🔧 ",
+		"":            "🔧 ",
+		// Resolution is case-insensitive.
+		"bash": "⌨️ ",
+		"GREP": "🔍 ",
+	}
+	for tool, want := range cases {
+		if got := toolLinePrefix(tool); got != want {
+			t.Errorf("toolLinePrefix(%q) = %q, want %q", tool, got, want)
+		}
+	}
+}
+
 func TestToolUseDetailCollapsesMultilineCommand(t *testing.T) {
 	var elapsed time.Duration
 	p := NewProgress(fakeClock(&elapsed), 5)
@@ -184,7 +214,7 @@ func TestToolUseDetailCollapsesMultilineCommand(t *testing.T) {
 		ToolInput: []byte("{\"command\":\"echo one\\n   echo two\\n\\techo three\"}"),
 	})
 	frame := p.Frame()
-	if !strings.Contains(frame, "🔧 Bash · echo one echo two echo three") {
+	if !strings.Contains(frame, "⌨️ Bash · echo one echo two echo three") {
 		t.Fatalf("multi-line command not collapsed to one line: %q", frame)
 	}
 }
@@ -562,7 +592,7 @@ func TestElidedIndicatorShownWhenEvicted(t *testing.T) {
 		t.Fatalf("indicator not first activity line: %q", frame)
 	}
 	// Exactly ringSize activity lines are kept below the indicator.
-	if kept := strings.Count(frame, toolPrefix); kept != ring {
+	if kept := strings.Count(frame, toolLinePrefix("Bash")); kept != ring {
 		t.Fatalf("kept %d activity lines, want %d", kept, ring)
 	}
 }
