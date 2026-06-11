@@ -32,21 +32,28 @@ const telegramMaxMessageRunes = 4096
 // botChat implements core/chat.Transport over a *bot.Bot.
 type botChat struct {
 	b *bot.Bot
+	// enableRich reports the Capabilities().CanSendRich flag, sourced from the
+	// ENABLE_RICH_MESSAGES config. Stage 0 only surfaces it; the rich render paths
+	// are wired in later stages (see docs/rich-messages-plan.md).
+	enableRich bool
 }
 
 // NewBotChat adapts a *bot.Bot to the core/chat.Transport interface used by the
-// Service.
-func NewBotChat(b *bot.Bot) chat.Transport {
-	return &botChat{b: b}
+// Service. enableRich sets Capabilities().CanSendRich (from ENABLE_RICH_MESSAGES);
+// pass false to keep the legacy MarkdownToHTML/plain rendering.
+func NewBotChat(b *bot.Bot, enableRich bool) chat.Transport {
+	return &botChat{b: b, enableRich: enableRich}
 }
 
-// Capabilities reports Telegram's full feature set: it can send documents and
-// its message cap is 4096 runes. With these flags the neutral Service behaves
-// exactly as before.
+// Capabilities reports Telegram's full feature set: it can send documents, its
+// message cap is 4096 runes, and it can render rich messages when enableRich is
+// set. With these flags the neutral Service behaves exactly as before when rich
+// is off.
 func (c *botChat) Capabilities() chat.Capabilities {
 	return chat.Capabilities{
 		CanSendDocument: true,
 		MaxMessageRunes: telegramMaxMessageRunes,
+		CanSendRich:     c.enableRich,
 	}
 }
 
