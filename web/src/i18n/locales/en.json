@@ -1,0 +1,108 @@
+{
+  "flock": {
+    "meta": {
+      "title": "flock — an AI dev team you drive from Telegram",
+      "description": "flock runs a five-role Claude Code team — planner, coder, tester, reviewer, arbiter. Describe a feature in chat, get a ready pull request. Open source, Go, self-hosted."
+    },
+    "nav": {
+      "how": "How it works",
+      "features": "Features",
+      "deploy": "Deploy",
+      "docs": "Docs",
+      "github": "GitHub",
+      "cta": "Self-host it"
+    },
+    "hero": {
+      "badge": "Open source • Go • Telegram",
+      "title": "An AI dev team you drive from Telegram",
+      "subtitle": "flock runs a five-role Claude Code team — planner, coder, tester, reviewer, arbiter. Describe a feature in chat, get a ready PR. Every chat gets its own isolated workspace.",
+      "cta_primary": "Self-host it",
+      "cta_secondary": "Star on GitHub",
+      "cta_managed": "Don't want the hassle? → roost"
+    },
+    "demo": {
+      "title": "Chat → plan → code → tests → review → PR",
+      "text": "You write a task in plain language. flock plans, implements on a branch, runs tests, reviews with line-anchored comments and opens a pull request."
+    },
+    "how": {
+      "title": "Five roles, one pipeline",
+      "planner": "Planner — turns the request into a spec with acceptance criteria.",
+      "coder": "Coder — implements on a branch; for bugs, writes the failing test first.",
+      "tester": "Tester — runs the affected suite plus regression.",
+      "reviewer": "Reviewer — line-anchored inline comments right in the PR.",
+      "arbiter": "Arbiter — governs the loops and rules: ready to merge, or escalate."
+    },
+    "roles": {
+      "planner": "Planner",
+      "coder": "Coder",
+      "tester": "Tester",
+      "reviewer": "Reviewer",
+      "arbiter": "Arbiter"
+    },
+    "features": {
+      "title": "What's inside",
+      "isolation_title": "Per-chat isolation",
+      "isolation_text": "Every Telegram chat gets its own workspace — projects never collide.",
+      "parallel_title": "Parallel chats",
+      "parallel_text": "Multiple chats run at once, capped by config.",
+      "git_title": "Any git host",
+      "git_text": "GitHub, GitLab, Gitea. PR polling catches review comments without inbound webhooks.",
+      "voice_title": "Voice messages",
+      "voice_text": "Optional: Voxtral, Whisper or local STT — assign tasks by voice.",
+      "auth_title": "Your Claude",
+      "auth_text": "Claude Pro/Max subscription or an Anthropic API key — no per-token billing.",
+      "docker_title": "Prebuilt Docker image",
+      "docker_text": "ghcr.io/duckbugio/flock-telegram — one compose and you're live."
+    },
+    "paths": {
+      "title": "Two ways to run it",
+      "self_title": "Self-host",
+      "self_text": "Free and open. Your server, your Claude, full control.",
+      "self_cta": "Deployment guide",
+      "managed_title": "Managed (roost)",
+      "managed_text": "We host flock on a dedicated VPS and handle the infrastructure.",
+      "managed_cta": "Go to roost"
+    },
+    "quickstart": {
+      "title": "Up in a couple of commands",
+      "step1": "Pull ghcr.io/duckbugio/flock-telegram.",
+      "step2": "Set your Telegram bot token and Claude access.",
+      "step3": "Bring it up with docker compose — the bot's online.",
+      "copy": "Copy",
+      "copied": "Copied"
+    },
+    "oss": {
+      "title": "Fully open source",
+      "text": "Code, image and roles — all in the open. Fork it, audit it, contribute.",
+      "cta_star": "Star the repo",
+      "cta_issues": "Report an issue"
+    },
+    "faq": {
+      "title": "FAQ",
+      "q1": "Is it really free?",
+      "a1": "Yes. flock is open source. You only pay for your own Claude and your own server.",
+      "q2": "How is it different from plain Claude Code?",
+      "a2": "flock is a role-based team with review and an arbiter on top of Claude Code, driven from Telegram, with per-chat isolation.",
+      "q3": "Do I need my own server?",
+      "a3": "For self-hosting, yes. If you'd rather not, take managed hosting on roost.",
+      "q4": "Which models are supported?",
+      "a4": "Claude via a Pro/Max subscription or the Anthropic API."
+    },
+    "final": {
+      "title": "Put your flock to work",
+      "subtitle": "Self-host in minutes — or let roost host it.",
+      "cta_primary": "Self-host it",
+      "cta_secondary": "Host it on roost"
+    },
+    "footer": {
+      "tagline": "flock — an AI dev team in Telegram. Part of DuckBug.",
+      "product": "Product",
+      "docs": "Docs",
+      "github": "GitHub",
+      "license": "License"
+    },
+    "language": {
+      "label": "Language"
+    }
+  }
+}

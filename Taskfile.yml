@@ -95,3 +95,32 @@ tasks:
     cmds:
       - echo "- Build"
       - "{{.DEV_TOOLS}} go build -o bin/flock-telegram ./cmd/flock-telegram"
+
+  # ============================================================================
+  # WEB (standalone marketing site, decoupled from the Go binary)
+  # ============================================================================
+  web:install:
+    internal: true
+    cmds:
+      - npm --prefix web ci
+
+  web:lint:
+    desc: Lint and type-check the web app (eslint + prettier + tsc).
+    cmds:
+      - task: web:install
+      - echo "- Web - lint"
+      - npm --prefix web run lint
+
+  web:test:
+    desc: Run the web unit tests (vitest).
+    cmds:
+      - task: web:install
+      - echo "- Web - test"
+      - npm --prefix web test
+
+  web:build:
+    desc: Build the web production bundle.
+    cmds:
+      - task: web:install
+      - echo "- Web - build"
+      - npm --prefix web run build

@@ -1,0 +1,108 @@
+{
+  "flock": {
+    "meta": {
+      "title": "flock — 你从 Telegram 驾驭的 AI 开发团队",
+      "description": "flock 运行由五个角色组成的 Claude Code 团队——规划者、编码者、测试者、评审者、仲裁者。在聊天中描述一个功能，即可得到一个就绪的 Pull Request。开源、Go、自托管。"
+    },
+    "nav": {
+      "how": "工作原理",
+      "features": "功能",
+      "deploy": "部署",
+      "docs": "文档",
+      "github": "GitHub",
+      "cta": "自行托管"
+    },
+    "hero": {
+      "badge": "开源 • Go • Telegram",
+      "title": "你从 Telegram 驾驭的 AI 开发团队",
+      "subtitle": "flock 运行由五个角色组成的 Claude Code 团队——规划者、编码者、测试者、评审者、仲裁者。在聊天中描述一个功能，即可得到就绪的 PR。每个聊天都有自己独立的工作区。",
+      "cta_primary": "自行托管",
+      "cta_secondary": "在 GitHub 上点星",
+      "cta_managed": "不想折腾？→ roost"
+    },
+    "demo": {
+      "title": "聊天 → 规划 → 编码 → 测试 → 评审 → PR",
+      "text": "你用自然语言写下任务。flock 进行规划，在分支上实现，运行测试，以逐行注释进行评审，并打开 Pull Request。"
+    },
+    "how": {
+      "title": "五个角色，一条流水线",
+      "planner": "规划者——将需求转化为带验收标准的规格说明。",
+      "coder": "编码者——在分支上实现；遇到缺陷时先写一个失败的测试。",
+      "tester": "测试者——运行受影响的测试集以及回归测试。",
+      "reviewer": "评审者——在 PR 中直接给出逐行内联注释。",
+      "arbiter": "仲裁者——管理循环并作出裁决：可以合并，或升级处理。"
+    },
+    "roles": {
+      "planner": "规划者",
+      "coder": "编码者",
+      "tester": "测试者",
+      "reviewer": "评审者",
+      "arbiter": "仲裁者"
+    },
+    "features": {
+      "title": "内部构成",
+      "isolation_title": "按聊天隔离",
+      "isolation_text": "每个 Telegram 聊天都有自己的工作区——项目永不冲突。",
+      "parallel_title": "并行聊天",
+      "parallel_text": "多个聊天可同时运行，上限由配置控制。",
+      "git_title": "任意 Git 托管",
+      "git_text": "GitHub、GitLab、Gitea。PR 轮询无需入站 Webhook 即可捕获评审注释。",
+      "voice_title": "语音消息",
+      "voice_text": "可选：Voxtral、Whisper 或本地 STT——用语音分配任务。",
+      "auth_title": "你的 Claude",
+      "auth_text": "Claude Pro/Max 订阅或 Anthropic API 密钥——无按 Token 计费。",
+      "docker_title": "预构建 Docker 镜像",
+      "docker_text": "ghcr.io/duckbugio/flock-telegram——一条 compose 即可上线。"
+    },
+    "paths": {
+      "title": "两种运行方式",
+      "self_title": "自行托管",
+      "self_text": "免费且开源。你的服务器，你的 Claude，完全掌控。",
+      "self_cta": "部署指南",
+      "managed_title": "托管（roost）",
+      "managed_text": "我们在专属 VPS 上托管 flock，并负责基础设施。",
+      "managed_cta": "前往 roost"
+    },
+    "quickstart": {
+      "title": "几条命令即可启动",
+      "step1": "拉取 ghcr.io/duckbugio/flock-telegram。",
+      "step2": "设置你的 Telegram 机器人 Token 和 Claude 访问。",
+      "step3": "用 docker compose 启动——机器人即在线。",
+      "copy": "复制",
+      "copied": "已复制"
+    },
+    "oss": {
+      "title": "完全开源",
+      "text": "代码、镜像和角色——全部公开。Fork、审计、贡献。",
+      "cta_star": "为仓库点星",
+      "cta_issues": "报告问题"
+    },
+    "faq": {
+      "title": "常见问题",
+      "q1": "真的免费吗？",
+      "a1": "是的。flock 是开源的。你只需为自己的 Claude 和服务器付费。",
+      "q2": "它与普通的 Claude Code 有何不同？",
+      "a2": "flock 是在 Claude Code 之上的角色化团队，带评审和仲裁，从 Telegram 驾驭，并按聊天隔离。",
+      "q3": "我需要自己的服务器吗？",
+      "a3": "自行托管需要。如果你不想，可以选择 roost 的托管服务。",
+      "q4": "支持哪些模型？",
+      "a4": "通过 Pro/Max 订阅或 Anthropic API 使用 Claude。"
+    },
+    "final": {
+      "title": "让你的 flock 开始工作",
+      "subtitle": "几分钟内自行托管——或让 roost 来托管。",
+      "cta_primary": "自行托管",
+      "cta_secondary": "在 roost 上托管"
+    },
+    "footer": {
+      "tagline": "flock —— Telegram 中的 AI 开发团队。DuckBug 的一部分。",
+      "product": "产品",
+      "docs": "文档",
+      "github": "GitHub",
+      "license": "许可证"
+    },
+    "language": {
+      "label": "语言"
+    }
+  }
+}
