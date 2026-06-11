@@ -204,6 +204,60 @@ func TestStreamDraftRichErrorFallsBackToLegacy(t *testing.T) {
 	}
 }
 
+// TestRecordRichBreaker exercises the circuit-breaker logic: threshold consecutive
+// failures latch rich off, and any success in between resets the count.
+func TestRecordRichBreaker(t *testing.T) {
+	c := &botChat{}
+	// One short of the threshold: not latched.
+	for range richFailureThreshold - 1 {
+		c.recordRich(errors.New("x"))
+	}
+	if c.richOff.Load() {
+		t.Fatal("breaker latched before reaching the threshold")
+	}
+	// A success resets the consecutive count.
+	c.recordRich(nil)
+	if c.richFailures.Load() != 0 {
+		t.Fatalf("failure count = %d after success, want 0", c.richFailures.Load())
+	}
+	// A full threshold of consecutive failures now latches it off.
+	for range richFailureThreshold {
+		c.recordRich(errors.New("x"))
+	}
+	if !c.richOff.Load() {
+		t.Error("breaker did not latch after threshold consecutive failures")
+	}
+}
+
+// TestRichBreakerStopsAttempts: once the breaker latches, Send stops attempting
+// the rich path entirely (no further calls to the rich transport).
+func TestRichBreakerStopsAttempts(t *testing.T) {
+	var sendHits, editHits, draftHits int32
+	b := legacyBotServer(t, &sendHits, &editHits, &draftHits)
+	fr := &fakeRich{sendErr: errors.New("unsupported")}
+	c := &botChat{b: b, enableRich: true, rich: fr}
+
+	for range richFailureThreshold {
+		if _, err := c.Send(context.Background(), "555", "hi", "", true); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+	}
+	tripped := atomic.LoadInt32(&fr.sendN)
+	if tripped != int32(richFailureThreshold) {
+		t.Fatalf("rich attempts before trip = %d, want %d", tripped, richFailureThreshold)
+	}
+	if !c.richOff.Load() {
+		t.Fatal("breaker not latched after threshold failures")
+	}
+	// Subsequent sends must not touch the rich transport, only legacy.
+	if _, err := c.Send(context.Background(), "555", "hi", "", true); err != nil {
+		t.Fatalf("Send after trip: %v", err)
+	}
+	if atomic.LoadInt32(&fr.sendN) != tripped {
+		t.Errorf("rich attempted after breaker tripped (%d > %d)", fr.sendN, tripped)
+	}
+}
+
 // TestSendRichDisabledUsesLegacy: with the flag off, Send takes the legacy path
 // untouched (no rich transport configured).
 func TestSendRichDisabledUsesLegacy(t *testing.T) {

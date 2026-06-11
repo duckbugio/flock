@@ -14,7 +14,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-telegram/bot"
@@ -41,10 +41,20 @@ type botChat struct {
 	// enableRich is set; every call site treats a rich error as "fall back to the
 	// legacy MarkdownToHTML/plain path", so the rich path is never load-bearing.
 	rich richTransport
-	// richFallbackOnce logs the FIRST rich failure (once) so a systematically broken
-	// rich path is visible instead of silently degrading to legacy on every message.
-	richFallbackOnce sync.Once
+	// richFailures counts CONSECUTIVE rich failures (reset to 0 on any success), and
+	// richOff latches the rich path off for the rest of the process once they reach
+	// richFailureThreshold. This is the circuit breaker behind a default-on flag: if
+	// the live API does not (yet) serve the rich methods, the adapter stops paying a
+	// failed round-trip on every message after a short burst, instead of forever.
+	richFailures atomic.Int32
+	richOff      atomic.Bool
 }
+
+// richFailureThreshold is how many consecutive rich failures trip the breaker,
+// latching the rich path off for the process. Small enough to stop the wasted
+// round-trips quickly when the API lacks the methods, large enough to ride out a
+// transient blip (a single success resets the count).
+const richFailureThreshold = 5
 
 // NewBotChat adapts a *bot.Bot to the core/chat.Transport interface used by the
 // Service. enableRich sets Capabilities().CanSendRich (from ENABLE_RICH_MESSAGES)
@@ -153,12 +163,12 @@ func (c *botChat) StreamDraft(ctx context.Context, chatID chat.ChatID, draftID, 
 	// passing the Markdown straight through. On any failure fall through to the legacy
 	// HTML/plain draft below — identical contract, so the run loop's draft fallback is
 	// unaffected. Skipped for the empty-text clear (handled by the legacy path).
-	if c.enableRich && c.rich != nil && asMarkdown && text != "" {
+	if c.richAttemptable(asMarkdown, text) {
 		err := c.rich.streamDraft(ctx, parseChatID(chatID), draftIDToInt(draftID), richMarkdown(text))
+		c.recordRich(err)
 		if err == nil {
 			return nil
 		}
-		c.noteRichFallback(err)
 	}
 	params := &bot.SendMessageDraftParams{
 		ChatID:  parseChatID(chatID),
@@ -193,12 +203,12 @@ func (c *botChat) StreamDraft(ctx context.Context, chatID chat.ChatID, draftID, 
 func (c *botChat) trySendRich(
 	ctx context.Context, chatID int64, text, stopRunID string, asMarkdown bool,
 ) (chat.MessageID, bool) {
-	if !c.enableRich || c.rich == nil || !asMarkdown || text == "" {
+	if !c.richAttemptable(asMarkdown, text) {
 		return "", false
 	}
 	id, err := c.rich.send(ctx, chatID, richMarkdown(text), stopMarkup(stopRunID))
+	c.recordRich(err)
 	if err != nil {
-		c.noteRichFallback(err)
 		return "", false // any rich failure → legacy fallback
 	}
 	return strconv.Itoa(id), true
@@ -209,14 +219,12 @@ func (c *botChat) trySendRich(
 func (c *botChat) tryEditRich(
 	ctx context.Context, chatID int64, messageID int, text, stopRunID string, asMarkdown bool,
 ) bool {
-	if !c.enableRich || c.rich == nil || !asMarkdown || text == "" {
+	if !c.richAttemptable(asMarkdown, text) {
 		return false
 	}
-	if err := c.rich.edit(ctx, chatID, messageID, richMarkdown(text), stopMarkup(stopRunID)); err != nil {
-		c.noteRichFallback(err)
-		return false
-	}
-	return true
+	err := c.rich.edit(ctx, chatID, messageID, richMarkdown(text), stopMarkup(stopRunID))
+	c.recordRich(err)
+	return err == nil
 }
 
 // draftIDToInt maps the neutral string draft id (the run id) to the non-zero
@@ -240,14 +248,29 @@ func draftIDToInt(draftID string) int64 {
 	return id
 }
 
-// noteRichFallback logs the first rich-path failure at debug level (once), so a
-// systematically broken rich path is diagnosable instead of silently degrading to
-// the legacy renderer on every message. The error is already token-redacted by the
-// transport (see httpRichTransport.redactErr).
-func (c *botChat) noteRichFallback(err error) {
-	c.richFallbackOnce.Do(func() {
-		slog.Default().Debug("telegram: rich message failed, using legacy rendering", "error", err)
-	})
+// richAttemptable reports whether a rich attempt should be made for this call:
+// rich is enabled and wired, the breaker has not latched it off, the text is
+// markdown-rendered, and it is non-empty (the empty-text draft clear stays on the
+// legacy path).
+func (c *botChat) richAttemptable(asMarkdown bool, text string) bool {
+	return c.enableRich && c.rich != nil && !c.richOff.Load() && asMarkdown && text != ""
+}
+
+// recordRich feeds the circuit breaker: a success resets the consecutive-failure
+// count; a failure increments it and, on reaching richFailureThreshold, latches
+// the rich path off for the process (logged once, WARN). The error is already
+// token-redacted by the transport (see httpRichTransport.redactErr).
+func (c *botChat) recordRich(err error) {
+	if err == nil {
+		c.richFailures.Store(0)
+		return
+	}
+	if n := c.richFailures.Add(1); n >= richFailureThreshold && c.richOff.CompareAndSwap(false, true) {
+		slog.Default().Warn(
+			"telegram: disabling rich rendering for this process after consecutive failures; using legacy",
+			"failures", n, "error", err,
+		)
+	}
 }
 
 // isParseError reports whether err is Telegram rejecting our parse_mode markup
