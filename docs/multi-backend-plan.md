@@ -234,7 +234,7 @@ func New(cfg Config) (Runner, error)
 | `Text` | assistant `text` content block | `item.*` / `agent_message` |
 | `ToolUse` | assistant `tool_use` block | `item.*` `command_execution` / tool call |
 | `ToolResult` | `user`/`tool_result` envelope | `item.completed` for a tool item |
-| `Result` (RunResult) | `result` envelope (`cost_usd`, `num_turns`, …) | `turn.completed` (`usage.{input,output}_tokens`) + final `agent_message` |
+| `Result` (RunResult) | `result` envelope (`total_cost_usd`, `num_turns`, …) | `turn.completed` (`usage.{input,output}_tokens`) + final `agent_message` |
 | `RunError` | non-zero exit / no result | `turn.failed` / `error` event / non-zero exit |
 
 The lifecycle machinery in `core/claude/runner.go` — process-group spawn, ctx-cancellation kill
@@ -283,7 +283,7 @@ rather than blocked.
 
 | Capability | Claude (today, known) | Codex (P1 — verify) |
 |------------|-----------------------|----------------------|
-| Non-interactive run | `claude --print --output-format stream-json` | `codex exec "<prompt>"` (final msg to stdout) ✓ |
+| Non-interactive run | `claude --print --output-format stream-json --verbose` | `codex exec "<prompt>"` (final msg to stdout) ✓ |
 | Streaming events | `stream-json` stdout | `codex exec --json` (a.k.a. `--experimental-json`) → JSONL: `thread.started`, `turn.started/completed/failed`, `item.started/completed`, `error` ✓ — ⚠️ confirm exact field names/subtypes |
 | Final answer | `result` envelope `.text` | `agent_message` item, or `-o/--output-last-message <file>` ⚠️ pick the robust source |
 | Session id + resume | `--resume <id>`; id from init | `thread.started.thread_id`; resume via **subcommand** `codex exec resume <id> "<prompt>"` ⚠️ confirm |
@@ -292,7 +292,7 @@ rather than blocked.
 | Autonomous (no prompts) | `--permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` (`--yolo`) OR `--sandbox danger-full-access --ask-for-approval never`; plus `--skip-git-repo-check` (cwd may not be a git repo) ⚠️ confirm the right combo for the container |
 | Auth (headless) | `CLAUDE_CODE_OAUTH_TOKEN` env | `OPENAI_API_KEY` / `CODEX_API_KEY` env (vs `codex login`) ⚠️ confirm which works headless in the image |
 | Vision / inbound images | stdin `stream-json` user message w/ base64 image blocks | ⚠️ **UNKNOWN** for `codex exec` → **fallback: Codex backend ignores `Options.Images`** and answers text-only (a one-line notice that images were dropped); revisit if exec supports image input |
-| Cost accounting | `result.cost_usd` (USD) | `turn.completed.usage.{input,output}_tokens` (tokens, **no USD**) → **fallback: compute best-effort USD from a configured per-token price, else leave `CostUSD=0`** (cost cap effectively off for Codex until priced) ⚠️ |
+| Cost accounting | `result.total_cost_usd` (USD) | `turn.completed.usage.{input,output}_tokens` (tokens, **no USD**) → **fallback: compute best-effort USD from a configured per-token price, else leave `CostUSD=0`** (cost cap effectively off for Codex until priced) ⚠️ |
 | Prompt delivery | trailing arg / stdin stream-json | trailing arg; `codex exec -` reads prompt from stdin ✓ |
 
 **Rule:** every ⚠️ is resolved at P1's first task against the live CLI, recorded in `.team/memory.md`,
