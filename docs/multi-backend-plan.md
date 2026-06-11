@@ -87,12 +87,14 @@ adapters ───┘                              ▲
                                            ├── core/claude   (implements agent.Runner; `claude` CLI)
                                            └── core/codex     (implements agent.Runner; `codex` CLI)  [P1]
 
-cmd/*/main.go: runner, err := agent.New(cfg)   // selects claude|codex by AGENT_BACKEND
+cmd/*/main.go: runner, err := agent.New(agentCfg)   // agentCfg built from internal/config; selects claude|codex
 ```
 
 The conversation layer speaks only `core/agent`. Each backend is a leaf package that knows how to
 spawn its CLI, translate its stream into `agent.Event`, and map session/resume semantics. The factory
-is the only place that knows which backends exist.
+is the only place that knows which backends exist. `agentCfg` is the neutral `agent.Config` (§4) that
+each `cmd/*/main.go` builds from `internal/config` — so `core/agent` stays free of any `internal/config`
+import (the dependency points app → core, never the reverse).
 
 ### Go module layout (single module at repo root, unchanged)
 
@@ -103,7 +105,7 @@ core/
   codex/        NEW (P1) — Codex backend: runner.go (codex exec args), decode.go (JSONL), tail reuse — implements agent.Runner
   chat/ dispatch/ session/ cost/ …   unchanged (now import core/agent)
 internal/config/   gains AGENT_BACKEND + CODEX_* (see §5)
-cmd/flock-telegram, cmd/duck-vk   call agent.New(cfg) instead of claude.New(...)
+cmd/flock-telegram, cmd/duck-vk   build agent.Config from cfg, call agent.New(...) instead of claude.New(...)
 ```
 
 `core/claude` and `core/codex` may share small helpers (the `tail` stderr buffer, a process-group
@@ -118,7 +120,7 @@ at P0 — do not force a shared base.
 | Concern | Choice | Rationale |
 |---------|--------|-----------|
 | Neutral package | `core/agent` with interface `Runner` (name kept) | smallest move; `claude.Event`→`agent.Event` is pure type-churn the suite covers |
-| Backend selection | env `AGENT_BACKEND` (`claude`\|`codex`, default `claude`), via `agent.New(cfg)` factory | orthogonal to transport; one backend per instance; no new binaries |
+| Backend selection | env `AGENT_BACKEND` (`claude`\|`codex`, default `claude`), via `agent.New(agent.Config)` factory fed a neutral config built by `cmd/*` from `internal/config` | orthogonal to transport; one backend per instance; no new binaries; `core/agent` stays free of `internal/config` |
 | Claude backend | `core/claude` unchanged internally, now implements `agent.Runner` | zero behavior change |
 | Codex backend | `core/codex` over `codex exec --json` (JSONL events) | the maintained OpenAI CLI; non-interactive exec + JSONL + resume are documented |
 | Codex final answer | parse the `item`/`agent_message` event; OR `-o <file>` (`--output-last-message`) as a fallback | robust to JSONL schema drift |
@@ -196,9 +198,30 @@ type Runner interface {
     Run(ctx context.Context, prompt string, o Options) (<-chan Event, error)
 }
 
-// New selects and constructs the backend named by cfg (AGENT_BACKEND). Unknown name → error.
+// Config is the NEUTRAL construction-time input to the factory. It carries only
+// backend-selection + per-backend primitives (CLI path, model, turn cap) — never
+// the app's own config type. `cmd/*` maps internal/config → agent.Config; this
+// keeps the dependency arrow pointing app → core only. core/agent MUST NOT import
+// internal/config (today no core/* package does — preserve that). Per-run auth and
+// env stay in Options.Env, so adding a backend never widens this struct's surface.
+type Config struct {
+    Backend  string // AGENT_BACKEND: "claude" (default) | "codex"
+    Bin      string // backend CLI path (CLAUDE_BIN / CODEX_BIN)
+    Model    string // model id (CLAUDE_MODEL / CODEX_MODEL)
+    MaxTurns int    // turn cap; backends without one ignore it (Codex)
+}
+
+// New selects and constructs the backend named by cfg.Backend. Unknown name → error.
+// It is the single place that knows which backends exist; adding one = one case here
+// + one leaf package, with no change to callers or to this signature.
 func New(cfg Config) (Runner, error)
 ```
+
+> **Layering rule (enforced in P0):** the factory takes the neutral `agent.Config`
+> above, constructed by each `cmd/*/main.go` from `internal/config`. `core/agent`
+> and the backend leaves never import `internal/config` — the dependency stays
+> app → core, exactly as `claude.New(cfg.ClaudeBin)` works today. This is what keeps
+> the seam scalable to N backends without a config import cycle.
 
 **Event mapping (the per-backend translation each `decode` owns):**
 
@@ -213,8 +236,12 @@ func New(cfg Config) (Runner, error)
 
 The lifecycle machinery in `core/claude/runner.go` — process-group spawn, ctx-cancellation kill
 (SIGTERM→grace→SIGKILL), stderr tail for error enrichment, the 16 MiB scanner buffer, one-shot
-per-message invocation — is **backend-agnostic and reused** by `core/codex`. Only `buildArgs` and
-`decode` differ per backend.
+per-message invocation — is **backend-agnostic and reused** by `core/codex`. What differs per
+backend is **`buildArgs`, `decode`, and prompt/input delivery**: Claude's image path swaps the
+trailing-prompt arg for a `stream-json` user message on stdin (`userMessageEnvelope`/`stdinMode`),
+which is Claude-specific; Codex delivers the prompt as a trailing arg (or `codex exec -` on stdin)
+and, per §6, ignores `Options.Images` until vision is verified. So the reusable core is the
+process lifecycle; the per-backend surface is args + decode + how the prompt enters the child.
 
 ---
 
@@ -318,13 +345,17 @@ Each phase: **Goal → Scope → Key files → Interfaces → Acceptance.** Impl
     an `agent.Runner`. Decide whether the reusable lifecycle helpers (`tail`, `killGroup`, scanner
     sizing) move to `core/agent` for P1 reuse or stay in `core/claude` (import-reuse) — pick the
     lower-coupling option; do not force a shared base.
-  - Add `core/agent/factory.go`: `New(cfg Config) (Runner, error)` switching on `AGENT_BACKEND`
-    (only `claude` wired now; unknown → error).
+  - Add `core/agent/factory.go`: the neutral `Config` struct (§4) + `New(cfg Config) (Runner, error)`
+    switching on `cfg.Backend` (only `claude` wired now; unknown → error). `core/agent` must NOT
+    import `internal/config` (no `core/*` package does today — keep it that way).
   - Re-point all importers (`core/chat/{service,media,progress}.go`, both adapters' receiver/handler
     code, both `cmd/*/main.go`, and all the `_test.go` that reference `claude.*`) to `core/agent`.
-  - `cmd/*/main.go`: replace `claude.New(cfg.ClaudeBin)` with `agent.New(cfg)`.
+  - `cmd/*/main.go`: build `agent.Config` from `internal/config` (backend/bin/model/turns), replace
+    `claude.New(cfg.ClaudeBin)` with `runner, err := agent.New(agentCfg)`, and handle the new error
+    return (fatal at startup, like the other constructor failures).
   - `internal/config`: add `AGENT_BACKEND` (default `claude`) + a `ValidateBackend`.
-- **Interfaces:** `core/agent.Runner` + the value types (§4); `agent.New(Config) (Runner, error)`.
+- **Interfaces:** `core/agent.Runner` + the value types (§4); the neutral `agent.Config` +
+  `agent.New(Config) (Runner, error)`.
 - **Acceptance:**
   - `gofmt -l .` empty; `go build ./...`, `go vet ./...`, `golangci-lint run` clean.
   - **`go test -race ./...` passes with the existing tests essentially unchanged** (only import paths
