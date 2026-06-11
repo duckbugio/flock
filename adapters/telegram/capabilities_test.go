@@ -1,15 +1,22 @@
 //nolint:testpackage // whitebox: asserts the unexported botChat wiring of the rich-capability flag
 package telegram
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/go-telegram/bot"
+)
 
 // TestCapabilitiesRichFollowsFlag asserts the Bot API 10.1 rich capability is
 // surfaced from the ENABLE_RICH_MESSAGES flag threaded through NewBotChat, and
-// that the always-on Telegram capabilities are unaffected. Capabilities() does
-// not touch the *bot.Bot, so a nil bot is sufficient here.
+// that the always-on Telegram capabilities are unaffected.
 func TestCapabilitiesRichFollowsFlag(t *testing.T) {
+	b, err := bot.New("123:ABC", bot.WithSkipGetMe())
+	if err != nil {
+		t.Fatalf("bot.New: %v", err)
+	}
 	for _, enableRich := range []bool{false, true} {
-		caps := NewBotChat(nil, enableRich).Capabilities()
+		caps := NewBotChat(b, enableRich).Capabilities()
 		if caps.CanSendRich != enableRich {
 			t.Errorf("NewBotChat(_, %t).Capabilities().CanSendRich = %t, want %t",
 				enableRich, caps.CanSendRich, enableRich)
