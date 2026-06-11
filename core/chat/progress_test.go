@@ -364,6 +364,49 @@ func TestToolDetailRedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestToolDetailRedactsQuotedKeySecret(t *testing.T) {
+	// A secret carried in a JSON request body inside a shell command: the key is
+	// bound to its value by `":"`, not a bare `:`/`=`/space. The separator must
+	// tolerate the closing quote so the value is still masked. Built via Marshal to
+	// avoid escaping the inner JSON by hand.
+	cases := []struct {
+		name string
+		cmd  string
+		miss string
+	}{
+		{
+			name: "strong keyword in json body",
+			cmd:  `curl -d '{"password":"hunter2json"}' https://api.example.com`,
+			miss: "hunter2json",
+		},
+		{
+			name: "json body with space after colon",
+			cmd:  `curl -d '{"api_key": "KEY_LEAK_JSON"}'`,
+			miss: "KEY_LEAK_JSON",
+		},
+		{
+			name: "auth bound by quoted colon in json",
+			cmd:  `curl -d '{"auth":"topSecretJson"}'`,
+			miss: "topSecretJson",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input, err := json.Marshal(map[string]string{"command": tc.cmd})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			detail := toolDetail("Bash", input)
+			if strings.Contains(detail, tc.miss) {
+				t.Fatalf("detail leaked JSON-body secret %q: %q", tc.miss, detail)
+			}
+			if !strings.Contains(detail, redactedMask) {
+				t.Fatalf("detail should contain the redaction mask: %q", detail)
+			}
+		})
+	}
+}
+
 func TestToolDetailNonObjectJSON(t *testing.T) {
 	// Valid JSON that is not an object unmarshals into map[string]any with an
 	// error, so the detail falls back to "" (bare tool name).

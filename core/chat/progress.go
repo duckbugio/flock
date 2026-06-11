@@ -295,18 +295,20 @@ var secretRedactions = []struct {
 	// "AWS_SECRET_ACCESS_KEY=…", "DB_PASSWORD=…"). A bare \b would miss those because
 	// '_' is a word char (no boundary before the keyword), so we allow surrounding
 	// identifier chars [\w.-] on both sides and capture the whole left-hand name.
+	// keySepValue (below) also tolerates a closing quote between the key and its ':'
+	// so a JSON request body in a shell command ('{"password":"x"}') is masked too.
 	{
 		regexp.MustCompile(`(?i)\b([\w.-]*` +
 			`(?:token|secret|password|passwd|api[_-]?key|access[_-]?token)` +
-			`[\w.-]*)(\s*[:=]\s*|\s+)` + valuePattern),
+			`[\w.-]*)` + keySepValue),
 		"${1}${2}" + redactedMask,
 	},
 	// "auth" alone is too common in benign commands ("go test ./auth", "cd auth
 	// && …") to mask on a bare space, so it ONLY redacts when bound to its value by
-	// ':' / '=' ("--auth=token", "auth: x") — not by whitespace. Like the rule above
-	// it tolerates an identifier prefix so "X_AUTH=…" is still caught.
+	// ':' / '=' ("--auth=token", "auth: x", '"auth":"x"') — not by whitespace. Like
+	// the rule above it tolerates an identifier prefix so "X_AUTH=…" is still caught.
 	{
-		regexp.MustCompile(`(?i)\b([\w.-]*auth)(\s*[:=]\s*)` + valuePattern),
+		regexp.MustCompile(`(?i)\b([\w.-]*auth)(\s*["']?\s*[:=]\s*)` + valuePattern),
 		"${1}${2}" + redactedMask,
 	},
 	// URL userinfo: scheme://user:pass@host -> scheme://***@host. The password run
@@ -323,6 +325,14 @@ var secretRedactions = []struct {
 // value (`--password "hunter 2 spaces"`); the quote alternatives consume the
 // whole quoted run so it is masked as a unit. Stays linear under RE2.
 const valuePattern = `(?:"[^"]*"|'[^']*'|\S+)`
+
+// keySepValue is the SEPARATOR + VALUE half of the strong-keyword credential rule.
+// Group 2 (the separator) binds a keyword to its value either by ':' / '=' — with
+// an optional closing quote between them so a JSON body in a shell command
+// (`'{"password":"x"}'`) is masked, not just `--password=x` — or by bare
+// whitespace (`--password hunter2`). The value itself (valuePattern) is consumed
+// but not captured, so the replacement keeps ${1}${2} and masks only the value.
+const keySepValue = `(\s*["']?\s*[:=]\s*|\s+)` + valuePattern
 
 // minSchemeTokenLen is the shortest token the Bearer/Basic redaction will treat as
 // a credential; shorter runs (e.g. the word "auth" after "basic") stay readable.
