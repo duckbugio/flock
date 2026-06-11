@@ -168,6 +168,17 @@ func TestClaudeTimeout(t *testing.T) {
 	}
 }
 
+func TestClaudeTimeoutDefault(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "token")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if got := cfg.ClaudeTimeout(); got != 9*time.Hour {
+		t.Fatalf("default ClaudeTimeout() = %v, want %v", got, 9*time.Hour)
+	}
+}
+
 func TestSessionStoreFile(t *testing.T) {
 	// Explicit path wins.
 	c := Config{SessionStorePath: "/var/lib/duck/s.json", ApprovedDirectory: "/workspace"}
