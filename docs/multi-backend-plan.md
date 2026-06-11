@@ -170,6 +170,9 @@ type RunResult struct {
     CostUSD    float64 // Claude: from result envelope. Codex: best-effort from token usage, else 0 (see §6).
     IsError    bool
     // NumTurns/DurationMS/Subtype remain for Claude; a backend that lacks them leaves them zero.
+    // Only CostUSD is read by the neutral layer (the cost gate, core/chat.Service); the other three
+    // are populated by core/claude's decode but read nowhere outside it, so Codex may leave them zero
+    // with no behavior change.
     NumTurns   int
     DurationMS int64
     Subtype    string
