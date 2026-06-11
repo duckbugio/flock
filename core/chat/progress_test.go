@@ -239,9 +239,32 @@ func TestToolDetailRedactsSecrets(t *testing.T) {
 			wantSub: "https://***@github.com", wantMiss: "s3cr3t",
 		},
 		{
+			name: "auth bound by equals redacted", tool: "Bash",
+			input:   `{"command":"deploy --auth=topSecretValue"}`,
+			wantSub: "auth=***", wantMiss: "topSecretValue",
+		},
+		{
 			name: "clean command untouched", tool: "Bash",
 			input:   `{"command":"go test ./..."}`,
 			wantSub: "go test ./...",
+		},
+		// Benign uses of the loose keywords must stay fully readable (no over-masking
+		// when "auth" is not bound to a value by ':'/'=' and "basic"/"bearer" precede
+		// a short ordinary word rather than a credential token).
+		{
+			name: "auth as path segment untouched", tool: "Bash",
+			input:   `{"command":"go test ./auth ./config"}`,
+			wantSub: "go test ./auth ./config", wantMiss: "***",
+		},
+		{
+			name: "auth in cd chain untouched", tool: "Bash",
+			input:   `{"command":"cd internal/auth && go build"}`,
+			wantSub: "cd internal/auth && go build", wantMiss: "***",
+		},
+		{
+			name: "basic auth words untouched", tool: "Bash",
+			input:   `{"command":"echo basic auth check"}`,
+			wantSub: "basic auth check", wantMiss: "***",
 		},
 	}
 

@@ -137,6 +137,12 @@ func activityLine(e claude.Event) (string, bool) {
 		}
 		return toolPrefix + truncateRunes(line, recentSnippetMax), true
 	case claude.Text:
+		// Model "thought" text is free-form prose, not a CLI-shaped command, so it is
+		// shown verbatim and deliberately NOT run through redactSecrets: the keyword
+		// heuristics that are safe on a shell command ("password hunter2") would mangle
+		// ordinary prose ("password reset", "token bucket", "basic understanding"). The
+		// frame is purely cosmetic and the model is not expected to echo raw credentials
+		// here; only the CLI-shaped tool details (above) carry that risk and are redacted.
 		snippet := collapseWhitespace(e.Text)
 		if snippet == "" {
 			return "", false
@@ -218,14 +224,25 @@ var secretRedactions = []struct {
 	re   *regexp.Regexp
 	repl string
 }{
-	// HTTP auth schemes: "Bearer <token>", "Basic <token>".
+	// HTTP auth schemes: "Bearer <token>", "Basic <token>". The token must be at
+	// least minSchemeTokenLen chars so a real credential is masked while the plain
+	// English "basic auth" / "bearer of" is left readable.
 	{
-		regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+`),
+		regexp.MustCompile(`(?i)\b(bearer|basic)\s+([A-Za-z0-9._~+/=-]{` + minSchemeTokenLen + `,})`),
 		"$1 " + redactedMask,
 	},
-	// Credential-ish key/value pairs: flags, query params, env assignments.
+	// Credential-ish key/value pairs: flags, query params, env assignments. A
+	// strong keyword may be separated from its value by whitespace OR ':' / '='
+	// (covers "--password hunter2", "token: x", "api_key=x").
 	{
-		regexp.MustCompile(`(?i)\b(token|secret|password|passwd|api[_-]?key|access[_-]?token|auth)(\s*[:=]\s*|\s+)\S+`),
+		regexp.MustCompile(`(?i)\b(token|secret|password|passwd|api[_-]?key|access[_-]?token)(\s*[:=]\s*|\s+)\S+`),
+		"${1}${2}" + redactedMask,
+	},
+	// "auth" alone is too common in benign commands ("go test ./auth", "cd auth
+	// && …") to mask on a bare space, so it ONLY redacts when bound to its value by
+	// ':' / '=' ("--auth=token", "auth: x") — not by whitespace.
+	{
+		regexp.MustCompile(`(?i)\b(auth)(\s*[:=]\s*)\S+`),
 		"${1}${2}" + redactedMask,
 	},
 	// URL userinfo: scheme://user:pass@host -> scheme://***@host.
@@ -234,6 +251,10 @@ var secretRedactions = []struct {
 		"${1}" + redactedMask + "@",
 	},
 }
+
+// minSchemeTokenLen is the shortest token the Bearer/Basic redaction will treat as
+// a credential; shorter runs (e.g. the word "auth" after "basic") stay readable.
+const minSchemeTokenLen = "8"
 
 // redactedMask is the placeholder substituted for a masked secret value.
 const redactedMask = "***"
