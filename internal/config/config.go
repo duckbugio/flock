@@ -60,8 +60,10 @@ type Config struct {
 	// ClaudeTimeoutSeconds bounds a single run's delivery: it is applied as a
 	// per-run context deadline. When it elapses the run is cancelled (delivery
 	// stops) but the chat's stored session_id is PRESERVED, so the next message
-	// resumes seamlessly via --resume (plan §7.3). 0 disables the deadline.
-	ClaudeTimeoutSeconds int `env:"CLAUDE_TIMEOUT_SECONDS" envDefault:"0"`
+	// resumes seamlessly via --resume (plan §7.3). The default bounds a run to
+	// 9 hours (32400s); set CLAUDE_TIMEOUT_SECONDS=0 to disable the deadline, or
+	// any other value to override.
+	ClaudeTimeoutSeconds int `env:"CLAUDE_TIMEOUT_SECONDS" envDefault:"32400"`
 
 	// Workspace + behavior.
 	ApprovedDirectory     string `env:"APPROVED_DIRECTORY" envDefault:"/workspace"`
