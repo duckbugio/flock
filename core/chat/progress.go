@@ -6,7 +6,9 @@ package chat
 // unit-tested in isolation. Final-answer chunking lives in chunk.go.
 
 import (
+	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -28,6 +30,14 @@ const (
 	olderSnippetMax  = 400
 )
 
+// toolDetailMax bounds the per-tool detail (file path, command, query…) appended
+// to a tool activity line, so a single long command or path can't flood the line
+// before the whole composed line is re-capped at recentSnippetMax.
+const toolDetailMax = 160
+
+// toolDetailSeparator joins the tool name and its extracted detail: "📖 Read · path".
+const toolDetailSeparator = " · "
+
 // frameBudgetMax bounds the WHOLE assembled frame (header + blank + ring lines)
 // in runes. It stays comfortably below TelegramMaxMessage (4096, see chunk.go) so
 // a progress frame is always a single Telegram message with ~596 runes of
@@ -43,12 +53,62 @@ const frameBudgetMax = 3500
 // the activity lines in a frame.
 const separatorRunes = 2
 
-// Activity-line prefixes: a thought balloon for the model's text, a wrench for a
-// tool call.
+// Activity-line prefixes: a thought balloon for the model's text, and a wrench as
+// the fallback for a tool call that has no more specific emoji (see toolPrefixes).
 const (
 	thoughtPrefix = "💭 "
 	toolPrefix    = "🔧 "
 )
+
+// toolPrefixes maps a lowercased tool name to the emoji prefix shown before its
+// activity line, so the live frame reads "📖 Read · …" / "⌨️ Bash · …" instead of a
+// generic wrench for everything. A tool not listed here falls back to toolPrefix.
+// Several tools deliberately share an emoji (the edit family, the search family)
+// because they are the same kind of action from the user's point of view.
+var toolPrefixes = map[string]string{
+	"read":         "📖 ",
+	"edit":         "✏️ ",
+	"write":        "✏️ ",
+	"notebookedit": "✏️ ",
+	"bash":         "⌨️ ",
+	"grep":         "🔍 ",
+	"glob":         "🔍 ",
+	"task":         "🤖 ",
+	"agent":        "🤖 ",
+	"webfetch":     "🌐 ",
+	"websearch":    "🔎 ",
+	"toolsearch":   "🔎 ",
+	"skill":        "🧩 ",
+}
+
+// toolLinePrefix returns the emoji prefix for a tool's activity line, falling back
+// to the generic wrench for an unknown or empty tool name.
+func toolLinePrefix(tool string) string {
+	if p, ok := toolPrefixes[strings.ToLower(tool)]; ok {
+		return p
+	}
+	return toolPrefix
+}
+
+// activityPrefixes is every emoji prefix an activity line can begin with — the
+// thought balloon, the fallback wrench, and each per-tool emoji. capLine/Frame use
+// it to peel the prefix off before applying the rune budget. It is built once from
+// the renderer's own constants so it can never drift from what activityLine emits.
+// No prefix is a byte-prefix of another (each is a distinct emoji + space), so the
+// scan order does not matter.
+var activityPrefixes = buildActivityPrefixes()
+
+func buildActivityPrefixes() []string {
+	prefixes := []string{thoughtPrefix, toolPrefix}
+	seen := map[string]bool{thoughtPrefix: true, toolPrefix: true}
+	for _, p := range toolPrefixes {
+		if !seen[p] {
+			seen[p] = true
+			prefixes = append(prefixes, p)
+		}
+	}
+	return prefixes
+}
 
 // elidedFormat renders the "+N earlier" indicator prepended to the activity block
 // when older lines have scrolled off above the visible window. It is plain English
@@ -121,8 +181,18 @@ func activityLine(e claude.Event) (string, bool) {
 		if tool == "" {
 			tool = "tool"
 		}
-		return toolPrefix + truncateRunes(tool, recentSnippetMax), true
+		line := tool
+		if detail := toolDetail(tool, e.ToolInput); detail != "" {
+			line += toolDetailSeparator + detail
+		}
+		return toolLinePrefix(tool) + truncateRunes(line, recentSnippetMax), true
 	case claude.Text:
+		// Model "thought" text is free-form prose, not a CLI-shaped command, so it is
+		// shown verbatim and deliberately NOT run through redactSecrets: the keyword
+		// heuristics that are safe on a shell command ("password hunter2") would mangle
+		// ordinary prose ("password reset", "token bucket", "basic understanding"). The
+		// frame is purely cosmetic and the model is not expected to echo raw credentials
+		// here; only the CLI-shaped tool details (above) carry that risk and are redacted.
 		snippet := collapseWhitespace(e.Text)
 		if snippet == "" {
 			return "", false
@@ -134,11 +204,157 @@ func activityLine(e claude.Event) (string, bool) {
 	}
 }
 
+// toolDetail extracts a short, human-readable detail from a tool's JSON input so a
+// tool activity line can show WHAT is being read/run, not just the tool name. It is
+// best-effort and purely cosmetic: any empty, malformed, or unrecognized input
+// yields "" so the caller falls back to the bare tool name. The chosen value is
+// whitespace-collapsed and truncated to toolDetailMax runes so one long command or
+// path can't dominate the line.
+func toolDetail(tool string, input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+
+	// Pick the input field to surface BY TOOL NAME first, so an unrecognized tool
+	// costs nothing: we bail out before unmarshalling. "task"/"agent" prefer
+	// "description" and fall back to "subagent_type" (handled below).
+	var key string
+	switch strings.ToLower(tool) {
+	case "read", "edit", "write", "notebookedit":
+		key = "file_path"
+	case "bash":
+		key = "command"
+	case "grep", "glob":
+		key = "pattern"
+	case "task", "agent":
+		key = "description"
+	case "webfetch":
+		key = "url"
+	case "websearch", "toolsearch":
+		key = "query"
+	case "skill":
+		key = "skill"
+	default:
+		return ""
+	}
+
+	var args map[string]any
+	if err := json.Unmarshal(input, &args); err != nil {
+		return ""
+	}
+
+	// strField returns args[k] only when it is actually a JSON string.
+	strField := func(k string) string {
+		if v, ok := args[k].(string); ok {
+			return v
+		}
+		return ""
+	}
+
+	raw := strField(key)
+	if raw == "" && key == "description" {
+		raw = strField("subagent_type")
+	}
+
+	detail := collapseWhitespace(raw)
+	// Redact obvious secret-bearing fragments BEFORE truncation, but ONLY for the
+	// CLI-shaped fields that can actually carry a credential: a shell command or a
+	// URL. The other fields (file paths, search patterns, queries, skill/agent
+	// names) are not command strings, so masking them would only risk mangling
+	// benign content ("Grep · token = nil") without protecting anything. Done
+	// before truncateRunes so a secret near the cap can't survive by being cut.
+	if key == "command" || key == "url" {
+		detail = redactSecrets(detail)
+	}
+	if detail == "" {
+		return ""
+	}
+	return truncateRunes(detail, toolDetailMax)
+}
+
+// secretRedactions masks common secret-bearing fragments in a tool detail before
+// it is shown in the chat-visible progress frame. The line is purely cosmetic, so
+// over-masking is fine while leaking a credential is not. Each entry keeps the
+// surrounding context and replaces only the sensitive value with redactedMask.
+var secretRedactions = []struct {
+	re   *regexp.Regexp
+	repl string
+}{
+	// HTTP auth schemes: "Bearer <token>", "Basic <token>". The token must be at
+	// least minSchemeTokenLen chars so a real credential is masked while the plain
+	// English "basic auth" / "bearer of" is left readable.
+	{
+		regexp.MustCompile(fmt.Sprintf(`(?i)\b(bearer|basic)\s+([A-Za-z0-9._~+/=-]{%d,})`, minSchemeTokenLen)),
+		"$1 " + redactedMask,
+	},
+	// Credential-ish key/value pairs: flags, query params, env assignments. A
+	// strong keyword may be separated from its value by whitespace OR ':' / '='
+	// (covers "--password hunter2", "token: x", "api_key=x"). The keyword is matched
+	// even when it is a segment of a longer identifier — the dominant real-world
+	// shape is an UPPER/snake_case env assignment ("GITHUB_TOKEN=…",
+	// "AWS_SECRET_ACCESS_KEY=…", "DB_PASSWORD=…"). A bare \b would miss those because
+	// '_' is a word char (no boundary before the keyword), so we allow surrounding
+	// identifier chars [\w.-] on both sides and capture the whole left-hand name.
+	// keySepValue (below) also tolerates a closing quote between the key and its ':'
+	// so a JSON request body in a shell command ('{"password":"x"}') is masked too.
+	{
+		regexp.MustCompile(`(?i)\b([\w.-]*` +
+			`(?:token|secret|password|passwd|api[_-]?key|access[_-]?token)` +
+			`[\w.-]*)` + keySepValue),
+		"${1}${2}" + redactedMask,
+	},
+	// "auth" alone is too common in benign commands ("go test ./auth", "cd auth
+	// && …") to mask on a bare space, so it ONLY redacts when bound to its value by
+	// ':' / '=' ("--auth=token", "auth: x", '"auth":"x"') — not by whitespace. Like
+	// the rule above it tolerates an identifier prefix so "X_AUTH=…" is still caught.
+	{
+		regexp.MustCompile(`(?i)\b([\w.-]*auth)(\s*["']?\s*[:=]\s*)` + valuePattern),
+		"${1}${2}" + redactedMask,
+	},
+	// URL userinfo: scheme://user:pass@host -> scheme://***@host. The password run
+	// extends to the LAST '@' before the path so a literal '@' inside the password
+	// ("user:p@ss@host") is fully masked rather than leaving a tail visible.
+	{
+		regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s]+@`),
+		"${1}" + redactedMask + "@",
+	},
+}
+
+// valuePattern matches the VALUE half of a credential key/value pair. A bare \S+
+// stops at the first space, which would leak the tail of a *quoted* multi-word
+// value (`--password "hunter 2 spaces"`); the quote alternatives consume the
+// whole quoted run so it is masked as a unit. Stays linear under RE2.
+const valuePattern = `(?:"[^"]*"|'[^']*'|\S+)`
+
+// keySepValue is the SEPARATOR + VALUE half of the strong-keyword credential rule.
+// Group 2 (the separator) binds a keyword to its value either by ':' / '=' — with
+// an optional closing quote between them so a JSON body in a shell command
+// (`'{"password":"x"}'`) is masked, not just `--password=x` — or by bare
+// whitespace (`--password hunter2`). The value itself (valuePattern) is consumed
+// but not captured, so the replacement keeps ${1}${2} and masks only the value.
+const keySepValue = `(\s*["']?\s*[:=]\s*|\s+)` + valuePattern
+
+// minSchemeTokenLen is the shortest token the Bearer/Basic redaction will treat as
+// a credential; shorter runs (e.g. the word "auth" after "basic") stay readable.
+const minSchemeTokenLen = 8
+
+// redactedMask is the placeholder substituted for a masked secret value.
+const redactedMask = "***"
+
+// redactSecrets applies secretRedactions in order, masking credential-like
+// fragments while preserving the rest of the detail for context.
+func redactSecrets(s string) string {
+	for _, r := range secretRedactions {
+		s = r.re.ReplaceAllString(s, r.repl)
+	}
+	return s
+}
+
 // capLine re-caps a stored activity line's TEXT to maxText runes, preserving its
 // emoji prefix (which is added on top of the budget, never split or counted). A
 // line without a known prefix is capped whole.
 func capLine(line string, maxText int) string {
-	for _, prefix := range []string{thoughtPrefix, toolPrefix} {
+	for _, prefix := range activityPrefixes {
 		if strings.HasPrefix(line, prefix) {
 			return prefix + truncateRunes(line[len(prefix):], maxText)
 		}
@@ -245,7 +461,7 @@ func (p *Progress) Frame() string {
 		// The indicator line plus its leading newline.
 		overhead += 1 + utf8.RuneCountInString(fmt.Sprintf(elidedFormat, hidden))
 	}
-	for _, prefix := range []string{thoughtPrefix, toolPrefix} {
+	for _, prefix := range activityPrefixes {
 		if strings.HasPrefix(lines[0], prefix) {
 			overhead += utf8.RuneCountInString(prefix)
 			break

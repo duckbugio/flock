@@ -2,6 +2,7 @@
 package chat
 
 import (
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -40,7 +41,7 @@ func TestFrameCounterDrivenByClockNotEvents(t *testing.T) {
 	if !strings.Contains(frame, "Working… (42s)") {
 		t.Fatalf("counter did not advance during silent tool call: %q", frame)
 	}
-	if !strings.Contains(frame, "🔧 Bash") {
+	if !strings.Contains(frame, "⌨️ Bash") {
 		t.Fatalf("tool activity not shown: %q", frame)
 	}
 }
@@ -90,6 +91,329 @@ func TestObserveTextAndIgnoredEvents(t *testing.T) {
 	frame := p.Frame()
 	if !strings.Contains(frame, "hello there world") {
 		t.Fatalf("text snippet not collapsed/shown: %q", frame)
+	}
+}
+
+func TestToolUseDetailEnrichment(t *testing.T) {
+	cases := []struct {
+		name     string
+		tool     string
+		input    string
+		wantSub  string // substring the line must contain
+		wantSep  bool   // whether " · " must appear
+		wantMiss string // substring the line must NOT contain (optional)
+	}{
+		{
+			name: "read file_path", tool: "Read",
+			input:   `{"file_path":"internal/config/config.go"}`,
+			wantSub: "📖 Read · internal/config/config.go", wantSep: true,
+		},
+		{name: "edit file_path", tool: "Edit", input: `{"file_path":"main.go"}`, wantSub: "✏️ Edit · main.go", wantSep: true},
+		{name: "write file_path", tool: "Write", input: `{"file_path":"out.txt"}`, wantSub: "✏️ Write · out.txt", wantSep: true},
+		{
+			name: "notebookedit file_path", tool: "NotebookEdit",
+			input: `{"file_path":"nb.ipynb"}`, wantSub: "✏️ NotebookEdit · nb.ipynb", wantSep: true,
+		},
+		{name: "bash command", tool: "Bash", input: `{"command":"go test ./..."}`, wantSub: "⌨️ Bash · go test ./...", wantSep: true},
+		{
+			name: "grep pattern", tool: "Grep",
+			input: `{"pattern":"func main","path":"core"}`, wantSub: "🔍 Grep · func main", wantSep: true,
+		},
+		{name: "glob pattern", tool: "Glob", input: `{"pattern":"**/*.go"}`, wantSub: "🔍 Glob · **/*.go", wantSep: true},
+		{
+			name: "task description", tool: "Task",
+			input:   `{"description":"run the tests","subagent_type":"tester"}`,
+			wantSub: "🤖 Task · run the tests", wantSep: true,
+		},
+		{
+			name: "task subagent fallback", tool: "Task",
+			input: `{"subagent_type":"tester"}`, wantSub: "🤖 Task · tester", wantSep: true,
+		},
+		{name: "agent description", tool: "Agent", input: `{"description":"do work"}`, wantSub: "🤖 Agent · do work", wantSep: true},
+		{
+			name: "webfetch url", tool: "WebFetch",
+			input: `{"url":"https://example.com"}`, wantSub: "🌐 WebFetch · https://example.com", wantSep: true,
+		},
+		{
+			name: "websearch query", tool: "WebSearch",
+			input: `{"query":"golang json"}`, wantSub: "🔎 WebSearch · golang json", wantSep: true,
+		},
+		{name: "skill", tool: "Skill", input: `{"skill":"pdf"}`, wantSub: "🧩 Skill · pdf", wantSep: true},
+		{
+			name: "toolsearch query", tool: "ToolSearch",
+			input: `{"query":"search this"}`, wantSub: "🔎 ToolSearch · search this", wantSep: true,
+		},
+		// Case-insensitive tool match (emoji prefix resolves on the lowercased name).
+		{name: "lowercase tool name", tool: "read", input: `{"file_path":"a.go"}`, wantSub: "📖 read · a.go", wantSep: true},
+		// Fallbacks to name-only (no separator). An unknown tool also falls back to
+		// the generic wrench prefix.
+		{
+			name: "unknown tool", tool: "MysteryTool",
+			input: `{"file_path":"a.go"}`, wantSub: "🔧 MysteryTool", wantSep: false, wantMiss: " · ",
+		},
+		{name: "malformed input", tool: "Read", input: `{not json`, wantSub: "📖 Read", wantSep: false, wantMiss: " · "},
+		{name: "empty input", tool: "Bash", input: ``, wantSub: "⌨️ Bash", wantSep: false, wantMiss: " · "},
+		{name: "missing field", tool: "Read", input: `{"other":"x"}`, wantSub: "📖 Read", wantSep: false, wantMiss: " · "},
+		{name: "non-string field", tool: "Read", input: `{"file_path":123}`, wantSub: "📖 Read", wantSep: false, wantMiss: " · "},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var elapsed time.Duration
+			p := NewProgress(fakeClock(&elapsed), 5)
+			p.Observe(claude.Event{Type: claude.ToolUse, Tool: tc.tool, ToolInput: []byte(tc.input)})
+			frame := p.Frame()
+			if !strings.Contains(frame, tc.wantSub) {
+				t.Fatalf("frame %q does not contain %q", frame, tc.wantSub)
+			}
+			if tc.wantSep && !strings.Contains(frame, " · ") {
+				t.Fatalf("expected separator in %q", frame)
+			}
+			if tc.wantMiss != "" && strings.Contains(frame, tc.wantMiss) {
+				t.Fatalf("frame %q unexpectedly contains %q", frame, tc.wantMiss)
+			}
+		})
+	}
+}
+
+func TestToolLinePrefixPerTool(t *testing.T) {
+	cases := map[string]string{
+		"Read":         "📖 ",
+		"Edit":         "✏️ ",
+		"Write":        "✏️ ",
+		"NotebookEdit": "✏️ ",
+		"Bash":         "⌨️ ",
+		"Grep":         "🔍 ",
+		"Glob":         "🔍 ",
+		"Task":         "🤖 ",
+		"Agent":        "🤖 ",
+		"WebFetch":     "🌐 ",
+		"WebSearch":    "🔎 ",
+		"ToolSearch":   "🔎 ",
+		"Skill":        "🧩 ",
+		// Unknown and empty tool names fall back to the generic wrench.
+		"MysteryTool": "🔧 ",
+		"":            "🔧 ",
+		// Resolution is case-insensitive.
+		"bash": "⌨️ ",
+		"GREP": "🔍 ",
+	}
+	for tool, want := range cases {
+		if got := toolLinePrefix(tool); got != want {
+			t.Errorf("toolLinePrefix(%q) = %q, want %q", tool, got, want)
+		}
+	}
+}
+
+func TestToolUseDetailCollapsesMultilineCommand(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5)
+	p.Observe(claude.Event{
+		Type:      claude.ToolUse,
+		Tool:      "Bash",
+		ToolInput: []byte("{\"command\":\"echo one\\n   echo two\\n\\techo three\"}"),
+	})
+	frame := p.Frame()
+	if !strings.Contains(frame, "⌨️ Bash · echo one echo two echo three") {
+		t.Fatalf("multi-line command not collapsed to one line: %q", frame)
+	}
+}
+
+func TestToolUseDetailTruncatedToBudget(t *testing.T) {
+	longCmd := strings.Repeat("x", toolDetailMax+200)
+	input, err := json.Marshal(map[string]string{"command": longCmd})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	detail := toolDetail("Bash", input)
+	if got := utf8.RuneCountInString(detail); got != toolDetailMax {
+		t.Fatalf("detail rune count = %d, want %d (truncated with ellipsis)", got, toolDetailMax)
+	}
+	if !strings.HasSuffix(detail, "…") {
+		t.Fatalf("truncated detail should end with ellipsis: %q", detail)
+	}
+}
+
+func TestToolDetailRedactsSecrets(t *testing.T) {
+	cases := []struct {
+		name     string
+		tool     string
+		input    string
+		wantSub  string // detail must contain this (post-redaction)
+		wantMiss string // detail must NOT contain this (the secret)
+	}{
+		{
+			name: "bearer token in curl", tool: "Bash",
+			input:   `{"command":"curl -H 'Authorization: Bearer abc123SECRET' https://api.example.com"}`,
+			wantSub: "Bearer ***", wantMiss: "abc123SECRET",
+		},
+		{
+			name: "token flag", tool: "Bash",
+			input:   `{"command":"deploy --token=ghp_topSecretValue42"}`,
+			wantSub: "token=***", wantMiss: "ghp_topSecretValue42",
+		},
+		{
+			name: "password space-separated", tool: "Bash",
+			input:   `{"command":"mysql -u root --password hunter2"}`,
+			wantSub: "password ***", wantMiss: "hunter2",
+		},
+		{
+			name: "api_key query param", tool: "WebFetch",
+			input:   `{"url":"https://api.example.com/v1?api_key=KEY_LEAK_123"}`,
+			wantSub: "api_key=***", wantMiss: "KEY_LEAK_123",
+		},
+		{
+			name: "url userinfo credentials", tool: "Bash",
+			// Split so the fixture URL isn't a single literal gosec flags as a real credential.
+			input:   `{"command":"git clone https://alice:` + `s3cr3t@github.com/org/repo.git"}`,
+			wantSub: "https://***@github.com", wantMiss: "s3cr3t",
+		},
+		{
+			name: "auth bound by equals redacted", tool: "Bash",
+			input:   `{"command":"deploy --auth=topSecretValue"}`,
+			wantSub: "auth=***", wantMiss: "topSecretValue",
+		},
+		// Env-var-assignment shape (UPPER/snake_case) — the most common way a real
+		// secret appears in a shell command. The keyword is a segment of a longer
+		// identifier, so a bare \b would miss it ('_' is a word char).
+		{
+			name: "env var token assignment", tool: "Bash",
+			input:   `{"command":"export GITHUB_TOKEN=ghp_realSecretValue123"}`,
+			wantSub: "GITHUB_TOKEN=***", wantMiss: "ghp_realSecretValue123",
+		},
+		{
+			name: "env var secret access key", tool: "Bash",
+			input:   `{"command":"AWS_SECRET_ACCESS_KEY=AKIArealLeak0001 aws s3 ls"}`,
+			wantSub: "AWS_SECRET_ACCESS_KEY=***", wantMiss: "AKIArealLeak0001",
+		},
+		{
+			name: "env var db password", tool: "Bash",
+			input:   `{"command":"DB_PASSWORD=hunter2 ./run"}`,
+			wantSub: "DB_PASSWORD=***", wantMiss: "hunter2",
+		},
+		{
+			name: "snake_case auth assignment", tool: "Bash",
+			input:   `{"command":"deploy --service_auth=topSecretValue"}`,
+			wantSub: "service_auth=***", wantMiss: "topSecretValue",
+		},
+		{
+			name: "url password containing at sign", tool: "Bash",
+			input:   `{"command":"git clone https://bob:` + `my@ssPhrase@example.com/r.git"}`,
+			wantSub: "https://***@example.com", wantMiss: "my@ssPhrase",
+		},
+		// A quoted secret containing spaces must be masked as a whole; a bare \S+
+		// value would stop at the first space and leak the tail.
+		{
+			name: "double-quoted multiword secret", tool: "Bash",
+			input:   `{"command":"mysql --password \"hunter 2 spaces\""}`,
+			wantSub: "password ***", wantMiss: "spaces",
+		},
+		{
+			name: "single-quoted multiword token", tool: "Bash",
+			input:   `{"command":"deploy --token='ghp abc def'"}`,
+			wantSub: "token=***", wantMiss: "abc def",
+		},
+		{
+			name: "clean command untouched", tool: "Bash",
+			input:   `{"command":"go test ./..."}`,
+			wantSub: "go test ./...",
+		},
+		// Redaction is scoped to CLI-shaped fields (command/url). A search pattern
+		// or other non-command field is shown verbatim — it is not a command string,
+		// so masking it would only mangle benign content.
+		{
+			name: "grep pattern not redacted", tool: "Grep",
+			input:   `{"pattern":"token = nil"}`,
+			wantSub: "token = nil", wantMiss: "***",
+		},
+		{
+			name: "task description not redacted", tool: "Task",
+			input:   `{"description":"rotate the api_key in config"}`,
+			wantSub: "rotate the api_key in config", wantMiss: "***",
+		},
+		// Benign uses of the loose keywords must stay fully readable (no over-masking
+		// when "auth" is not bound to a value by ':'/'=' and "basic"/"bearer" precede
+		// a short ordinary word rather than a credential token).
+		{
+			name: "auth as path segment untouched", tool: "Bash",
+			input:   `{"command":"go test ./auth ./config"}`,
+			wantSub: "go test ./auth ./config", wantMiss: "***",
+		},
+		{
+			name: "auth in cd chain untouched", tool: "Bash",
+			input:   `{"command":"cd internal/auth && go build"}`,
+			wantSub: "cd internal/auth && go build", wantMiss: "***",
+		},
+		{
+			name: "basic auth words untouched", tool: "Bash",
+			input:   `{"command":"echo basic auth check"}`,
+			wantSub: "basic auth check", wantMiss: "***",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			detail := toolDetail(tc.tool, []byte(tc.input))
+			if !strings.Contains(detail, tc.wantSub) {
+				t.Fatalf("detail %q does not contain %q", detail, tc.wantSub)
+			}
+			if tc.wantMiss != "" && strings.Contains(detail, tc.wantMiss) {
+				t.Fatalf("detail %q leaked secret %q", detail, tc.wantMiss)
+			}
+		})
+	}
+}
+
+func TestToolDetailRedactsQuotedKeySecret(t *testing.T) {
+	// A secret carried in a JSON request body inside a shell command: the key is
+	// bound to its value by `":"`, not a bare `:`/`=`/space. The separator must
+	// tolerate the closing quote so the value is still masked. Built via Marshal to
+	// avoid escaping the inner JSON by hand.
+	cases := []struct {
+		name string
+		cmd  string
+		miss string
+	}{
+		{
+			name: "strong keyword in json body",
+			cmd:  `curl -d '{"password":"hunter2json"}' https://api.example.com`,
+			miss: "hunter2json",
+		},
+		{
+			name: "json body with space after colon",
+			cmd:  `curl -d '{"api_key": "KEY_LEAK_JSON"}'`,
+			miss: "KEY_LEAK_JSON",
+		},
+		{
+			name: "auth bound by quoted colon in json",
+			cmd:  `curl -d '{"auth":"topSecretJson"}'`,
+			miss: "topSecretJson",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input, err := json.Marshal(map[string]string{"command": tc.cmd})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			detail := toolDetail("Bash", input)
+			if strings.Contains(detail, tc.miss) {
+				t.Fatalf("detail leaked JSON-body secret %q: %q", tc.miss, detail)
+			}
+			if !strings.Contains(detail, redactedMask) {
+				t.Fatalf("detail should contain the redaction mask: %q", detail)
+			}
+		})
+	}
+}
+
+func TestToolDetailNonObjectJSON(t *testing.T) {
+	// Valid JSON that is not an object unmarshals into map[string]any with an
+	// error, so the detail falls back to "" (bare tool name).
+	for _, in := range []string{`"just a string"`, `[1,2,3]`, `42`} {
+		if got := toolDetail("Read", []byte(in)); got != "" {
+			t.Fatalf("toolDetail(%q) = %q, want empty", in, got)
+		}
 	}
 }
 
@@ -311,7 +635,7 @@ func TestElidedIndicatorShownWhenEvicted(t *testing.T) {
 		t.Fatalf("indicator not first activity line: %q", frame)
 	}
 	// Exactly ringSize activity lines are kept below the indicator.
-	if kept := strings.Count(frame, toolPrefix); kept != ring {
+	if kept := strings.Count(frame, toolLinePrefix("Bash")); kept != ring {
 		t.Fatalf("kept %d activity lines, want %d", kept, ring)
 	}
 }
