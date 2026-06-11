@@ -271,6 +271,18 @@ func TestToolDetailRedactsSecrets(t *testing.T) {
 			input:   `{"command":"git clone https://bob:` + `my@ssPhrase@example.com/r.git"}`,
 			wantSub: "https://***@example.com", wantMiss: "my@ssPhrase",
 		},
+		// A quoted secret containing spaces must be masked as a whole; a bare \S+
+		// value would stop at the first space and leak the tail.
+		{
+			name: "double-quoted multiword secret", tool: "Bash",
+			input:   `{"command":"mysql --password \"hunter 2 spaces\""}`,
+			wantSub: "password ***", wantMiss: "spaces",
+		},
+		{
+			name: "single-quoted multiword token", tool: "Bash",
+			input:   `{"command":"deploy --token='ghp abc def'"}`,
+			wantSub: "token=***", wantMiss: "abc def",
+		},
 		{
 			name: "clean command untouched", tool: "Bash",
 			input:   `{"command":"go test ./..."}`,

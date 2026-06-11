@@ -246,7 +246,9 @@ var secretRedactions = []struct {
 	// '_' is a word char (no boundary before the keyword), so we allow surrounding
 	// identifier chars [\w.-] on both sides and capture the whole left-hand name.
 	{
-		regexp.MustCompile(`(?i)\b([\w.-]*(?:token|secret|password|passwd|api[_-]?key|access[_-]?token)[\w.-]*)(\s*[:=]\s*|\s+)\S+`),
+		regexp.MustCompile(`(?i)\b([\w.-]*` +
+			`(?:token|secret|password|passwd|api[_-]?key|access[_-]?token)` +
+			`[\w.-]*)(\s*[:=]\s*|\s+)` + valuePattern),
 		"${1}${2}" + redactedMask,
 	},
 	// "auth" alone is too common in benign commands ("go test ./auth", "cd auth
@@ -254,7 +256,7 @@ var secretRedactions = []struct {
 	// ':' / '=' ("--auth=token", "auth: x") — not by whitespace. Like the rule above
 	// it tolerates an identifier prefix so "X_AUTH=…" is still caught.
 	{
-		regexp.MustCompile(`(?i)\b([\w.-]*auth)(\s*[:=]\s*)\S+`),
+		regexp.MustCompile(`(?i)\b([\w.-]*auth)(\s*[:=]\s*)` + valuePattern),
 		"${1}${2}" + redactedMask,
 	},
 	// URL userinfo: scheme://user:pass@host -> scheme://***@host. The password run
@@ -265,6 +267,12 @@ var secretRedactions = []struct {
 		"${1}" + redactedMask + "@",
 	},
 }
+
+// valuePattern matches the VALUE half of a credential key/value pair. A bare \S+
+// stops at the first space, which would leak the tail of a *quoted* multi-word
+// value (`--password "hunter 2 spaces"`); the quote alternatives consume the
+// whole quoted run so it is masked as a unit. Stays linear under RE2.
+const valuePattern = `(?:"[^"]*"|'[^']*'|\S+)`
 
 // minSchemeTokenLen is the shortest token the Bearer/Basic redaction will treat as
 // a credential; shorter runs (e.g. the word "auth" after "basic") stay readable.
