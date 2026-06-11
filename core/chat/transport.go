@@ -66,4 +66,12 @@ type Capabilities struct {
 	// MaxMessageRunes is the platform's max message length in runes, fed to the
 	// chunker (Telegram 4096). A non-positive value selects a safe default.
 	MaxMessageRunes int
+	// CanSendRich: the platform can render Bot API 10.1 rich messages (structured
+	// blocks + a native rich draft) instead of the legacy MarkdownToHTML/plain
+	// path. It is purely additive — false (the zero value) keeps a transport on the
+	// exact pre-rich behaviour, so a platform that does not set it (VK) needs no
+	// change. Telegram sets it from the ENABLE_RICH_MESSAGES flag; even there the
+	// rich path always falls back to MarkdownToHTML/plain on any error, so the flag
+	// is a feature toggle, never a hard dependency.
+	CanSendRich bool
 }

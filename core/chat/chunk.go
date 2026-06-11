@@ -48,6 +48,99 @@ func ChunkSize(s string, limit int) []string {
 	return chunks
 }
 
+// fenceMarker is the Markdown code-fence delimiter.
+const fenceMarker = "```"
+
+// fenceInfoCap bounds the info-string length carried onto a reopened fence, so the
+// per-chunk markers a split adds stay within fenceReserve.
+const fenceInfoCap = 32
+
+// fenceReserve is the rune budget held back per chunk so the close/reopen fence
+// markers a mid-block split adds can never push a balanced chunk over the limit:
+// a worst-case chunk gets BOTH a reopen ("```" + info + "\n") and a close
+// ("\n" + "```"), i.e. <= fenceInfoCap + 8 runes. The reserve clears that.
+const fenceReserve = fenceInfoCap + 16
+
+// ChunkFenced splits s into Telegram-safe pieces like Chunk, but keeps fenced code
+// blocks renderable across a split: when a break lands INSIDE a ``` block, the
+// chunk that ends open is given a closing fence and the continuation a reopening
+// ```<info>. Without this a split code block renders as one runaway code block on
+// the rich (Markdown) path and loses its fencing on the legacy path. With no
+// fenced block present the output equals Chunk's.
+func ChunkFenced(s string) []string { return ChunkFencedSize(s, TelegramMaxMessage) }
+
+// ChunkFencedSize is ChunkFenced with an explicit per-chunk rune limit.
+func ChunkFencedSize(s string, limit int) []string {
+	if limit <= 0 {
+		limit = TelegramMaxMessage
+	}
+	// No fences anywhere → nothing to balance, and no need to reserve budget; behave
+	// exactly like ChunkSize.
+	if !strings.Contains(s, fenceMarker) {
+		return ChunkSize(s, limit)
+	}
+	// Split with headroom so the added fence markers can't exceed the real limit.
+	split := limit - fenceReserve
+	if split < 1 {
+		split = limit
+	}
+	return balanceFences(ChunkSize(s, split))
+}
+
+// balanceFences rewrites chunk seams so no chunk ends inside an open ``` fence,
+// carrying the open fence's info string across the boundary.
+func balanceFences(chunks []string) []string {
+	out := make([]string, len(chunks))
+	openInfo := "" // info string of the fence open at the current seam
+	open := false  // whether a fence is open at the current seam
+	for i, c := range chunks {
+		var b strings.Builder
+		if open {
+			// Reopen the fence carried in from the previous chunk. strings.Builder
+			// writes never return an error, so the results are deliberately discarded.
+			_, _ = b.WriteString(fenceMarker)
+			_, _ = b.WriteString(openInfo)
+			_ = b.WriteByte('\n')
+		}
+		_, _ = b.WriteString(c)
+		endOpen, endInfo := scanFences(c, open, openInfo)
+		if endOpen {
+			// Close the fence at the chunk boundary so this chunk renders cleanly.
+			if !strings.HasSuffix(c, "\n") {
+				_ = b.WriteByte('\n')
+			}
+			_, _ = b.WriteString(fenceMarker)
+		}
+		out[i] = b.String()
+		open, openInfo = endOpen, endInfo
+	}
+	return out
+}
+
+// scanFences walks chunk line by line from the (startOpen, startInfo) fence state
+// and returns the state at its end. A line whose trimmed text begins with ```
+// toggles the fence: opening captures the (capped) info string after the marker,
+// closing clears it.
+func scanFences(chunk string, startOpen bool, startInfo string) (open bool, info string) {
+	open, info = startOpen, startInfo
+	for _, line := range strings.Split(chunk, "\n") {
+		t := strings.TrimSpace(line)
+		if !strings.HasPrefix(t, fenceMarker) {
+			continue
+		}
+		if open {
+			open, info = false, ""
+			continue
+		}
+		open = true
+		info = strings.TrimSpace(t[len(fenceMarker):])
+		if len(info) > fenceInfoCap {
+			info = info[:fenceInfoCap]
+		}
+	}
+	return open, info
+}
+
 // splitAt returns the largest prefix of s that is at most limit runes, broken on
 // a newline or space boundary when one exists within the budget, plus the
 // remainder with any single boundary separator consumed. When no boundary fits,
