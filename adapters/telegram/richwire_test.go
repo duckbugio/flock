@@ -79,6 +79,19 @@ func TestToInputRichMessageJSONShape(t *testing.T) {
 	}
 }
 
+// TestToInputRichMessageThinking asserts the programmatic Thinking block maps to
+// a "thinking" wire block carrying the reasoning text.
+func TestToInputRichMessageThinking(t *testing.T) {
+	m := rich.Message{Blocks: []rich.Block{rich.Thinking{Text: "step 1\nstep 2"}}}
+	got := toInputRichMessage(m)
+	if len(got.Blocks) != 1 || got.Blocks[0].Type != blockThinking {
+		t.Fatalf("blocks = %+v, want one thinking block", got.Blocks)
+	}
+	if got.Blocks[0].Reasoning != "step 1\nstep 2" {
+		t.Errorf("reasoning = %q, want the joined thoughts", got.Blocks[0].Reasoning)
+	}
+}
+
 // TestToInputRichMessageEmpty asserts an empty IR serializes to an empty block
 // list without panicking.
 func TestToInputRichMessageEmpty(t *testing.T) {

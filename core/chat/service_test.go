@@ -15,10 +15,41 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/duckbugio/flock/core/chat/rich"
 	"github.com/duckbugio/flock/core/claude"
 	"github.com/duckbugio/flock/core/dispatch"
 	"github.com/duckbugio/flock/core/session"
 )
+
+// TestSendDraftRoutesByCapability asserts sendDraft uses the optional RichDrafter
+// path only when the transport implements it AND reports CanSendRich, and the
+// plain StreamDraft path otherwise — the VK-safe seam (VK reports neither).
+func TestSendDraftRoutesByCapability(t *testing.T) {
+	p := NewProgress(func() time.Duration { return 0 }, 5)
+
+	t.Run("rich capable -> StreamRichDraft", func(t *testing.T) {
+		f := newFakeChat()
+		f.canRich = true
+		s := &Service{chat: f}
+		if err := s.sendDraft(context.Background(), "1", "d", p); err != nil {
+			t.Fatalf("sendDraft: %v", err)
+		}
+		if f.richN != 1 || len(f.drafts) != 0 {
+			t.Errorf("richN=%d drafts=%d, want rich path (1,0)", f.richN, len(f.drafts))
+		}
+	})
+
+	t.Run("not rich capable -> StreamDraft", func(t *testing.T) {
+		f := newFakeChat() // canRich false → plain path even though it implements RichDrafter
+		s := &Service{chat: f}
+		if err := s.sendDraft(context.Background(), "1", "d", p); err != nil {
+			t.Fatalf("sendDraft: %v", err)
+		}
+		if f.richN != 0 || len(f.drafts) != 1 {
+			t.Errorf("richN=%d drafts=%d, want plain path (0,1)", f.richN, len(f.drafts))
+		}
+	})
+}
 
 // Shared fixture values used across multiple run-loop tests.
 const (
@@ -54,6 +85,8 @@ type fakeChat struct {
 	draftErr error    // when set, StreamDraft returns it (simulates no draft support)
 	editErr  error    // when set, Edit returns it (e.g. a 429 to exercise throttling)
 	edits    int      // count of Edit calls (progress + final), for the throttle test
+	canRich  bool     // when set, Capabilities reports CanSendRich (rich draft path)
+	richN    int      // count of StreamRichDraft calls (the optional RichDrafter path)
 }
 
 func newFakeChat() *fakeChat {
@@ -67,7 +100,7 @@ func newFakeChat() *fakeChat {
 // Capabilities reports a full-capability transport so the fake drives the same
 // run-loop path Telegram does (documents, 4096 cap).
 func (f *fakeChat) Capabilities() Capabilities {
-	return Capabilities{CanSendDocument: true, MaxMessageRunes: TelegramMaxMessage}
+	return Capabilities{CanSendDocument: true, MaxMessageRunes: TelegramMaxMessage, CanSendRich: f.canRich}
 }
 
 func (f *fakeChat) Send(_ context.Context, _ ChatID, text, stopRunID string, _ bool) (MessageID, error) {
@@ -108,6 +141,18 @@ func (f *fakeChat) StreamDraft(_ context.Context, _ ChatID, _, text string, asMa
 	}
 	f.drafts = append(f.drafts, text)
 	f.draftMD = append(f.draftMD, asMarkdown)
+	return nil
+}
+
+// StreamRichDraft implements the optional RichDrafter extension so a rich-capable
+// fake can be exercised; it records the call and returns draftErr like StreamDraft.
+func (f *fakeChat) StreamRichDraft(_ context.Context, _ ChatID, _ string, _ rich.Message) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.draftErr != nil {
+		return f.draftErr
+	}
+	f.richN++
 	return nil
 }
 

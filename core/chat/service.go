@@ -378,7 +378,7 @@ func (s *Service) run(ctx context.Context, chatID ChatID, userID int64, prompt s
 
 	// Seed the live preview immediately so it appears without waiting for a tick.
 	if draftStreaming {
-		if err := s.chat.StreamDraft(ctx, chatID, runID, prog.Frame(), true); err != nil {
+		if err := s.sendDraft(ctx, chatID, runID, prog); err != nil {
 			draftStreaming = false
 			s.log.Debug("draft streaming unsupported; falling back to edits", "error", err)
 		} else {
@@ -397,7 +397,7 @@ func (s *Service) run(ctx context.Context, chatID ChatID, userID int64, prompt s
 			return
 		}
 		if draftStreaming {
-			err := s.chat.StreamDraft(ctx, chatID, runID, frame, true)
+			err := s.sendDraft(ctx, chatID, runID, prog)
 			if err == nil {
 				lastSent = frame
 				return
@@ -500,6 +500,19 @@ loop:
 		//nolint:contextcheck // intentionally detached; the nudge runs post-completion.
 		s.nudge.maybeNudge(chatID)
 	}
+}
+
+// sendDraft pushes the live progress as an ephemeral draft preview. When the
+// transport implements RichDrafter AND reports CanSendRich, it streams a
+// structured rich draft (RichFrame, with reasoning in a Thinking block);
+// otherwise it streams the flat string frame via StreamDraft. Both share the same
+// error contract, so a failure flips the caller off the draft path identically. A
+// transport without rich support (VK) always takes the StreamDraft branch.
+func (s *Service) sendDraft(ctx context.Context, chatID ChatID, draftID string, prog *Progress) error {
+	if rd, ok := s.chat.(RichDrafter); ok && s.chat.Capabilities().CanSendRich {
+		return rd.StreamRichDraft(ctx, chatID, draftID, prog.RichFrame())
+	}
+	return s.chat.StreamDraft(ctx, chatID, draftID, prog.Frame(), true)
 }
 
 // recordCost accumulates a completed run's USD cost onto userID's running total

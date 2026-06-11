@@ -12,16 +12,21 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+
+	"github.com/duckbugio/flock/core/chat/rich"
 )
 
 // fakeRich is a stub richTransport: it records calls and returns a configured id
 // or error so the gating/fallback decisions can be tested without HTTP.
 type fakeRich struct {
-	sendID  int
-	sendErr error
-	editErr error
-	sendN   int32
-	editN   int32
+	sendID    int
+	sendErr   error
+	editErr   error
+	draftErr  error
+	sendN     int32
+	editN     int32
+	draftN    int32
+	lastDraft inputRichMessage
 }
 
 func (f *fakeRich) send(_ context.Context, _ int64, _ inputRichMessage, _ models.ReplyMarkup) (int, error) {
@@ -32,6 +37,12 @@ func (f *fakeRich) send(_ context.Context, _ int64, _ inputRichMessage, _ models
 func (f *fakeRich) edit(_ context.Context, _ int64, _ int, _ inputRichMessage, _ models.ReplyMarkup) error {
 	atomic.AddInt32(&f.editN, 1)
 	return f.editErr
+}
+
+func (f *fakeRich) streamDraft(_ context.Context, _ int64, _ string, msg inputRichMessage) error {
+	atomic.AddInt32(&f.draftN, 1)
+	f.lastDraft = msg
+	return f.draftErr
 }
 
 // legacyBotServer builds a *bot.Bot pointed at a fake Bot API that counts the
@@ -148,6 +159,34 @@ func TestEditRichErrorFallsBackToLegacy(t *testing.T) {
 	}
 	if atomic.LoadInt32(&editHits) != 1 {
 		t.Errorf("legacy editMessageText hits = %d, want 1 (fallback)", editHits)
+	}
+}
+
+// TestStreamRichDraftSerializesAndStreams: the optional RichDrafter path
+// serializes the frame and calls the transport's streamDraft.
+func TestStreamRichDraftSerializesAndStreams(t *testing.T) {
+	fr := &fakeRich{}
+	c := &botChat{enableRich: true, rich: fr}
+	frame := rich.Message{Blocks: []rich.Block{rich.Thinking{Text: "reasoning"}}}
+
+	if err := c.StreamRichDraft(context.Background(), "555", "draft-1", frame); err != nil {
+		t.Fatalf("StreamRichDraft: %v", err)
+	}
+	if atomic.LoadInt32(&fr.draftN) != 1 {
+		t.Fatalf("streamDraft calls = %d, want 1", fr.draftN)
+	}
+	if len(fr.lastDraft.Blocks) != 1 || fr.lastDraft.Blocks[0].Type != blockThinking ||
+		fr.lastDraft.Blocks[0].Reasoning != "reasoning" {
+		t.Errorf("streamed payload = %+v, want one thinking block", fr.lastDraft)
+	}
+}
+
+// TestStreamRichDraftNilTransport: a defensive nil transport returns an error so
+// the Service falls back to the plain draft/edit path.
+func TestStreamRichDraftNilTransport(t *testing.T) {
+	c := &botChat{enableRich: true, rich: nil}
+	if err := c.StreamRichDraft(context.Background(), "1", "d", rich.Message{}); err == nil {
+		t.Error("StreamRichDraft with nil transport returned nil, want error")
 	}
 }
 

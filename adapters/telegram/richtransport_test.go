@@ -92,6 +92,25 @@ func TestHTTPRichTransportAPIError(t *testing.T) {
 	}
 }
 
+func TestHTTPRichTransportStreamDraft(t *testing.T) {
+	rs := newRichServer(t, `{"ok":true,"result":true}`)
+	tr := newHTTPRichTransport("123:ABC", rs.srv.URL, rs.srv.Client())
+
+	err := tr.streamDraft(context.Background(), 555, "draft-1", toInputRichMessage(rich2(t)))
+	if err != nil {
+		t.Fatalf("streamDraft: %v", err)
+	}
+	if !strings.HasSuffix(rs.lastPath, "/sendRichMessageDraft") {
+		t.Errorf("path = %q, want .../sendRichMessageDraft", rs.lastPath)
+	}
+	if rs.lastBody["draft_id"] != "draft-1" {
+		t.Errorf("draft_id = %v, want draft-1", rs.lastBody["draft_id"])
+	}
+	if _, ok := rs.lastBody["rich_message"]; !ok {
+		t.Errorf("body %v missing rich_message", rs.lastBody)
+	}
+}
+
 // rich2 builds a small representative message for transport tests.
 func rich2(t *testing.T) rich.Message {
 	t.Helper()

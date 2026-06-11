@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/duckbugio/flock/core/chat/rich"
 	"github.com/duckbugio/flock/core/claude"
 )
 
@@ -475,6 +476,55 @@ func (p *Progress) Frame() string {
 		budget = 1
 	}
 	return assemble([]string{capLine(lines[0], budget)})
+}
+
+// RichFrame renders the current progress as a structured rich Message, the
+// neutral IR a RichDrafter transport streams as a Bot API 10.1 rich draft. It
+// mirrors Frame()'s content — the same ring, the same per-recency caps — but
+// SEPARATES the model's reasoning into a single collapsible Thinking block
+// instead of interleaving it with tool activity, which is the whole point of the
+// rich draft. Layout: the "Working… (Ns)" header paragraph, an optional "+N
+// earlier" indicator, the Thinking block (when any reasoning is in the ring), then
+// one paragraph per tool-activity line (keeping its emoji prefix). Transports
+// without RichDrafter keep using Frame(); VK is unaffected.
+func (p *Progress) RichFrame() rich.Message {
+	secs := int64(p.elapsed() / time.Second)
+	if secs < 0 {
+		secs = 0
+	}
+	spin := spinnerFrames[secs%int64(len(spinnerFrames))]
+	header := fmt.Sprintf("%s Working… (%s)", spin, formatElapsed(secs))
+
+	blocks := []rich.Block{paragraph(header)}
+	if hidden := p.total - len(p.ring); hidden > 0 {
+		blocks = append(blocks, paragraph(fmt.Sprintf(elidedFormat, hidden)))
+	}
+
+	var thoughts, tools []string
+	for i, line := range p.ring {
+		maxText := olderSnippetMax
+		if i == len(p.ring)-1 {
+			maxText = recentSnippetMax
+		}
+		capped := capLine(line, maxText)
+		if strings.HasPrefix(capped, thoughtPrefix) {
+			thoughts = append(thoughts, strings.TrimPrefix(capped, thoughtPrefix))
+		} else {
+			tools = append(tools, capped)
+		}
+	}
+	if len(thoughts) > 0 {
+		blocks = append(blocks, rich.Thinking{Text: strings.Join(thoughts, "\n")})
+	}
+	for _, t := range tools {
+		blocks = append(blocks, paragraph(t))
+	}
+	return rich.Message{Blocks: blocks}
+}
+
+// paragraph wraps a plain string as a single-span rich paragraph block.
+func paragraph(s string) rich.Block {
+	return rich.Paragraph{Text: rich.Inline{Spans: []rich.Span{{Text: s}}}}
 }
 
 // Final renders the terminal message text for a successful run result. A

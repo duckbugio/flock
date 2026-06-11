@@ -201,6 +201,24 @@ func (c *botChat) tryEditRich(
 	return c.rich.edit(ctx, chatID, messageID, msg, stopMarkup(stopRunID)) == nil
 }
 
+// StreamRichDraft implements the optional chat.RichDrafter extension: it streams
+// the structured progress frame as a Bot API 10.1 rich draft (sendRichMessageDraft),
+// putting the model's reasoning in a dedicated Thinking block. An error is returned
+// to the Service, which then flips off the draft path and falls back to editing the
+// anchor — the same contract as a failed StreamDraft. It is only ever called when
+// enableRich is set (the Service gates on Capabilities().CanSendRich), so c.rich is
+// non-nil here; the guard is defensive.
+func (c *botChat) StreamRichDraft(ctx context.Context, chatID chat.ChatID, draftID string, frame rich.Message) error {
+	if c.rich == nil {
+		return errRichUnavailable
+	}
+	return c.rich.streamDraft(ctx, parseChatID(chatID), draftID, toInputRichMessage(frame))
+}
+
+// errRichUnavailable signals the Service to use the plain draft/edit path; it is a
+// defensive guard, since StreamRichDraft is only reached when rich is enabled.
+var errRichUnavailable = errors.New("telegram: rich transport not configured")
+
 // isParseError reports whether err is Telegram rejecting our parse_mode markup
 // (a 400 "can't parse entities"). Only such errors warrant the plain-text retry;
 // a transport/Not-Found error would fail identically, so retrying it risks a

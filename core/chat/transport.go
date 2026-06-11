@@ -3,6 +3,8 @@ package chat
 import (
 	"context"
 	"io"
+
+	"github.com/duckbugio/flock/core/chat/rich"
 )
 
 // ChatID is an opaque, transport-defined chat identifier. Telegram uses numeric
@@ -54,6 +56,18 @@ type Transport interface {
 	// Capabilities reports what this platform can do, so the Service can adapt to
 	// platforms weaker than Telegram instead of erroring on a missing primitive.
 	Capabilities() Capabilities
+}
+
+// RichDrafter is an OPTIONAL Transport extension: a transport that can stream a
+// structured rich draft (a Bot API 10.1 rich message, with the model's reasoning
+// in a dedicated Thinking block) instead of the flat string StreamDraft frame. The
+// Service type-asserts for it and uses StreamRichDraft only when the transport
+// both implements it AND reports Capabilities().CanSendRich; a transport that does
+// neither (VK) is entirely unaffected and keeps using StreamDraft. A
+// StreamRichDraft error has the same contract as a StreamDraft error: the run
+// loop flips off the draft path and falls back to editing the anchor message.
+type RichDrafter interface {
+	StreamRichDraft(ctx context.Context, chatID ChatID, draftID string, frame rich.Message) error
 }
 
 // Capabilities lets the Service adapt to platforms weaker than Telegram, with a

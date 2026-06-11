@@ -10,12 +10,59 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/duckbugio/flock/core/chat/rich"
 	"github.com/duckbugio/flock/core/claude"
 )
 
 // fakeClock returns a controllable elapsed function for deterministic frames.
 func fakeClock(d *time.Duration) func() time.Duration {
 	return func() time.Duration { return *d }
+}
+
+// TestRichFrameSeparatesReasoning asserts RichFrame routes the model's reasoning
+// into a single Thinking block and tool activity into paragraphs, with the
+// Working header first — the structured layout a rich draft renders.
+func TestRichFrameSeparatesReasoning(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5)
+	p.Observe(claude.Event{Type: claude.Text, Text: "first thought"})
+	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash"})
+	p.Observe(claude.Event{Type: claude.Text, Text: "second thought"})
+
+	msg := p.RichFrame()
+	if len(msg.Blocks) == 0 {
+		t.Fatal("RichFrame returned no blocks")
+	}
+	// Header paragraph first.
+	if h, ok := msg.Blocks[0].(rich.Paragraph); !ok || !strings.Contains(h.Text.Spans[0].Text, "Working…") {
+		t.Fatalf("first block = %+v, want a Working header paragraph", msg.Blocks[0])
+	}
+	// Exactly one Thinking block, joining both thoughts; no tool emoji leaks in.
+	var thinking *rich.Thinking
+	tools := 0
+	for _, b := range msg.Blocks {
+		switch v := b.(type) {
+		case rich.Thinking:
+			tv := v
+			thinking = &tv
+		case rich.Paragraph:
+			if strings.Contains(v.Text.Spans[0].Text, "Bash") {
+				tools++
+			}
+		}
+	}
+	if thinking == nil {
+		t.Fatal("no Thinking block; reasoning was not separated")
+	}
+	if !strings.Contains(thinking.Text, "first thought") || !strings.Contains(thinking.Text, "second thought") {
+		t.Errorf("thinking text = %q, want both thoughts joined", thinking.Text)
+	}
+	if strings.Contains(thinking.Text, thoughtPrefix) {
+		t.Errorf("thinking text %q still carries the 💭 prefix", thinking.Text)
+	}
+	if tools != 1 {
+		t.Errorf("tool paragraphs = %d, want 1 (the Bash line)", tools)
+	}
 }
 
 func TestFrameCounterDrivenByClockNotEvents(t *testing.T) {

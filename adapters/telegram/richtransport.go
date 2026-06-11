@@ -24,6 +24,7 @@ const defaultTelegramAPIBase = "https://api.telegram.org"
 type richTransport interface {
 	send(ctx context.Context, chatID int64, msg inputRichMessage, markup models.ReplyMarkup) (messageID int, err error)
 	edit(ctx context.Context, chatID int64, messageID int, msg inputRichMessage, markup models.ReplyMarkup) error
+	streamDraft(ctx context.Context, chatID int64, draftID string, msg inputRichMessage) error
 }
 
 // httpRichTransport calls the rich methods directly over HTTP. It exists because
@@ -75,6 +76,18 @@ func (t *httpRichTransport) edit(
 		body["reply_markup"] = markup
 	}
 	_, err := t.call(ctx, "editMessageText", body)
+	return err
+}
+
+// streamDraft streams an ephemeral rich draft preview keyed by draftID
+// (sendRichMessageDraft), the rich counterpart of the lib's SendMessageDraft. A
+// draft carries no inline keyboard, so no markup is passed (the Stop button rides
+// the separate anchor message, as on the legacy draft path).
+func (t *httpRichTransport) streamDraft(
+	ctx context.Context, chatID int64, draftID string, msg inputRichMessage,
+) error {
+	body := map[string]any{"chat_id": chatID, "draft_id": draftID, "rich_message": msg}
+	_, err := t.call(ctx, "sendRichMessageDraft", body)
 	return err
 }
 

@@ -32,6 +32,7 @@ const (
 	blockList         = "list"            // RichBlockList
 	blockQuote        = "block_quotation" // RichBlockBlockQuotation
 	blockTable        = "table"           // RichBlockTable
+	blockThinking     = "thinking"        // RichBlockThinking
 )
 
 // inputRichMessage is the top-level payload of sendRichMessage /
@@ -44,15 +45,16 @@ type inputRichMessage struct {
 // (rather than an interface with a custom marshaler) keeps the provisional wire
 // definition in one readable place; unused fields are omitted via omitempty.
 type richBlock struct {
-	Type     string     `json:"type"`
-	Text     *richText  `json:"text,omitempty"`     // paragraph, section_heading, block_quotation
-	Level    int        `json:"level,omitempty"`    // section_heading (1..6)
-	Language string     `json:"language,omitempty"` // preformatted (fence info-string)
-	Code     string     `json:"code,omitempty"`     // preformatted (verbatim body)
-	Ordered  bool       `json:"ordered,omitempty"`  // list
-	Items    []richText `json:"items,omitempty"`    // list
-	Header   []string   `json:"header,omitempty"`   // table
-	Rows     [][]string `json:"rows,omitempty"`     // table
+	Type      string     `json:"type"`
+	Text      *richText  `json:"text,omitempty"`      // paragraph, section_heading, block_quotation
+	Level     int        `json:"level,omitempty"`     // section_heading (1..6)
+	Language  string     `json:"language,omitempty"`  // preformatted (fence info-string)
+	Code      string     `json:"code,omitempty"`      // preformatted (verbatim body)
+	Ordered   bool       `json:"ordered,omitempty"`   // list
+	Items     []richText `json:"items,omitempty"`     // list
+	Header    []string   `json:"header,omitempty"`    // table
+	Rows      [][]string `json:"rows,omitempty"`      // table
+	Reasoning string     `json:"reasoning,omitempty"` // thinking
 }
 
 // richText is a run of formatted inline text. The published RichText* styling
@@ -100,6 +102,8 @@ func toRichBlock(b rich.Block) richBlock {
 		return richBlock{Type: blockQuote, Text: toRichText(v.Text)}
 	case rich.Table:
 		return richBlock{Type: blockTable, Header: v.Header, Rows: v.Rows}
+	case rich.Thinking:
+		return richBlock{Type: blockThinking, Reasoning: v.Text}
 	default:
 		return richBlock{Type: blockParagraph, Text: &richText{}}
 	}

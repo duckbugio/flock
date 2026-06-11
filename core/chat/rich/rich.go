@@ -81,12 +81,20 @@ type Table struct {
 	Rows   [][]string
 }
 
+// Thinking is a block of model reasoning, rendered as a dedicated collapsible
+// "thinking" section (RichBlockThinking) rather than crammed into the inline
+// activity stream. It has no Markdown source — it is built programmatically (the
+// live progress frame routes the model's reasoning lines here; see
+// Progress.RichFrame).
+type Thinking struct{ Text string }
+
 func (Paragraph) isBlock() {}
 func (Heading) isBlock()   {}
 func (Code) isBlock()      {}
 func (List) isBlock()      {}
 func (Quote) isBlock()     {}
 func (Table) isBlock()     {}
+func (Thinking) isBlock()  {}
 
 // Message is a complete rich message: an ordered list of blocks.
 type Message struct {
