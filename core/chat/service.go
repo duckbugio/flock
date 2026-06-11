@@ -552,7 +552,9 @@ func (s *Service) finish(
 		text = Final(res)
 	}
 
-	chunks := ChunkSize(text, s.maxRunes)
+	// Fence-aware chunking so a code block that crosses a chunk boundary stays
+	// renderable (balanced ``` per chunk) on both the rich and legacy paths.
+	chunks := ChunkFencedSize(text, s.maxRunes)
 
 	// Replace the progress message with the first chunk (clearing Stop markup);
 	// send any further chunks as new messages.

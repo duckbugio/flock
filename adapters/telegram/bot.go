@@ -41,20 +41,28 @@ type botChat struct {
 	// enableRich is set; every call site treats a rich error as "fall back to the
 	// legacy MarkdownToHTML/plain path", so the rich path is never load-bearing.
 	rich richTransport
-	// richFailures counts CONSECUTIVE rich failures (reset to 0 on any success), and
-	// richOff latches the rich path off for the rest of the process once they reach
-	// richFailureThreshold. This is the circuit breaker behind a default-on flag: if
-	// the live API does not (yet) serve the rich methods, the adapter stops paying a
-	// failed round-trip on every message after a short burst, instead of forever.
-	richFailures atomic.Int32
-	richOff      atomic.Bool
+	// richFailures counts CONSECUTIVE rich failures (reset to 0 on any success).
+	// richDisabledUntil holds a unix-nano deadline: while now < it, the rich path is
+	// suppressed (0 = enabled). Together they form a circuit breaker behind the
+	// default-on flag: after richFailureThreshold consecutive failures the rich path
+	// is suppressed for richCooldown, then a single probe is allowed — so an API that
+	// does not serve the rich methods stops costing a failed round-trip per message,
+	// while a transient blip self-heals instead of disabling rich until restart.
+	richFailures      atomic.Int32
+	richDisabledUntil atomic.Int64
+	// now is an injectable clock for the breaker cooldown (tests). nil means time.Now.
+	now func() time.Time
 }
 
-// richFailureThreshold is how many consecutive rich failures trip the breaker,
-// latching the rich path off for the process. Small enough to stop the wasted
-// round-trips quickly when the API lacks the methods, large enough to ride out a
-// transient blip (a single success resets the count).
-const richFailureThreshold = 5
+const (
+	// richFailureThreshold is how many consecutive rich failures trip the breaker.
+	// Small enough to stop wasted round-trips quickly when the API lacks the methods,
+	// large enough to ride out a transient blip (any success resets the count).
+	richFailureThreshold = 5
+	// richCooldown is how long the rich path stays suppressed after the breaker trips
+	// before a single probe is allowed.
+	richCooldown = time.Minute
+)
 
 // NewBotChat adapts a *bot.Bot to the core/chat.Transport interface used by the
 // Service. enableRich sets Capabilities().CanSendRich (from ENABLE_RICH_MESSAGES)
@@ -248,27 +256,45 @@ func draftIDToInt(draftID string) int64 {
 	return id
 }
 
-// richAttemptable reports whether a rich attempt should be made for this call:
-// rich is enabled and wired, the breaker has not latched it off, the text is
-// markdown-rendered, and it is non-empty (the empty-text draft clear stays on the
-// legacy path).
-func (c *botChat) richAttemptable(asMarkdown bool, text string) bool {
-	return c.enableRich && c.rich != nil && !c.richOff.Load() && asMarkdown && text != ""
+// nowTime reads the breaker clock, defaulting to time.Now when none is injected.
+func (c *botChat) nowTime() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
-// recordRich feeds the circuit breaker: a success resets the consecutive-failure
-// count; a failure increments it and, on reaching richFailureThreshold, latches
-// the rich path off for the process (logged once, WARN). The error is already
-// token-redacted by the transport (see httpRichTransport.redactErr).
+// richAttemptable reports whether a rich attempt should be made for this call:
+// rich is enabled and wired, the breaker's cooldown is not currently active, the
+// text is markdown-rendered, and it is non-empty (the empty-text draft clear stays
+// on the legacy path).
+func (c *botChat) richAttemptable(asMarkdown bool, text string) bool {
+	if !c.enableRich || c.rich == nil || !asMarkdown || text == "" {
+		return false
+	}
+	until := c.richDisabledUntil.Load()
+	return until == 0 || c.nowTime().UnixNano() >= until
+}
+
+// recordRich feeds the circuit breaker: a success clears the failure count and any
+// cooldown; a failure increments the count and, on reaching richFailureThreshold,
+// suppresses the rich path for richCooldown (logged WARN only on the first trip,
+// not on each re-arm). The error is already token-redacted by the transport.
 func (c *botChat) recordRich(err error) {
 	if err == nil {
 		c.richFailures.Store(0)
+		c.richDisabledUntil.Store(0)
 		return
 	}
-	if n := c.richFailures.Add(1); n >= richFailureThreshold && c.richOff.CompareAndSwap(false, true) {
+	n := c.richFailures.Add(1)
+	if n < richFailureThreshold {
+		return
+	}
+	until := c.nowTime().Add(richCooldown).UnixNano()
+	if prev := c.richDisabledUntil.Swap(until); prev == 0 {
 		slog.Default().Warn(
-			"telegram: disabling rich rendering for this process after consecutive failures; using legacy",
-			"failures", n, "error", err,
+			"telegram: suppressing rich rendering after consecutive failures; using legacy",
+			"failures", n, "cooldown", richCooldown, "error", err,
 		)
 	}
 }

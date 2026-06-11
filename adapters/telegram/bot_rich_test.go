@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -205,32 +206,37 @@ func TestStreamDraftRichErrorFallsBackToLegacy(t *testing.T) {
 }
 
 // TestRecordRichBreaker exercises the circuit-breaker logic: threshold consecutive
-// failures latch rich off, and any success in between resets the count.
+// failures suppress rich, and any success in between resets the count + cooldown.
 func TestRecordRichBreaker(t *testing.T) {
 	c := &botChat{}
-	// One short of the threshold: not latched.
+	// One short of the threshold: not suppressed.
 	for range richFailureThreshold - 1 {
 		c.recordRich(errors.New("x"))
 	}
-	if c.richOff.Load() {
-		t.Fatal("breaker latched before reaching the threshold")
+	if c.richDisabledUntil.Load() != 0 {
+		t.Fatal("breaker suppressed rich before reaching the threshold")
 	}
 	// A success resets the consecutive count.
 	c.recordRich(nil)
 	if c.richFailures.Load() != 0 {
 		t.Fatalf("failure count = %d after success, want 0", c.richFailures.Load())
 	}
-	// A full threshold of consecutive failures now latches it off.
+	// A full threshold of consecutive failures now arms the cooldown.
 	for range richFailureThreshold {
 		c.recordRich(errors.New("x"))
 	}
-	if !c.richOff.Load() {
-		t.Error("breaker did not latch after threshold consecutive failures")
+	if c.richDisabledUntil.Load() == 0 {
+		t.Error("breaker did not suppress rich after threshold consecutive failures")
+	}
+	// A later success clears the cooldown again.
+	c.recordRich(nil)
+	if c.richDisabledUntil.Load() != 0 {
+		t.Error("success did not clear the cooldown")
 	}
 }
 
-// TestRichBreakerStopsAttempts: once the breaker latches, Send stops attempting
-// the rich path entirely (no further calls to the rich transport).
+// TestRichBreakerStopsAttempts: once the breaker trips, Send stops attempting the
+// rich path during the cooldown (no further calls to the rich transport).
 func TestRichBreakerStopsAttempts(t *testing.T) {
 	var sendHits, editHits, draftHits int32
 	b := legacyBotServer(t, &sendHits, &editHits, &draftHits)
@@ -246,15 +252,34 @@ func TestRichBreakerStopsAttempts(t *testing.T) {
 	if tripped != int32(richFailureThreshold) {
 		t.Fatalf("rich attempts before trip = %d, want %d", tripped, richFailureThreshold)
 	}
-	if !c.richOff.Load() {
-		t.Fatal("breaker not latched after threshold failures")
+	if c.richDisabledUntil.Load() == 0 {
+		t.Fatal("breaker not armed after threshold failures")
 	}
-	// Subsequent sends must not touch the rich transport, only legacy.
+	// Subsequent sends must not touch the rich transport during cooldown, only legacy.
 	if _, err := c.Send(context.Background(), "555", "hi", "", true); err != nil {
 		t.Fatalf("Send after trip: %v", err)
 	}
 	if atomic.LoadInt32(&fr.sendN) != tripped {
-		t.Errorf("rich attempted after breaker tripped (%d > %d)", fr.sendN, tripped)
+		t.Errorf("rich attempted during cooldown (%d > %d)", fr.sendN, tripped)
+	}
+}
+
+// TestRichBreakerCooldownProbe: after the cooldown elapses, a single rich probe is
+// allowed again (self-healing from a transient failure burst).
+func TestRichBreakerCooldownProbe(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	c := &botChat{enableRich: true, rich: &fakeRich{}, now: func() time.Time { return now }}
+
+	for range richFailureThreshold {
+		c.recordRich(errors.New("x"))
+	}
+	if c.richAttemptable(true, "hi") {
+		t.Fatal("rich attempted during the cooldown window")
+	}
+	// Advance the clock past the cooldown → a probe is permitted again.
+	now = now.Add(richCooldown + time.Second)
+	if !c.richAttemptable(true, "hi") {
+		t.Error("rich not probed after the cooldown elapsed")
 	}
 }
 
