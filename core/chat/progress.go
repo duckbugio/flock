@@ -206,10 +206,16 @@ func toolDetail(tool string, input json.RawMessage) string {
 		raw = strField("subagent_type")
 	}
 
-	// Redact obvious secret-bearing fragments BEFORE truncation: the progress
-	// frame is chat-visible, and a Bash command or URL can carry a token. Done
+	detail := collapseWhitespace(raw)
+	// Redact obvious secret-bearing fragments BEFORE truncation, but ONLY for the
+	// CLI-shaped fields that can actually carry a credential: a shell command or a
+	// URL. The other fields (file paths, search patterns, queries, skill/agent
+	// names) are not command strings, so masking them would only risk mangling
+	// benign content ("Grep · token = nil") without protecting anything. Done
 	// before truncateRunes so a secret near the cap can't survive by being cut.
-	detail := redactSecrets(collapseWhitespace(raw))
+	if key == "command" || key == "url" {
+		detail = redactSecrets(detail)
+	}
 	if detail == "" {
 		return ""
 	}
@@ -228,7 +234,7 @@ var secretRedactions = []struct {
 	// least minSchemeTokenLen chars so a real credential is masked while the plain
 	// English "basic auth" / "bearer of" is left readable.
 	{
-		regexp.MustCompile(`(?i)\b(bearer|basic)\s+([A-Za-z0-9._~+/=-]{` + minSchemeTokenLen + `,})`),
+		regexp.MustCompile(fmt.Sprintf(`(?i)\b(bearer|basic)\s+([A-Za-z0-9._~+/=-]{%d,})`, minSchemeTokenLen)),
 		"$1 " + redactedMask,
 	},
 	// Credential-ish key/value pairs: flags, query params, env assignments. A
@@ -254,7 +260,7 @@ var secretRedactions = []struct {
 
 // minSchemeTokenLen is the shortest token the Bearer/Basic redaction will treat as
 // a credential; shorter runs (e.g. the word "auth" after "basic") stay readable.
-const minSchemeTokenLen = "8"
+const minSchemeTokenLen = 8
 
 // redactedMask is the placeholder substituted for a masked secret value.
 const redactedMask = "***"

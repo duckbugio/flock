@@ -248,6 +248,19 @@ func TestToolDetailRedactsSecrets(t *testing.T) {
 			input:   `{"command":"go test ./..."}`,
 			wantSub: "go test ./...",
 		},
+		// Redaction is scoped to CLI-shaped fields (command/url). A search pattern
+		// or other non-command field is shown verbatim — it is not a command string,
+		// so masking it would only mangle benign content.
+		{
+			name: "grep pattern not redacted", tool: "Grep",
+			input:   `{"pattern":"token = nil"}`,
+			wantSub: "token = nil", wantMiss: "***",
+		},
+		{
+			name: "task description not redacted", tool: "Task",
+			input:   `{"description":"rotate the api_key in config"}`,
+			wantSub: "rotate the api_key in config", wantMiss: "***",
+		},
 		// Benign uses of the loose keywords must stay fully readable (no over-masking
 		// when "auth" is not bound to a value by ':'/'=' and "basic"/"bearer" precede
 		// a short ordinary word rather than a credential token).
