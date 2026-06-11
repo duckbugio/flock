@@ -23,6 +23,12 @@ func TestCapabilities(t *testing.T) {
 	if caps.MaxMessageRunes != vkMaxMessageRunes {
 		t.Errorf("MaxMessageRunes = %d, want %d", caps.MaxMessageRunes, vkMaxMessageRunes)
 	}
+	// VK has no Bot API 10.1 rich support: the additive CanSendRich field must stay
+	// at its zero value so the VK adapter keeps the legacy rendering with no change
+	// (docs/rich-messages-plan.md §6).
+	if caps.CanSendRich {
+		t.Errorf("capabilities = %+v, want CanSendRich false (VK has no rich support)", caps)
+	}
 }
 
 func TestSendRendersStopKeyboardAndUniqueRandomID(t *testing.T) {

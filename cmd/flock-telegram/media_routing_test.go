@@ -127,7 +127,7 @@ func newMediaHarness(t *testing.T, maxUpload int64) *mediaTestHarness {
 	disp := dispatch.New(2)
 	svc := chat.New(chat.Config{
 		Runner:     runner,
-		Transport:  telegram.NewBotChat(b),
+		Transport:  telegram.NewBotChat(b, false),
 		Dispatcher: disp,
 		Workspace:  &fakeWorkspace{dir: t.TempDir()},
 		Logger:     logger,
