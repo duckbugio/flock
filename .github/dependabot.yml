@@ -23,6 +23,14 @@ updates:
     labels:
       - dependencies
       - docker
+    # The runtime base hosts the `claude` CLI and must stay on a Node LTS line.
+    # Node majors are bumped manually only once the next even release reaches LTS
+    # (e.g. node 26 becomes LTS in Oct 2026); ignore automatic major bumps so
+    # Dependabot stops re-proposing the non-LTS Current line every week.
+    ignore:
+      - dependency-name: node
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: docker
     directory: /adapters/vk
@@ -32,6 +40,11 @@ updates:
     labels:
       - dependencies
       - docker
+    # Same LTS policy as the telegram adapter above: no automatic Node major bumps.
+    ignore:
+      - dependency-name: node
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: github-actions
     directory: /
