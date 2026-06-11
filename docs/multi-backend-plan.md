@@ -262,6 +262,13 @@ Shared, read by every binary regardless of transport:
 > and validates them per binary (mirror the existing `ValidateTelegram` / `ValidateVK` pattern with a
 > `ValidateBackend`). `CLAUDE_MAX_TURNS` stays Claude-only; Codex ignores it.
 
+> **Timeout is NOT part of `agent.Config`.** The per-run delivery deadline already lives in the neutral
+> conversation layer — `core/chat.Service.Timeout` (set once at startup from `cfg.ClaudeTimeout()` in
+> each `cmd/*/main.go`, applied as a `context.WithTimeout` around a run). It is backend-agnostic today.
+> So `CODEX_TIMEOUT_SECONDS` is just an alternate source for that same `Service.Timeout` value, selected
+> by the active backend in `cmd/*` — it does **not** thread through the factory or the runner. Keep
+> `CLAUDE_TIMEOUT_SECONDS` as-is; P1 only adds the cmd-level "pick the active backend's timeout var".
+
 ---
 
 ## 6. Codex feasibility table (verify the UNKNOWNs at P1 kickoff)
@@ -348,8 +355,10 @@ Each phase: **Goal → Scope → Key files → Interfaces → Acceptance.** Impl
   - Add `core/agent/factory.go`: the neutral `Config` struct (§4) + `New(cfg Config) (Runner, error)`
     switching on `cfg.Backend` (only `claude` wired now; unknown → error). `core/agent` must NOT
     import `internal/config` (no `core/*` package does today — keep it that way).
-  - Re-point all importers (`core/chat/{service,media,progress}.go`, both adapters' receiver/handler
-    code, both `cmd/*/main.go`, and all the `_test.go` that reference `claude.*`) to `core/agent`.
+  - Re-point all importers (`core/chat/{service,media,progress}.go`, the VK adapter's receiver — the
+    only adapter that references `claude.*` today, via `[]claude.ImageInput`; telegram has none —
+    both `cmd/*/main.go`, and all the `_test.go` that reference `claude.*`) to `core/agent`. The set
+    is compiler/grep-driven, not this list — re-point whatever the build flags.
   - `cmd/*/main.go`: build `agent.Config` from `internal/config` (backend/bin/model/turns), replace
     `claude.New(cfg.ClaudeBin)` with `runner, err := agent.New(agentCfg)`, and handle the new error
     return (fatal at startup, like the other constructor failures).
