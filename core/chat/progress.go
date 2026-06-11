@@ -8,6 +8,7 @@ package chat
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -157,47 +158,93 @@ func toolDetail(tool string, input json.RawMessage) string {
 	if len(input) == 0 {
 		return ""
 	}
+
+	// Pick the input field to surface BY TOOL NAME first, so an unrecognized tool
+	// costs nothing: we bail out before unmarshalling. "task"/"agent" prefer
+	// "description" and fall back to "subagent_type" (handled below).
+	var key string
+	switch strings.ToLower(tool) {
+	case "read", "edit", "write", "notebookedit":
+		key = "file_path"
+	case "bash":
+		key = "command"
+	case "grep", "glob":
+		key = "pattern"
+	case "task", "agent":
+		key = "description"
+	case "webfetch":
+		key = "url"
+	case "websearch", "toolsearch":
+		key = "query"
+	case "skill":
+		key = "skill"
+	default:
+		return ""
+	}
+
 	var args map[string]any
 	if err := json.Unmarshal(input, &args); err != nil {
 		return ""
 	}
 
-	// strField returns args[key] only when it is actually a JSON string.
-	strField := func(key string) string {
-		if v, ok := args[key].(string); ok {
+	// strField returns args[k] only when it is actually a JSON string.
+	strField := func(k string) string {
+		if v, ok := args[k].(string); ok {
 			return v
 		}
 		return ""
 	}
 
-	var raw string
-	switch strings.ToLower(tool) {
-	case "read", "edit", "write", "notebookedit":
-		raw = strField("file_path")
-	case "bash":
-		raw = strField("command")
-	case "grep", "glob":
-		raw = strField("pattern")
-	case "task", "agent":
-		raw = strField("description")
-		if raw == "" {
-			raw = strField("subagent_type")
-		}
-	case "webfetch":
-		raw = strField("url")
-	case "websearch", "toolsearch":
-		raw = strField("query")
-	case "skill":
-		raw = strField("skill")
-	default:
-		return ""
+	raw := strField(key)
+	if raw == "" && key == "description" {
+		raw = strField("subagent_type")
 	}
 
-	detail := collapseWhitespace(raw)
+	// Redact obvious secret-bearing fragments BEFORE truncation: the progress
+	// frame is chat-visible, and a Bash command or URL can carry a token. Done
+	// before truncateRunes so a secret near the cap can't survive by being cut.
+	detail := redactSecrets(collapseWhitespace(raw))
 	if detail == "" {
 		return ""
 	}
 	return truncateRunes(detail, toolDetailMax)
+}
+
+// secretRedactions masks common secret-bearing fragments in a tool detail before
+// it is shown in the chat-visible progress frame. The line is purely cosmetic, so
+// over-masking is fine while leaking a credential is not. Each entry keeps the
+// surrounding context and replaces only the sensitive value with redactedMask.
+var secretRedactions = []struct {
+	re   *regexp.Regexp
+	repl string
+}{
+	// HTTP auth schemes: "Bearer <token>", "Basic <token>".
+	{
+		regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+`),
+		"$1 " + redactedMask,
+	},
+	// Credential-ish key/value pairs: flags, query params, env assignments.
+	{
+		regexp.MustCompile(`(?i)\b(token|secret|password|passwd|api[_-]?key|access[_-]?token|auth)(\s*[:=]\s*|\s+)\S+`),
+		"${1}${2}" + redactedMask,
+	},
+	// URL userinfo: scheme://user:pass@host -> scheme://***@host.
+	{
+		regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@`),
+		"${1}" + redactedMask + "@",
+	},
+}
+
+// redactedMask is the placeholder substituted for a masked secret value.
+const redactedMask = "***"
+
+// redactSecrets applies secretRedactions in order, masking credential-like
+// fragments while preserving the rest of the detail for context.
+func redactSecrets(s string) string {
+	for _, r := range secretRedactions {
+		s = r.re.ReplaceAllString(s, r.repl)
+	}
+	return s
 }
 
 // capLine re-caps a stored activity line's TEXT to maxText runes, preserving its

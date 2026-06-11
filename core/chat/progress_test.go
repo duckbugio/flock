@@ -204,6 +204,70 @@ func TestToolUseDetailTruncatedToBudget(t *testing.T) {
 	}
 }
 
+func TestToolDetailRedactsSecrets(t *testing.T) {
+	cases := []struct {
+		name     string
+		tool     string
+		input    string
+		wantSub  string // detail must contain this (post-redaction)
+		wantMiss string // detail must NOT contain this (the secret)
+	}{
+		{
+			name: "bearer token in curl", tool: "Bash",
+			input:   `{"command":"curl -H 'Authorization: Bearer abc123SECRET' https://api.example.com"}`,
+			wantSub: "Bearer ***", wantMiss: "abc123SECRET",
+		},
+		{
+			name: "token flag", tool: "Bash",
+			input:   `{"command":"deploy --token=ghp_topSecretValue42"}`,
+			wantSub: "token=***", wantMiss: "ghp_topSecretValue42",
+		},
+		{
+			name: "password space-separated", tool: "Bash",
+			input:   `{"command":"mysql -u root --password hunter2"}`,
+			wantSub: "password ***", wantMiss: "hunter2",
+		},
+		{
+			name: "api_key query param", tool: "WebFetch",
+			input:   `{"url":"https://api.example.com/v1?api_key=KEY_LEAK_123"}`,
+			wantSub: "api_key=***", wantMiss: "KEY_LEAK_123",
+		},
+		{
+			name: "url userinfo credentials", tool: "Bash",
+			// Split so the fixture URL isn't a single literal gosec flags as a real credential.
+			input:   `{"command":"git clone https://alice:` + `s3cr3t@github.com/org/repo.git"}`,
+			wantSub: "https://***@github.com", wantMiss: "s3cr3t",
+		},
+		{
+			name: "clean command untouched", tool: "Bash",
+			input:   `{"command":"go test ./..."}`,
+			wantSub: "go test ./...",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			detail := toolDetail(tc.tool, []byte(tc.input))
+			if !strings.Contains(detail, tc.wantSub) {
+				t.Fatalf("detail %q does not contain %q", detail, tc.wantSub)
+			}
+			if tc.wantMiss != "" && strings.Contains(detail, tc.wantMiss) {
+				t.Fatalf("detail %q leaked secret %q", detail, tc.wantMiss)
+			}
+		})
+	}
+}
+
+func TestToolDetailNonObjectJSON(t *testing.T) {
+	// Valid JSON that is not an object unmarshals into map[string]any with an
+	// error, so the detail falls back to "" (bare tool name).
+	for _, in := range []string{`"just a string"`, `[1,2,3]`, `42`} {
+		if got := toolDetail("Read", []byte(in)); got != "" {
+			t.Fatalf("toolDetail(%q) = %q, want empty", in, got)
+		}
+	}
+}
+
 func TestActivitySnippetTruncated(t *testing.T) {
 	var elapsed time.Duration
 	p := NewProgress(fakeClock(&elapsed), 5)
