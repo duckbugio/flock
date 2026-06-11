@@ -6,6 +6,7 @@ package chat
 // unit-tested in isolation. Final-answer chunking lives in chunk.go.
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -27,6 +28,14 @@ const (
 	recentSnippetMax = 800
 	olderSnippetMax  = 400
 )
+
+// toolDetailMax bounds the per-tool detail (file path, command, query…) appended
+// to a tool activity line, so a single long command or path can't flood the line
+// before the whole composed line is re-capped at recentSnippetMax.
+const toolDetailMax = 160
+
+// toolDetailSeparator joins the tool name and its extracted detail: "🔧 Read · path".
+const toolDetailSeparator = " · "
 
 // frameBudgetMax bounds the WHOLE assembled frame (header + blank + ring lines)
 // in runes. It stays comfortably below TelegramMaxMessage (4096, see chunk.go) so
@@ -121,7 +130,11 @@ func activityLine(e claude.Event) (string, bool) {
 		if tool == "" {
 			tool = "tool"
 		}
-		return toolPrefix + truncateRunes(tool, recentSnippetMax), true
+		line := tool
+		if detail := toolDetail(tool, e.ToolInput); detail != "" {
+			line += toolDetailSeparator + detail
+		}
+		return toolPrefix + truncateRunes(line, recentSnippetMax), true
 	case claude.Text:
 		snippet := collapseWhitespace(e.Text)
 		if snippet == "" {
@@ -132,6 +145,59 @@ func activityLine(e claude.Event) (string, bool) {
 		// SystemInit, ToolResult, Result, RunError: no activity line.
 		return "", false
 	}
+}
+
+// toolDetail extracts a short, human-readable detail from a tool's JSON input so a
+// tool activity line can show WHAT is being read/run, not just the tool name. It is
+// best-effort and purely cosmetic: any empty, malformed, or unrecognized input
+// yields "" so the caller falls back to the bare tool name. The chosen value is
+// whitespace-collapsed and truncated to toolDetailMax runes so one long command or
+// path can't dominate the line.
+func toolDetail(tool string, input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var args map[string]any
+	if err := json.Unmarshal(input, &args); err != nil {
+		return ""
+	}
+
+	// strField returns args[key] only when it is actually a JSON string.
+	strField := func(key string) string {
+		if v, ok := args[key].(string); ok {
+			return v
+		}
+		return ""
+	}
+
+	var raw string
+	switch strings.ToLower(tool) {
+	case "read", "edit", "write", "notebookedit":
+		raw = strField("file_path")
+	case "bash":
+		raw = strField("command")
+	case "grep", "glob":
+		raw = strField("pattern")
+	case "task", "agent":
+		raw = strField("description")
+		if raw == "" {
+			raw = strField("subagent_type")
+		}
+	case "webfetch":
+		raw = strField("url")
+	case "websearch", "toolsearch":
+		raw = strField("query")
+	case "skill":
+		raw = strField("skill")
+	default:
+		return ""
+	}
+
+	detail := collapseWhitespace(raw)
+	if detail == "" {
+		return ""
+	}
+	return truncateRunes(detail, toolDetailMax)
 }
 
 // capLine re-caps a stored activity line's TEXT to maxText runes, preserving its
