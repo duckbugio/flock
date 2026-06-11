@@ -101,6 +101,15 @@ type Config struct {
 	// always handled regardless. See plan §5.
 	RequireGroupMention bool `env:"REQUIRE_GROUP_MENTION" envDefault:"false"`
 
+	// EnableRichMessages toggles Bot API 10.1 rich rendering in the Telegram
+	// adapter (structured blocks + native rich draft). Default false: the adapter
+	// uses the legacy MarkdownToHTML/plain path and behaves exactly as before. When
+	// true it is surfaced via the Telegram Capabilities().CanSendRich flag; the rich
+	// path still falls back to MarkdownToHTML/plain on any error, so flipping this on
+	// can never break delivery. VK ignores it (no rich support). See
+	// docs/rich-messages-plan.md.
+	EnableRichMessages bool `env:"ENABLE_RICH_MESSAGES" envDefault:"false"`
+
 	// Team-loop knobs rendered into each workspace's CLAUDE.md (mirrors the
 	// values the Python entrypoint substituted). Kept as strings since they are
 	// substituted verbatim into the template.

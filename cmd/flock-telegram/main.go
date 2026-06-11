@@ -231,7 +231,7 @@ func run() int {
 
 	svc = chat.New(chat.Config{
 		Runner:     runner,
-		Transport:  telegram.NewBotChat(b),
+		Transport:  telegram.NewBotChat(b, cfg.EnableRichMessages),
 		Dispatcher: disp,
 		Workspace:  ws,
 		Sessions:   sessions,
