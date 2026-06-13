@@ -73,10 +73,16 @@ feature's existing `duck/<chatid>/<slug>` branch and continues on it (go straigh
    loop `coder`↔`tester` until green — **max ${PRE_PR_CYCLES} rounds** (fewer if trivial).
 6. **Gate to open the PR (a score, not a coin-flip):** builds + full affected suite green +
    lint/types clean + **every acceptance criterion (AC ID) demonstrably met**.
-7. **Pre-PR critic:** run `reviewer` once on the LOCAL diff (fresh context — correctness/spec/
-   security, not style). On `standard`/`risky` it ALSO sweeps four **design lenses** — reuse /
-   simplification / efficiency / altitude — to catch over-engineering and dead abstraction before
-   the PR (skip them on `trivial`). Fix blockers BEFORE the PR exists; it's cheaper than PR churn.
+7. **Pre-PR critic — loop to a CLEAN round, not one pass.** Run `reviewer` on the LOCAL diff
+   (fresh context — correctness/spec/security, not style). On `standard`/`risky` it ALSO sweeps
+   four **design lenses** — reuse / simplification / efficiency / altitude — to catch
+   over-engineering and dead abstraction before the PR (skip them on `trivial`). Then `coder`
+   fixes every `blocker`/`major`, and you **re-run `reviewer` on the NEW diff** — because a fix
+   can introduce a fresh bug, each round is a full adversarial pass re-derived from scratch, NOT a
+   check that the last fixes landed. Repeat `coder`↔`reviewer` until a round finds **zero new
+   `blocker`/`major` (a *clean round*)** — **max 3 rounds**; the arbiter then APPROVEs only on a
+   clean round, else ESCALATEs. Fixing here is cheaper than PR churn. (A `trivial` change may take
+   a single pass; a repeated same-class blocker → stop and let the arbiter decide, don't re-loop.)
 8. **Open the PR** — one per affected repo (cross-linked), targeting the default branch, with an
    **explain-the-diff body**: summary + per-AC checklist + how it was verified + risks, written
    in the **feature's language**. (The `duck/<chatid>/…` branch name is what routes PR-webhook
