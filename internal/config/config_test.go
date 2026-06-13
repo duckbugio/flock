@@ -179,6 +179,83 @@ func TestClaudeTimeoutDefault(t *testing.T) {
 	}
 }
 
+func TestShutdownDrain(t *testing.T) {
+	for _, tt := range []struct {
+		secs int
+		want time.Duration
+	}{
+		{0, 45 * time.Second},   // non-positive falls back to the 45s default
+		{-5, 45 * time.Second},  // negative also falls back
+		{30, 30 * time.Second},  // in-range override honored
+		{60, 60 * time.Second},  // exactly the cap passes through
+		{61, 60 * time.Second},  // just over the cap clamps to 60s
+		{120, 60 * time.Second}, // well over the cap clamps to 60s
+	} {
+		c := Config{ShutdownDrainSeconds: tt.secs}
+		if got := c.ShutdownDrain(); got != tt.want {
+			t.Errorf("ShutdownDrain(%d) = %v, want %v", tt.secs, got, tt.want)
+		}
+	}
+}
+
+func TestShutdownDrainClamped(t *testing.T) {
+	for _, tt := range []struct {
+		secs int
+		want bool
+	}{
+		{0, false},  // fallback, not a clamp
+		{-5, false}, // fallback, not a clamp
+		{45, false}, // in range
+		{60, false}, // exactly the cap is not over it
+		{61, true},  // just over the cap is clamped
+		{120, true}, // well over the cap is clamped
+	} {
+		c := Config{ShutdownDrainSeconds: tt.secs}
+		if got := c.ShutdownDrainClamped(); got != tt.want {
+			t.Errorf("ShutdownDrainClamped(%d) = %v, want %v", tt.secs, got, tt.want)
+		}
+	}
+}
+
+func TestShutdownDrainDefault(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "token")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.ShutdownDrainSeconds != 45 {
+		t.Fatalf("default ShutdownDrainSeconds = %d, want 45", cfg.ShutdownDrainSeconds)
+	}
+	if got := cfg.ShutdownDrain(); got != 45*time.Second {
+		t.Fatalf("default ShutdownDrain() = %v, want %v", got, 45*time.Second)
+	}
+}
+
+func TestShutdownDrainOverride(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "token")
+	t.Setenv("SHUTDOWN_DRAIN_SECONDS", "60")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if got := cfg.ShutdownDrain(); got != 60*time.Second {
+		t.Fatalf("override ShutdownDrain() = %v, want %v", got, 60*time.Second)
+	}
+}
+
+func TestPendingStoreFile(t *testing.T) {
+	// Explicit path wins.
+	c := Config{PendingStorePath: "/var/lib/duck/p.json", ApprovedDirectory: "/workspace"}
+	if got := c.PendingStoreFile(); got != "/var/lib/duck/p.json" {
+		t.Errorf("PendingStoreFile() = %q, want explicit path", got)
+	}
+	// Otherwise derive from APPROVED_DIRECTORY.
+	c = Config{ApprovedDirectory: "/workspace"}
+	if got := c.PendingStoreFile(); got != "/workspace/pending.json" {
+		t.Errorf("PendingStoreFile() = %q, want /workspace/pending.json", got)
+	}
+}
+
 func TestSessionStoreFile(t *testing.T) {
 	// Explicit path wins.
 	c := Config{SessionStorePath: "/var/lib/duck/s.json", ApprovedDirectory: "/workspace"}

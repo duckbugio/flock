@@ -30,6 +30,7 @@ import (
 	"github.com/duckbugio/flock/core/ghstar"
 	"github.com/duckbugio/flock/core/gitsetup"
 	"github.com/duckbugio/flock/core/nudge"
+	"github.com/duckbugio/flock/core/pending"
 	"github.com/duckbugio/flock/core/poller"
 	"github.com/duckbugio/flock/core/ratelimit"
 	"github.com/duckbugio/flock/core/session"
@@ -37,10 +38,6 @@ import (
 	"github.com/duckbugio/flock/core/workspace"
 	"github.com/duckbugio/flock/internal/config"
 )
-
-// shutdownDrainTimeout bounds how long Shutdown waits for in-flight runs to
-// deliver their final message during graceful drain.
-const shutdownDrainTimeout = 5 * time.Second
 
 // voiceClientTimeout is the shared budget for the voice file download plus the
 // transcription provider call.
@@ -129,6 +126,17 @@ func run() int {
 		logger.Error("open cost store; cost cap disabled", "path", cfg.CostStoreFile(), "error", err)
 		costs = nil
 	}
+
+	// Durable per-chat interrupted-run store (auto-resume after a deploy/restart):
+	// the run path marks a chat at run start and clears it on every clean terminal,
+	// and startup re-injects any marker left by a killed run. Like the cost store, a
+	// store-open failure is non-fatal — log and continue with a nil/no-op store
+	// (auto-resume off) rather than crash-loop the bot.
+	pendings, err := pending.Open(cfg.PendingStoreFile())
+	if err != nil {
+		logger.Error("open pending store; auto-resume disabled", "path", cfg.PendingStoreFile(), "error", err)
+		pendings = nil
+	}
 	logger.Info("guardrails configured",
 		"rate_limit_enabled", cfg.RateLimitEnabled(),
 		"rate_limit_requests", cfg.RateLimitRequests,
@@ -138,14 +146,23 @@ func run() int {
 	)
 
 	disp := dispatch.New(cfg.MaxConcurrentChatRuns)
-	// On shutdown, give in-flight runs a bounded chance to deliver their final
-	// message before exit (graceful drain) rather than dropping them with the
-	// non-waiting Close(). Close() remains available for callers that don't drain.
+	// On shutdown (SIGTERM during a deploy), gracefully drain: WAIT for in-flight
+	// runs to finish on their own up to the configured drain window (so a run that
+	// completes in time delivers its real answer), cancelling only the survivors at
+	// the deadline. The drain window is strictly below the Docker stop_grace_period
+	// (75s) so the process self-exits before SIGKILL; a survivor's marker, written
+	// at run start, drives auto-resume on the next startup.
+	if cfg.ShutdownDrainClamped() {
+		logger.Warn("SHUTDOWN_DRAIN_SECONDS above cap; clamped",
+			"configured_seconds", cfg.ShutdownDrainSeconds,
+			"effective", cfg.ShutdownDrain(),
+		)
+	}
 	defer func() {
-		drainCtx, cancelDrain := context.WithTimeout(context.Background(), shutdownDrainTimeout)
+		drainCtx, cancelDrain := context.WithTimeout(context.Background(), cfg.ShutdownDrain())
 		defer cancelDrain()
 		if err := disp.Shutdown(drainCtx); err != nil {
-			logger.Warn("dispatcher drain timed out", "error", err)
+			logger.Warn("dispatcher drain deadline reached; survivors cancelled", "error", err)
 		}
 	}()
 
@@ -235,6 +252,7 @@ func run() int {
 		Dispatcher: disp,
 		Workspace:  ws,
 		Sessions:   sessions,
+		Pending:    pendings,
 		Costs:      costs,
 		Outbox:     outbox,
 		StarNudge:  starNudge,
@@ -293,6 +311,17 @@ func run() int {
 			}
 		}()
 	}
+
+	// Auto-resume after restart: re-inject any run that was still in flight when the
+	// process was killed (e.g. SIGKILL after the drain window on a deploy). Each
+	// marker's prompt is replayed through the dispatcher (Inject -> Submit), so the
+	// MaxConcurrentChatRuns cap throttles a resume storm just like live traffic. The
+	// dangling "Working…" anchor is best-effort deleted (non-fatal); the resumed run
+	// posts its own fresh anchor. Markers are NOT cleared here — only a clean
+	// terminal clears them, so a crash mid-replay just re-resumes next boot. Run
+	// SYNCHRONOUSLY before b.Start so resumed work is queued ahead of new live
+	// messages; this ordering is intentional.
+	resumePending(ctx, b, svc, pendings, logger)
 
 	logger.Info("starting telegram adapter", "username", cfg.TelegramBotUsername)
 	b.Start(ctx)
@@ -829,6 +858,60 @@ func stopCommandHandler(cfg config.Config, svc *chat.Service) bot.HandlerFunc {
 func sendCommandReply(ctx context.Context, b *bot.Bot, chatID int64, text string) {
 	if _, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: text}); err != nil {
 		slog.Debug("send command reply", "error", err)
+	}
+}
+
+// resumePending re-submits every interrupted run recorded in the pending store so
+// a run killed mid-flight (or merely queued behind a running run) on a
+// deploy/restart continues WITHOUT the user re-sending their message. The store
+// holds a per-chat FIFO queue; for each chat its markers are replayed IN ORDER.
+// For each marker it best-effort DELETES the dangling "Working…" anchor (only
+// when an anchor id was captured; non-fatal on failure) so the frozen progress
+// message disappears, then re-submits via ResumePending, which REUSES the
+// marker's id so the resumed run clears the SAME on-disk marker on its clean
+// terminal — never a duplicate. The resumed run posts its own fresh "Working…"
+// anchor as usual, so the user immediately sees live activity. The
+// dispatcher's concurrency cap throttles the replay. Order is best-effort: a
+// concurrent same-chat submit may interleave enqueue vs dispatch order — the
+// guarantee is no-loss, not strict order. Markers are intentionally left in place
+// (cleared by id only on a clean terminal), so a crash mid-replay re-resumes only
+// the not-yet-cleared markers on the next boot, and never double-runs a marker
+// within one boot (each is resumed once). A nil store (open failed) yields an
+// empty set, so this is a safe no-op.
+func resumePending(
+	ctx context.Context, b *bot.Bot, svc *chat.Service, store *pending.FileStore, logger *slog.Logger,
+) {
+	markers := store.All()
+	total := 0
+	for _, q := range markers {
+		total += len(q)
+	}
+	if total == 0 {
+		return
+	}
+	logger.Info("resuming interrupted runs after restart", "count", total)
+	for chatID, queue := range markers {
+		id, err := strconv.ParseInt(chatID, 10, 64)
+		if err != nil {
+			logger.Warn("pending: bad chat id; skipping resume", "chat_id", chatID)
+			continue
+		}
+		for _, m := range queue {
+			// Best-effort: delete the frozen "Working…" anchor so the stale progress
+			// message disappears; the resumed run posts its own fresh anchor below. A
+			// failed/absent delete never blocks the resume.
+			if m.AnchorMsgID != "" {
+				if anchor, perr := strconv.Atoi(m.AnchorMsgID); perr == nil {
+					if _, derr := b.DeleteMessage(ctx, &bot.DeleteMessageParams{
+						ChatID:    id,
+						MessageID: anchor,
+					}); derr != nil {
+						logger.Debug("delete dangling anchor on resume", "chat_id", chatID, "error", derr)
+					}
+				}
+			}
+			svc.ResumePending(chatID, m)
+		}
 	}
 }
 

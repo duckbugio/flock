@@ -70,6 +70,22 @@ type Config struct {
 	LogLevel              string `env:"LOG_LEVEL" envDefault:"INFO"`
 	MaxConcurrentChatRuns int    `env:"MAX_CONCURRENT_CHAT_RUNS" envDefault:"4"`
 
+	// ShutdownDrainSeconds bounds the graceful-drain window on SIGTERM: how long
+	// the dispatcher WAITS for in-flight runs to finish on their own before
+	// cancelling the survivors (a run that finishes within the window delivers its
+	// real answer, not "⏹ Stopped."). It must stay strictly below the Docker
+	// stop_grace_period (75s) so the process self-exits before SIGKILL. The default
+	// is 45s; set SHUTDOWN_DRAIN_SECONDS to override.
+	ShutdownDrainSeconds int `env:"SHUTDOWN_DRAIN_SECONDS" envDefault:"45"`
+
+	// PendingStorePath is the JSON file persisting chatID -> interrupted-run marker
+	// (prompt + anchor message id + start time) so a run killed mid-flight on a
+	// deploy is auto-resumed on the next startup. When empty it defaults to
+	// <APPROVED_DIRECTORY>/pending.json (see PendingStoreFile), which lives under
+	// the workspace data dir — a persisted named volume, so the marker survives a
+	// --force-recreate — never inside a repo.
+	PendingStorePath string `env:"PENDING_STORE_PATH"`
+
 	// SessionStorePath is the JSON file persisting chatID -> session_id for
 	// --resume continuity across messages and restarts (plan §4). When empty it
 	// defaults to <APPROVED_DIRECTORY>/sessions.json (see SessionStoreFile), which
@@ -224,6 +240,60 @@ func (c Config) SessionStoreFile() string {
 		return c.SessionStorePath
 	}
 	return filepath.Join(c.ApprovedDirectory, "sessions.json")
+}
+
+// defaultShutdownDrain is the fallback graceful-drain window applied when
+// SHUTDOWN_DRAIN_SECONDS is non-positive. Draining must never be fully disabled
+// (a zero window would cancel every in-flight run immediately), so a bad/zero
+// override falls back to the documented 45s default.
+const defaultShutdownDrain = 45 * time.Second
+
+// maxShutdownDrain caps the graceful-drain window. The shutdown budget is
+// drain + the dispatcher's post-cancel grace (dispatch.postCancelGrace = 10s),
+// and that total MUST stay below the Docker compose stop_grace_period (75s) so
+// the process self-exits before SIGKILL. 60 + 10 = 70 < 75 leaves 5s of
+// headroom. Raising stop_grace_period would require raising this cap to match.
+const maxShutdownDrain = 60 * time.Second
+
+// ShutdownDrain returns the graceful-drain window as a Duration: how long
+// Shutdown waits for in-flight runs to finish before cancelling survivors.
+//
+// The window is clamped to [defaultShutdownDrain, maxShutdownDrain]. A
+// non-positive SHUTDOWN_DRAIN_SECONDS falls back to defaultShutdownDrain so the
+// drain is never disabled, and a value above the cap is clamped to
+// maxShutdownDrain. The cap exists because the total shutdown budget is
+// drain + the dispatcher's post-cancel grace (dispatch.postCancelGrace, 10s),
+// and that sum must stay below the compose stop_grace_period (75s) so the
+// process self-exits before SIGKILL — 60 + 10 = 70 < 75. Raising
+// stop_grace_period would require raising maxShutdownDrain to match.
+func (c Config) ShutdownDrain() time.Duration {
+	if c.ShutdownDrainSeconds <= 0 {
+		return defaultShutdownDrain
+	}
+	d := time.Duration(c.ShutdownDrainSeconds) * time.Second
+	if d > maxShutdownDrain {
+		return maxShutdownDrain
+	}
+	return d
+}
+
+// ShutdownDrainClamped reports whether the configured SHUTDOWN_DRAIN_SECONDS
+// exceeded maxShutdownDrain and was clamped down by ShutdownDrain. Startup logs
+// a one-line warning when this is true so an operator who set, say, 120 sees why
+// the effective window is 60s.
+func (c Config) ShutdownDrainClamped() bool {
+	return time.Duration(c.ShutdownDrainSeconds)*time.Second > maxShutdownDrain
+}
+
+// PendingStoreFile returns the path to the JSON interrupted-run store, defaulting
+// to <ApprovedDirectory>/pending.json when PENDING_STORE_PATH is unset so it
+// lives under the workspace data dir alongside the session/cost stores, never
+// inside any repo.
+func (c Config) PendingStoreFile() string {
+	if strings.TrimSpace(c.PendingStorePath) != "" {
+		return c.PendingStorePath
+	}
+	return filepath.Join(c.ApprovedDirectory, "pending.json")
 }
 
 // RateLimitWindow returns the per-user rate-limit window as a Duration, or 0

@@ -8,10 +8,20 @@ package dispatch
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/semaphore"
 )
+
+// ErrShutdown is the cancellation cause set on a job's context when the
+// dispatcher is shutting down the whole process (Shutdown's post-drain cancel or
+// Close), as opposed to a per-chat Cancel (Stop / edit-supersede). A run can
+// distinguish the two via context.Cause(ctx): a shutdown-cancelled run was killed
+// by a deploy/restart and should keep its interrupted-run marker for auto-resume,
+// while a user-Stopped run clears it.
+var ErrShutdown = errors.New("dispatch: shutting down")
 
 // job is one unit of work plus the per-chat cancelable context it runs under.
 type job struct {
@@ -51,10 +61,19 @@ type Dispatcher struct {
 	mu     sync.Mutex
 	chats  map[string]*chatQueue
 	closed bool
-	wg     sync.WaitGroup // tracks per-chat worker goroutines for graceful drain
+	// wg tracks per-chat worker goroutines. A worker stays alive while it is running
+	// a job and exits once it is idle and the drain/rootCtx signal fires, so
+	// wg.Wait() after closing drain blocks exactly until every in-flight job has
+	// finished on its own — the graceful-drain wait.
+	wg sync.WaitGroup
+	// drain is closed by Shutdown to start the graceful-drain phase: workers stop
+	// dequeuing NEW jobs but a job already running is left to finish on its own
+	// (its context is NOT cancelled) until the drain deadline elapses.
+	drain     chan struct{}
+	drainOnce sync.Once
 	//nolint:containedctx // root context held for the dispatcher's lifecycle; cancelled in Shutdown via rootStop.
 	rootCtx  context.Context
-	rootStop context.CancelFunc
+	rootStop context.CancelCauseFunc
 }
 
 // queueBuffer is the per-chat channel buffer: how many jobs may be queued for a
@@ -68,12 +87,12 @@ func New(maxConcurrent int) *Dispatcher {
 	if maxConcurrent < 1 {
 		maxConcurrent = 1
 	}
-	//nolint:gosec // G118: cancel is stored as rootStop and invoked in Shutdown.
-	root, stop := context.WithCancel(context.Background())
+	root, stop := context.WithCancelCause(context.Background())
 	return &Dispatcher{
 		sem:      semaphore.NewWeighted(int64(maxConcurrent)),
 		bufSize:  queueBuffer,
 		chats:    make(map[string]*chatQueue),
+		drain:    make(chan struct{}),
 		rootCtx:  root,
 		rootStop: stop,
 	}
@@ -120,16 +139,30 @@ func (d *Dispatcher) Submit(chatID string, run func(ctx context.Context)) {
 // execution within the chat falls out of the single consumer; the global cap is
 // enforced by acquiring a semaphore slot around each job's start.
 //
-// The queue channel is never closed; the worker exits when Shutdown cancels
-// rootCtx. Pending buffered jobs are abandoned (their ctx, derived from rootCtx,
-// is already cancelled). Draining queued jobs first would not help: rootCtx is
-// cancelled, so each would observe cancellation immediately.
+// The queue channel is never closed. The worker exits when Shutdown cancels
+// rootCtx (the immediate Close path) OR when the graceful drain begins (d.drain
+// closed): on drain it stops dequeuing NEW jobs and returns, leaving any job it
+// is currently running to finish on its own (that job runs inside runOne, which
+// has already returned to the loop only after the job completed). Pending
+// buffered jobs are abandoned in both cases.
 func (d *Dispatcher) worker(q *chatQueue) {
 	defer d.wg.Done()
 	for {
+		// Prioritize the shutdown signals: once draining (or rootCtx cancelled), stop
+		// dequeuing new jobs even if the buffer still holds some, so a graceful drain
+		// does not start fresh work past the SIGTERM.
+		select {
+		case <-d.drain:
+			return
+		case <-d.rootCtx.Done():
+			return
+		default:
+		}
 		select {
 		case j := <-q.ch:
 			d.runOne(q, j)
+		case <-d.drain:
+			return
 		case <-d.rootCtx.Done():
 			return
 		}
@@ -138,10 +171,12 @@ func (d *Dispatcher) worker(q *chatQueue) {
 
 // runOne acquires a global slot, installs the per-chat cancel hook, runs the
 // job, and releases the slot. The semaphore is always released via defer so a
-// panicking job cannot leak a slot.
+// panicking job cannot leak a slot. The worker stays alive (tracked on d.wg) for
+// the whole call, so a graceful Shutdown's wg.Wait() blocks until the running job
+// finishes on its own.
 func (d *Dispatcher) runOne(q *chatQueue, j job) {
 	// Block until a global slot is free (parallel across chats, capped). If the
-	// dispatcher is shutting down, abandon the job.
+	// dispatcher is shutting down (rootCtx cancelled), abandon the job.
 	if err := d.sem.Acquire(d.rootCtx, 1); err != nil {
 		return
 	}
@@ -199,10 +234,16 @@ drain:
 	}
 }
 
-// Shutdown stops accepting new jobs and cancels every in-flight job, then waits
-// for the per-chat workers to drain until ctx is done. It is safe to call more
-// than once (the closed flag guards a second pass); later Submits are dropped.
-// A simple version sufficient for Stage 9's graceful shutdown.
+// Shutdown performs a graceful drain: it stops accepting and starting NEW jobs,
+// then FIRST WAITS for already-running (in-flight) jobs to finish on their own —
+// without cancelling them — until ctx is done. A job that completes within that
+// window delivers its real result. Only jobs still running when ctx's deadline
+// elapses are cancelled (the backstop), after which Shutdown waits a little more
+// for them to unwind. It returns nil when every in-flight job finished on its own
+// within the window, or ctx.Err() when the deadline forced a cancel.
+//
+// It is safe to call more than once (the closed flag guards a second pass); later
+// Submits are dropped. Pending (queued-but-not-started) jobs are abandoned.
 func (d *Dispatcher) Shutdown(ctx context.Context) error {
 	d.mu.Lock()
 	if d.closed {
@@ -216,11 +257,45 @@ func (d *Dispatcher) Shutdown(ctx context.Context) error {
 	}
 	d.mu.Unlock()
 
-	// Cancel rootCtx so every worker exits via its select and every in-flight
-	// job's ctx (derived from rootCtx) is cancelled. Channels are never closed,
-	// which keeps a concurrent Submit's send safe. Also fire the per-chat cancel
-	// hooks so a job blocked on ctx.Done() unblocks promptly.
-	d.rootStop()
+	// Signal the graceful drain: workers stop dequeuing NEW jobs (and abandon
+	// queued ones) but leave any job they are currently running to finish on its
+	// own. We deliberately do NOT cancel rootCtx or the per-chat cancel hooks here
+	// — that is what lets an in-flight run complete and deliver its real answer.
+	d.drainOnce.Do(func() { close(d.drain) })
+
+	// Phase 1 — wait for in-flight jobs to finish on their own, up to the deadline.
+	// A worker exits once it is idle and sees drain, so wg.Wait() unblocks exactly
+	// when every currently-running job has completed (and the idle workers have
+	// returned).
+	inflightDone := make(chan struct{})
+	go func() {
+		d.wg.Wait()
+		close(inflightDone)
+	}()
+	select {
+	case <-inflightDone:
+		// Every in-flight job finished within the window; tear down the workers and
+		// return cleanly.
+		d.rootStop(ErrShutdown)
+		return nil
+	case <-ctx.Done():
+		// Deadline elapsed with survivors still running.
+	}
+
+	// Phase 2 — cancel the survivors (rootCtx + per-chat hooks) so they unwind, then
+	// give them a brief, bounded grace to deliver a terminal/persist a marker before
+	// the caller exits the process. The grace is independent of the (now-expired)
+	// drain ctx so a survivor's "Stopped"/marker write isn't itself cut off.
+	//
+	// Order matters: rootStop sets the shutdown cause (ErrShutdown) BEFORE the
+	// per-chat cancels below, so every in-flight survivor observes ErrShutdown and
+	// keeps its interrupted-run marker to drive auto-resume on restart. A user Stop
+	// whose own per-chat cancel happens to land in the narrow window just before
+	// this rootStop is instead seen as a clean context.Canceled (marker cleared, no
+	// resume). That race is intentionally left unguarded: it is vanishingly rare,
+	// user-initiated, and resolves in the safe direction — a run the user just
+	// stopped should not auto-resume — so no locking or reordering is warranted.
+	d.rootStop(ErrShutdown)
 	for _, q := range chats {
 		q.mu.Lock()
 		if q.cancel != nil {
@@ -230,25 +305,49 @@ func (d *Dispatcher) Shutdown(ctx context.Context) error {
 		q.mu.Unlock()
 	}
 
-	done := make(chan struct{})
-	go func() {
-		d.wg.Wait()
-		close(done)
-	}()
+	graceCtx, cancelGrace := context.WithTimeout(context.Background(), postCancelGrace)
+	defer cancelGrace()
 	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-inflightDone:
+	case <-graceCtx.Done():
 	}
+	return ctx.Err()
 }
 
-// Close stops the dispatcher without waiting for the drain, cancelling in-flight
-// jobs. It is a convenience over Shutdown for callers that don't need to block.
+// postCancelGrace bounds how long Shutdown waits, AFTER cancelling survivors at
+// the drain deadline, for those cancelled jobs to unwind and deliver a terminal
+// message / persist their interrupted-run marker. It keeps total shutdown well
+// under the Docker stop_grace_period so the process self-exits before SIGKILL.
+const postCancelGrace = 10 * time.Second
+
+// Close stops the dispatcher immediately, cancelling in-flight jobs without
+// waiting for the graceful drain. It is the no-drain path for callers that don't
+// need to block.
 func (d *Dispatcher) Close() {
-	// An already-cancelled context makes Shutdown return immediately after it has
-	// signalled cancellation, without blocking on the worker drain.
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	_ = d.Shutdown(cancelled)
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return
+	}
+	d.closed = true
+	chats := make([]*chatQueue, 0, len(d.chats))
+	for _, q := range d.chats {
+		chats = append(chats, q)
+	}
+	d.mu.Unlock()
+
+	// Cancel everything at once: rootCtx unblocks the workers and cancels every
+	// in-flight job's ctx; the per-chat hooks unblock a job parked on ctx.Done().
+	// Also close drain so a later Shutdown is a no-op and workers always have an
+	// exit signal. Channels are never closed, keeping a concurrent Submit safe.
+	d.drainOnce.Do(func() { close(d.drain) })
+	d.rootStop(ErrShutdown)
+	for _, q := range chats {
+		q.mu.Lock()
+		if q.cancel != nil {
+			q.cancel()
+			q.cancel = nil
+		}
+		q.mu.Unlock()
+	}
 }
