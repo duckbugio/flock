@@ -152,6 +152,12 @@ func run() int {
 	// the deadline. The drain window is strictly below the Docker stop_grace_period
 	// (75s) so the process self-exits before SIGKILL; a survivor's marker, written
 	// at run start, drives auto-resume on the next startup.
+	if cfg.ShutdownDrainClamped() {
+		logger.Warn("SHUTDOWN_DRAIN_SECONDS above cap; clamped",
+			"configured_seconds", cfg.ShutdownDrainSeconds,
+			"effective", cfg.ShutdownDrain(),
+		)
+	}
 	defer func() {
 		drainCtx, cancelDrain := context.WithTimeout(context.Background(), cfg.ShutdownDrain())
 		defer cancelDrain()
@@ -310,9 +316,11 @@ func run() int {
 	// process was killed (e.g. SIGKILL after the drain window on a deploy). Each
 	// marker's prompt is replayed through the dispatcher (Inject -> Submit), so the
 	// MaxConcurrentChatRuns cap throttles a resume storm just like live traffic. The
-	// dangling "Working…" anchor is best-effort edited into a brief resume notice
-	// (non-fatal if the edit fails). Markers are NOT cleared here — only a clean
-	// terminal clears them, so a crash mid-replay just re-resumes next boot.
+	// dangling "Working…" anchor is best-effort deleted (non-fatal); the resumed run
+	// posts its own fresh anchor. Markers are NOT cleared here — only a clean
+	// terminal clears them, so a crash mid-replay just re-resumes next boot. Run
+	// SYNCHRONOUSLY before b.Start so resumed work is queued ahead of new live
+	// messages; this ordering is intentional.
 	resumePending(ctx, b, svc, pendings, logger)
 
 	logger.Info("starting telegram adapter", "username", cfg.TelegramBotUsername)
@@ -853,18 +861,16 @@ func sendCommandReply(ctx context.Context, b *bot.Bot, chatID int64, text string
 	}
 }
 
-// resumeNotice is the brief message the dangling "Working…" anchor is edited into
-// on startup so the user sees the bot picking the run back up after a restart.
-const resumeNotice = "🔄 Resuming after a restart…"
-
 // resumePending re-submits every interrupted run recorded in the pending store so
 // a run killed mid-flight (or merely queued behind a running run) on a
 // deploy/restart continues WITHOUT the user re-sending their message. The store
 // holds a per-chat FIFO queue; for each chat its markers are replayed IN ORDER.
-// For each marker it best-effort edits the dangling anchor into a short resume
-// notice (only when an anchor id was captured; non-fatal on failure), then
-// re-submits via ResumePending, which REUSES the marker's id so the resumed run
-// clears the SAME on-disk marker on its clean terminal — never a duplicate. The
+// For each marker it best-effort DELETES the dangling "Working…" anchor (only
+// when an anchor id was captured; non-fatal on failure) so the frozen progress
+// message disappears, then re-submits via ResumePending, which REUSES the
+// marker's id so the resumed run clears the SAME on-disk marker on its clean
+// terminal — never a duplicate. The resumed run posts its own fresh "Working…"
+// anchor as usual, so the user immediately sees live activity. The
 // dispatcher's concurrency cap throttles the replay. Order is best-effort: a
 // concurrent same-chat submit may interleave enqueue vs dispatch order — the
 // guarantee is no-loss, not strict order. Markers are intentionally left in place
@@ -891,17 +897,16 @@ func resumePending(
 			continue
 		}
 		for _, m := range queue {
-			// Best-effort: turn the frozen "Working…" anchor into a resume notice so the
-			// user knows the run was picked back up. A failed/absent edit never blocks the
-			// resume.
+			// Best-effort: delete the frozen "Working…" anchor so the stale progress
+			// message disappears; the resumed run posts its own fresh anchor below. A
+			// failed/absent delete never blocks the resume.
 			if m.AnchorMsgID != "" {
 				if anchor, perr := strconv.Atoi(m.AnchorMsgID); perr == nil {
-					if _, eerr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
+					if _, derr := b.DeleteMessage(ctx, &bot.DeleteMessageParams{
 						ChatID:    id,
 						MessageID: anchor,
-						Text:      resumeNotice,
-					}); eerr != nil {
-						logger.Debug("edit dangling anchor on resume", "chat_id", chatID, "error", eerr)
+					}); derr != nil {
+						logger.Debug("delete dangling anchor on resume", "chat_id", chatID, "error", derr)
 					}
 				}
 			}

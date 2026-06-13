@@ -1317,6 +1317,73 @@ func TestPendingQueuedAndRunningBothSurviveShutdown(t *testing.T) {
 	}
 }
 
+// resultThenBlockRunner emits SystemInit + a clean Result, signals delivered once
+// the Result has been consumed by the event loop, then BLOCKS on ctx.Done before
+// closing its event channel. This lets a test deterministically order: the run
+// reaches a clean terminal (Result delivered), and ONLY THEN is its ctx cancelled
+// with the ErrShutdown cause — modelling the microsecond window at the drain
+// deadline where an already-finished run is shutdown-cancelled.
+type resultThenBlockRunner struct {
+	delivered chan struct{} // closed after the Result has been consumed
+}
+
+func (r *resultThenBlockRunner) Run(ctx context.Context, _ string, _ claude.Options) (<-chan claude.Event, error) {
+	out := make(chan claude.Event)
+	go func() {
+		defer close(out)
+		if !emit(ctx, out, claude.Event{Type: claude.SystemInit, SessionID: "s1"}) {
+			return
+		}
+		if !emit(ctx, out, claude.Event{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer, SessionID: "s1"}}) {
+			return
+		}
+		// The Result is now in the event loop's hands (unbuffered send returned):
+		// finalResult is set. Signal the test, then block until the ctx is cancelled
+		// so finish runs AFTER the (shutdown) cancel — but with a non-nil result.
+		close(r.delivered)
+		<-ctx.Done()
+	}()
+	return out, nil
+}
+
+// TestPendingMarkerClearedOnResultEvenUnderShutdown is the phantom-resume
+// regression: a run that REACHED a clean Result and is THEN shutdown-cancelled
+// (cause dispatch.ErrShutdown) in the microsecond window at the drain deadline
+// must still CLEAR its marker — it already produced a terminal, so resuming it on
+// the next boot would be a duplicate run (re-triggering side effects). The marker
+// is kept ONLY for a run that produced nothing under shutdown (covered by
+// TestPendingMarkerSurvivesShutdown), not for one that finished.
+func TestPendingMarkerClearedOnResultEvenUnderShutdown(t *testing.T) {
+	fc := newFakeChat()
+	pend := newFakePending()
+	fr := &resultThenBlockRunner{delivered: make(chan struct{})}
+	svc, d := newTestServiceWithPending(t, fr, fc, pend)
+
+	svc.Handle(context.Background(), testChatID, 100, "1", "almost done")
+
+	// Wait until the run has delivered its clean Result (finalResult is set) and is
+	// blocked on ctx.Done — finish has not run yet.
+	select {
+	case <-fr.delivered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run never delivered its Result")
+	}
+
+	// Now shut down: the blocked run's ctx is cancelled with the ErrShutdown cause,
+	// it returns, the channel closes, the loop breaks, and finish runs with a
+	// non-nil result under a shutdown cause.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = d.Shutdown(shutdownCtx)
+
+	// The marker MUST be cleared: the run reached a terminal, so it is not a
+	// genuine mid-flight interruption and must never be phantom-resumed.
+	waitUntil(t, func() bool { return !pend.has() })
+	if dels := pend.removes(); len(dels) == 0 || dels[len(dels)-1] != testChatID {
+		t.Fatalf("marker not cleared on result under shutdown; removes=%v — finished run would be phantom-resumed", dels)
+	}
+}
+
 // TestPendingSupersedeDoesNotLoseSuccessor asserts an edit-supersede (Cancel +
 // clear-lane + enqueue the new run) leaves exactly the NEW run's marker, and the
 // cancelled run's by-id clear cannot remove that successor. This is the

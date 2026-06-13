@@ -248,15 +248,41 @@ func (c Config) SessionStoreFile() string {
 // override falls back to the documented 45s default.
 const defaultShutdownDrain = 45 * time.Second
 
+// maxShutdownDrain caps the graceful-drain window. The shutdown budget is
+// drain + the dispatcher's post-cancel grace (dispatch.postCancelGrace = 10s),
+// and that total MUST stay below the Docker compose stop_grace_period (75s) so
+// the process self-exits before SIGKILL. 60 + 10 = 70 < 75 leaves 5s of
+// headroom. Raising stop_grace_period would require raising this cap to match.
+const maxShutdownDrain = 60 * time.Second
+
 // ShutdownDrain returns the graceful-drain window as a Duration: how long
-// Shutdown waits for in-flight runs to finish before cancelling survivors. A
+// Shutdown waits for in-flight runs to finish before cancelling survivors.
+//
+// The window is clamped to [defaultShutdownDrain, maxShutdownDrain]. A
 // non-positive SHUTDOWN_DRAIN_SECONDS falls back to defaultShutdownDrain so the
-// drain is never disabled.
+// drain is never disabled, and a value above the cap is clamped to
+// maxShutdownDrain. The cap exists because the total shutdown budget is
+// drain + the dispatcher's post-cancel grace (dispatch.postCancelGrace, 10s),
+// and that sum must stay below the compose stop_grace_period (75s) so the
+// process self-exits before SIGKILL — 60 + 10 = 70 < 75. Raising
+// stop_grace_period would require raising maxShutdownDrain to match.
 func (c Config) ShutdownDrain() time.Duration {
 	if c.ShutdownDrainSeconds <= 0 {
 		return defaultShutdownDrain
 	}
-	return time.Duration(c.ShutdownDrainSeconds) * time.Second
+	d := time.Duration(c.ShutdownDrainSeconds) * time.Second
+	if d > maxShutdownDrain {
+		return maxShutdownDrain
+	}
+	return d
+}
+
+// ShutdownDrainClamped reports whether the configured SHUTDOWN_DRAIN_SECONDS
+// exceeded maxShutdownDrain and was clamped down by ShutdownDrain. Startup logs
+// a one-line warning when this is true so an operator who set, say, 120 sees why
+// the effective window is 60s.
+func (c Config) ShutdownDrainClamped() bool {
+	return time.Duration(c.ShutdownDrainSeconds)*time.Second > maxShutdownDrain
 }
 
 // PendingStoreFile returns the path to the JSON interrupted-run store, defaulting

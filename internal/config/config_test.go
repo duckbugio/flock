@@ -184,14 +184,35 @@ func TestShutdownDrain(t *testing.T) {
 		secs int
 		want time.Duration
 	}{
-		{0, 45 * time.Second},  // non-positive falls back to the 45s default
-		{-5, 45 * time.Second}, // negative also falls back
-		{30, 30 * time.Second}, // override honored
-		{60, 60 * time.Second}, // override honored
+		{0, 45 * time.Second},   // non-positive falls back to the 45s default
+		{-5, 45 * time.Second},  // negative also falls back
+		{30, 30 * time.Second},  // in-range override honored
+		{60, 60 * time.Second},  // exactly the cap passes through
+		{61, 60 * time.Second},  // just over the cap clamps to 60s
+		{120, 60 * time.Second}, // well over the cap clamps to 60s
 	} {
 		c := Config{ShutdownDrainSeconds: tt.secs}
 		if got := c.ShutdownDrain(); got != tt.want {
 			t.Errorf("ShutdownDrain(%d) = %v, want %v", tt.secs, got, tt.want)
+		}
+	}
+}
+
+func TestShutdownDrainClamped(t *testing.T) {
+	for _, tt := range []struct {
+		secs int
+		want bool
+	}{
+		{0, false},  // fallback, not a clamp
+		{-5, false}, // fallback, not a clamp
+		{45, false}, // in range
+		{60, false}, // exactly the cap is not over it
+		{61, true},  // just over the cap is clamped
+		{120, true}, // well over the cap is clamped
+	} {
+		c := Config{ShutdownDrainSeconds: tt.secs}
+		if got := c.ShutdownDrainClamped(); got != tt.want {
+			t.Errorf("ShutdownDrainClamped(%d) = %v, want %v", tt.secs, got, tt.want)
 		}
 	}
 }

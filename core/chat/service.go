@@ -662,6 +662,22 @@ func (s *Service) removePendingUnlessShutdown(ctx context.Context, chatID ChatID
 	}
 }
 
+// removePending clears this run's marker BY ID unconditionally (regardless of the
+// cancellation cause). Used by finish for a run that REACHED a terminal — it
+// produced a Result or errored — so its marker must NOT survive even when the ctx
+// was shutdown-cancelled in the microsecond window at the drain deadline;
+// otherwise the already-finished run would be phantom-resumed (a duplicate run
+// that can re-trigger side effects). A nil store or an empty id is a no-op; a
+// remove failure is logged but never aborts terminal delivery.
+func (s *Service) removePending(chatID ChatID, id string) {
+	if s.pending == nil || id == "" {
+		return
+	}
+	if err := s.pending.Remove(chatID, id); err != nil {
+		s.log.Error("clear pending marker", "chat_id", chatID, "error", err)
+	}
+}
+
 // clearLanePending purges ALL of chatID's interrupted-run markers (the whole
 // lane) unconditionally. Used by Stop/StopChat/edit-supersede, where the user
 // intentionally drops every queued+running job for the chat and there is no
@@ -685,12 +701,22 @@ func (s *Service) finish(
 	// Use a background context for delivery: the run ctx may be cancelled by Stop
 	// or shutdown, but the final message should still reach the user.
 	deliverCtx := context.WithoutCancel(ctx)
-	// Clear this run's interrupted-run marker by id on this CLEAN terminal (normal
-	// Result, RunError, timeout) so a finished run is NOT auto-resumed after a later
-	// restart, while a shutdown-caused terminal keeps its marker to drive the
-	// auto-resume. See removePendingUnlessShutdown. Clearing by id means this run
-	// can never remove a newer queued run's marker.
-	s.removePendingUnlessShutdown(ctx, chatID, markerID)
+	// Clear this run's interrupted-run marker by id whenever the run REACHED a
+	// terminal — it delivered a Result or errored — so a finished run is never
+	// auto-resumed after a later restart. The marker is KEPT only for a run that
+	// produced NOTHING (no Result, no error) and was shutdown-cancelled: that run
+	// was genuinely interrupted mid-flight by a deploy/restart, so its marker must
+	// survive to drive the auto-resume. Gating on the cancellation cause alone is
+	// not enough — a run that reached a clean terminal and then had its ctx
+	// shutdown-cancelled in the microsecond window at the drain deadline would
+	// otherwise keep its marker and be phantom-resumed (a duplicate run that can
+	// re-trigger side effects). Clearing by id means this run can never remove a
+	// newer queued run's marker.
+	genuinelyInterrupted := res == nil && runErr == nil &&
+		errors.Is(context.Cause(ctx), dispatch.ErrShutdown)
+	if !genuinelyInterrupted {
+		s.removePending(chatID, markerID)
+	}
 	// Clear the live draft preview (empty text) so it doesn't linger beside the
 	// persisted answer. Best-effort; harmless if no draft was ever streamed.
 	_ = s.chat.StreamDraft(deliverCtx, chatID, runID, "", false)
