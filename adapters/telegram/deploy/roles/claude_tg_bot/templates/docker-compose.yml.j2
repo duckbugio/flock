@@ -5,6 +5,10 @@ services:
     pull_policy: always
     container_name: {{ container_prefix }}-bot
     restart: unless-stopped
+    # Graceful drain on deploy: give the bot up to 75s after SIGTERM to drain
+    # in-flight runs before SIGKILL. Must stay strictly above SHUTDOWN_DRAIN_SECONDS
+    # (default 45s) so the process self-exits first. An idle bot still exits at once.
+    stop_grace_period: 75s
     env_file:
       - .env
 {% if gitea_host_ip is defined and gitea_host_ip %}

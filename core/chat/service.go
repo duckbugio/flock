@@ -10,6 +10,7 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strconv"
 	"sync"
@@ -18,6 +19,8 @@ import (
 
 	"github.com/duckbugio/flock/core/claude"
 	"github.com/duckbugio/flock/core/cost"
+	"github.com/duckbugio/flock/core/dispatch"
+	"github.com/duckbugio/flock/core/pending"
 )
 
 // tickInterval is how often the wall-clock ticker refreshes the progress frame
@@ -69,6 +72,17 @@ type sessionStore interface {
 	Delete(chatID ChatID) error
 }
 
+// pendingStore persists each chat's "interrupted run" marker so a run killed
+// mid-flight (e.g. SIGKILL after the drain window on a deploy) is auto-resumed on
+// the next startup. *pending.FileStore satisfies it. The marker is written at run
+// START (as early as possible) and cleared in finish on EVERY terminal path, so a
+// stopped or finished run is never resumed and the run-start write is the only
+// writer. A nil store disables the feature (all three calls are safe no-ops).
+type pendingStore interface {
+	Set(chatID ChatID, marker pending.Marker) error
+	Delete(chatID ChatID) error
+}
+
 // retryAfterFunc classifies a transport delivery error as a rate-limit back-off:
 // it returns the duration to wait and true when the error is a "too many
 // requests" signal the Service should honor before retrying, or false otherwise.
@@ -89,6 +103,7 @@ type Service struct {
 	dispatch   dispatcher
 	workspace  workspaceEnsurer
 	sessions   sessionStore
+	pending    pendingStore
 	costs      *cost.Store
 	outbox     *Sweeper
 	nudge      *starNudge
@@ -113,6 +128,10 @@ type Config struct {
 	// Sessions persists chatID -> session_id for --resume continuity. May be nil
 	// (continuity disabled: every run starts fresh and nothing is stored).
 	Sessions sessionStore
+	// Pending persists each chat's interrupted-run marker so a run killed
+	// mid-flight on a deploy is auto-resumed on the next startup. May be nil
+	// (auto-resume disabled: nothing is marked or cleared).
+	Pending pendingStore
 	// Costs accumulates each run's USD cost per user for the cumulative cost cap.
 	// May be nil (cost tracking disabled: runs record nothing). A nil *cost.Store
 	// is itself a no-op, so either a nil interface value or a nil store is safe.
@@ -163,6 +182,7 @@ func New(cfg Config) *Service {
 		dispatch:   cfg.Dispatcher,
 		workspace:  cfg.Workspace,
 		sessions:   cfg.Sessions,
+		pending:    cfg.Pending,
 		costs:      cfg.Costs,
 		outbox:     cfg.Outbox,
 		nudge:      newStarNudge(cfg.StarNudge, cfg.Transport, log),
@@ -312,6 +332,15 @@ func (s *Service) run(ctx context.Context, chatID ChatID, userID int64, prompt s
 	}
 	opts.Workdir = workdir
 
+	// Persist the interrupted-run marker as early as possible — right after the
+	// workspace resolves and BEFORE the run can be torn down — so a run killed at
+	// the drain deadline (or even before SystemInit) always leaves a resumable
+	// prompt behind. The anchor id is not known yet (the anchor is sent below); it
+	// is filled in once available. finish clears the marker on every terminal path,
+	// and run-start is the ONLY writer, so a finished/stopped run is never resumed.
+	startedAt := s.nowFunc()
+	s.markPending(chatID, pending.Marker{Prompt: prompt, StartedAt: startedAt.UnixMilli()})
+
 	// Resume this chat's stored Claude session so the run continues its context
 	// (empty = a fresh session). Continuity survives restarts because the store is
 	// durable and reloaded on startup. resuming records whether THIS run carried a
@@ -356,6 +385,14 @@ func (s *Service) run(ctx context.Context, chatID ChatID, userID int64, prompt s
 		// Without an anchor we can still deliver the result; keep going.
 		s.log.Error("send anchor message", "error", err)
 		progressMsgID = ""
+	}
+	// Record the anchor id on the marker now that it is known, so a restart can
+	// best-effort edit the dangling "Working…" message into a resume notice. The
+	// prompt was already persisted before runner.Run; this only enriches it.
+	if progressMsgID != "" {
+		s.markPending(chatID, pending.Marker{
+			Prompt: prompt, AnchorMsgID: progressMsgID, StartedAt: startedAt.UnixMilli(),
+		})
 	}
 
 	ticker := time.NewTicker(s.tick)
@@ -531,6 +568,30 @@ func (s *Service) storeSession(chatID ChatID, sessionID string) {
 	}
 }
 
+// markPending records (or refreshes) chatID's interrupted-run marker. A nil
+// store is a no-op. A write failure is logged but never aborts the run — a lost
+// marker only costs this run its auto-resume, it does not break delivery.
+func (s *Service) markPending(chatID ChatID, marker pending.Marker) {
+	if s.pending == nil {
+		return
+	}
+	if err := s.pending.Set(chatID, marker); err != nil {
+		s.log.Error("persist pending marker", "chat_id", chatID, "error", err)
+	}
+}
+
+// clearPending removes chatID's interrupted-run marker on a terminal so a
+// finished or stopped run is NOT auto-resumed after a later restart. A nil store
+// is a no-op; a delete failure is logged but never aborts terminal delivery.
+func (s *Service) clearPending(chatID ChatID) {
+	if s.pending == nil {
+		return
+	}
+	if err := s.pending.Delete(chatID); err != nil {
+		s.log.Error("clear pending marker", "chat_id", chatID, "error", err)
+	}
+}
+
 // finish renders the terminal message and replaces the progress message with it
 // (chunked when the answer exceeds the platform's message size limit).
 func (s *Service) finish(
@@ -539,6 +600,19 @@ func (s *Service) finish(
 	// Use a background context for delivery: the run ctx may be cancelled by Stop
 	// or shutdown, but the final message should still reach the user.
 	deliverCtx := context.WithoutCancel(ctx)
+	// Clear the interrupted-run marker on every CLEAN terminal (normal Result,
+	// RunError, timeout, user Stop / /stop / edit-supersede) so a finished or
+	// deliberately stopped run is NOT auto-resumed after a later restart. The ONE
+	// exception is a terminal caused by the dispatcher SHUTTING DOWN the process
+	// (drain-deadline cancel / Close): that run was killed by a deploy/restart, so
+	// its marker must SURVIVE to drive the auto-resume — we keep it and let the next
+	// startup re-inject. The two are told apart by the cancellation cause: a
+	// per-chat Stop/supersede cancels with context.Canceled, a shutdown with
+	// dispatch.ErrShutdown. Run-start is the only writer, so a cleared run stays
+	// cleared.
+	if !errors.Is(context.Cause(ctx), dispatch.ErrShutdown) {
+		s.clearPending(chatID)
+	}
 	// Clear the live draft preview (empty text) so it doesn't linger beside the
 	// persisted answer. Best-effort; harmless if no draft was ever streamed.
 	_ = s.chat.StreamDraft(deliverCtx, chatID, runID, "", false)

@@ -17,6 +17,7 @@ import (
 
 	"github.com/duckbugio/flock/core/claude"
 	"github.com/duckbugio/flock/core/dispatch"
+	"github.com/duckbugio/flock/core/pending"
 	"github.com/duckbugio/flock/core/session"
 )
 
@@ -260,6 +261,77 @@ func (f *fakeSessions) sets() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.setLog...)
+}
+
+// fakePending is an in-memory pendingStore for the marker tests. It records the
+// current markers plus a log of Set/Delete calls so a test can assert what was
+// written and when.
+type fakePending struct {
+	mu     sync.Mutex
+	store  map[ChatID]pending.Marker
+	setLog []ChatID
+	delLog []ChatID
+}
+
+func newFakePending() *fakePending {
+	return &fakePending{store: map[ChatID]pending.Marker{}}
+}
+
+func (f *fakePending) Set(chatID ChatID, marker pending.Marker) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.store[chatID] = marker
+	f.setLog = append(f.setLog, chatID)
+	return nil
+}
+
+func (f *fakePending) Delete(chatID ChatID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.store, chatID)
+	f.delLog = append(f.delLog, chatID)
+	return nil
+}
+
+// has reports whether a marker is stored for testChatID (the id every marker test
+// submits under), mirroring fakeSessions.get's param-free style.
+func (f *fakePending) has() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.store[testChatID]
+	return ok
+}
+
+func (f *fakePending) get() (pending.Marker, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	m, ok := f.store[testChatID]
+	return m, ok
+}
+
+func (f *fakePending) deletes() []ChatID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ChatID(nil), f.delLog...)
+}
+
+// newTestServiceWithPending builds a Service wired to a pending store (and a fake
+// session store) over a real Dispatcher, for the interrupted-run marker tests.
+func newTestServiceWithPending(
+	t *testing.T, r claude.Runner, c Transport, p pendingStore,
+) (*Service, *dispatch.Dispatcher) {
+	t.Helper()
+	d := dispatch.New(4)
+	s := New(Config{
+		Runner:     r,
+		Transport:  c,
+		Dispatcher: d,
+		Workspace:  &fakeWorkspace{},
+		Pending:    p,
+		Logger:     slog.New(slog.DiscardHandler),
+	})
+	s.tick = 5 * time.Millisecond
+	return s, d
 }
 
 // newTestService builds a Service over a real Dispatcher and a fake workspace.
@@ -902,12 +974,15 @@ func TestSessionPreservedOnShutdown(t *testing.T) {
 		return ok && id == sessShutdown
 	})
 
-	// Drain: cancel in-flight runs within a bounded budget (as main does on
-	// SIGINT/SIGTERM). The run is gated, so it unwinds via ctx cancellation.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// Drain: WAIT for in-flight runs up to a bounded budget, then cancel the
+	// survivors (as main does on SIGINT/SIGTERM). The run is gated and never
+	// finishes on its own, so it survives the (short) window and is cancelled at the
+	// deadline — Shutdown then reports the deadline. We assert the session id
+	// survived that cancel, which is the point of this regression.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if err := d.Shutdown(shutdownCtx); err != nil {
-		t.Fatalf("Shutdown drain: %v", err)
+	if err := d.Shutdown(shutdownCtx); err == nil {
+		t.Fatal("Shutdown returned nil; the gated run should survive the window and be cancelled at the deadline")
 	}
 
 	// The session id captured at SystemInit must survive the shutdown intact.
@@ -918,6 +993,99 @@ func TestSessionPreservedOnShutdown(t *testing.T) {
 	// exactly the init id is recorded.
 	if log := sess.sets(); len(log) == 0 || log[0] != sessShutdown {
 		t.Fatalf("setLog = %v, want first = sess-shutdown", log)
+	}
+}
+
+// TestPendingMarkerSetAtStart asserts the interrupted-run marker is written at run
+// START (before the run can be torn down), capturing the prompt and the anchor id,
+// and is present while the run is still in flight.
+func TestPendingMarkerSetAtStart(t *testing.T) {
+	fc := newFakeChat()
+	pend := newFakePending()
+	// gate is never closed: the run blocks after SystemInit so we can inspect the
+	// marker mid-run.
+	fr := &sessionRunner{emitInit: "s1", emitFinal: "s1", gate: make(chan struct{})}
+	svc, d := newTestServiceWithPending(t, fr, fc, pend)
+	defer d.Close()
+
+	svc.Handle(context.Background(), testChatID, 100, "1", "resume me")
+
+	// The marker must appear with the prompt and the anchor message id while the run
+	// is still in flight (before any terminal).
+	waitUntil(t, func() bool {
+		m, ok := pend.get()
+		return ok && m.Prompt == "resume me" && m.AnchorMsgID == anchorMsgID && m.StartedAt != 0
+	})
+}
+
+// TestPendingMarkerClearedOnNormalFinish asserts a normally-finished run clears its
+// marker, so it is NOT auto-resumed after a later restart.
+func TestPendingMarkerClearedOnNormalFinish(t *testing.T) {
+	fc := newFakeChat()
+	pend := newFakePending()
+	fr := &fakeRunner{events: []claude.Event{
+		{Type: claude.SystemInit, SessionID: "s1"},
+		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer, SessionID: "s1"}},
+	}}
+	svc, d := newTestServiceWithPending(t, fr, fc, pend)
+	defer d.Close()
+
+	svc.Handle(context.Background(), testChatID, 100, "1", "hello")
+
+	waitUntil(t, func() bool {
+		text, stop := fc.snapshot()
+		return text == finalAnswer && !stop
+	})
+	waitUntil(t, func() bool { return !pend.has() })
+	if dels := pend.deletes(); len(dels) == 0 || dels[len(dels)-1] != testChatID {
+		t.Fatalf("marker not cleared on normal finish; deletes=%v", dels)
+	}
+}
+
+// TestPendingMarkerClearedOnStop asserts a user-Stopped run clears its marker (the
+// terminal is a per-chat cancel, not a shutdown), so a deliberately stopped run is
+// NOT auto-resumed.
+func TestPendingMarkerClearedOnStop(t *testing.T) {
+	fc := newFakeChat()
+	pend := newFakePending()
+	// gate never closes: the run blocks until Stop cancels its context.
+	fr := &sessionRunner{emitInit: "s1", emitFinal: "s1", gate: make(chan struct{})}
+	svc, d := newTestServiceWithPending(t, fr, fc, pend)
+	defer d.Close()
+
+	svc.Handle(context.Background(), testChatID, 100, "1", "stop me")
+
+	// Wait until the run is in flight (marker present), then Stop it.
+	waitUntil(t, func() bool { return pend.has() })
+	waitUntil(t, func() bool { return svc.Stop("1") })
+
+	// The Stop terminal must clear the marker.
+	waitUntil(t, func() bool { return !pend.has() })
+}
+
+// TestPendingMarkerSurvivesShutdown asserts a run cancelled by the dispatcher
+// SHUTTING DOWN (drain-deadline cancel) keeps its marker so the next startup can
+// auto-resume it — the one terminal that must NOT clear the marker.
+func TestPendingMarkerSurvivesShutdown(t *testing.T) {
+	fc := newFakeChat()
+	pend := newFakePending()
+	// gate never closes: the run blocks until Shutdown cancels its context at the
+	// (short) drain deadline.
+	fr := &sessionRunner{emitInit: "s1", emitFinal: "s1", gate: make(chan struct{})}
+	svc, d := newTestServiceWithPending(t, fr, fc, pend)
+
+	svc.Handle(context.Background(), testChatID, 100, "1", "resume me")
+	waitUntil(t, func() bool { return pend.has() })
+
+	// Short drain window: the gated run never finishes, so Shutdown cancels it with
+	// the ErrShutdown cause after the deadline.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_ = d.Shutdown(shutdownCtx)
+
+	// The marker must SURVIVE the shutdown so the run is auto-resumed on restart.
+	if !pend.has() {
+		t.Fatalf("marker was cleared on shutdown; deletes=%v — a killed run must stay resumable", pend.deletes())
 	}
 }
 

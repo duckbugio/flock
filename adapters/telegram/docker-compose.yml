@@ -9,6 +9,10 @@ services:
     image: ghcr.io/duckbugio/flock-telegram:latest
     container_name: duck-bot
     restart: unless-stopped
+    # Graceful drain on deploy: give the bot up to 75s after SIGTERM to drain
+    # in-flight runs before SIGKILL. Must stay strictly above SHUTDOWN_DRAIN_SECONDS
+    # (default 45s) so the process self-exits first. An idle bot still exits at once.
+    stop_grace_period: 75s
     env_file: .env
     volumes:
       - claude_home:/home/claude/.claude   # Claude sessions + auth state

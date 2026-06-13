@@ -183,27 +183,132 @@ func TestCancelUnknownChatNoop(_ *testing.T) {
 	d.Cancel("999") // must not panic
 }
 
-// TestShutdownDrains cancels the in-flight job and waits for workers to drain
-// within the deadline.
+// TestShutdownDrains drives a job that only exits on cancellation through the
+// graceful drain: it survives the (short) drain window, gets cancelled at the
+// deadline, and Shutdown reports the deadline error after the survivor unwinds.
+// Submits after shutdown are dropped no-ops.
 func TestShutdownDrains(t *testing.T) {
 	d := New(2)
 
 	started := make(chan struct{})
 	d.Submit("1", func(ctx context.Context) {
 		close(started)
-		<-ctx.Done() // exits only because Shutdown cancels the job
+		<-ctx.Done() // exits only because Shutdown cancels the job at the deadline
 	})
 	recv(t, started, "job did not start")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
-	if err := d.Shutdown(ctx); err != nil {
-		t.Fatalf("Shutdown did not drain in time: %v", err)
+	if err := d.Shutdown(ctx); err == nil {
+		t.Fatal("Shutdown returned nil; the survivor outlived the drain window and should report the deadline")
 	}
 
 	// Submitting after shutdown is a dropped no-op (must not panic or run).
 	d.Submit("2", func(context.Context) { t.Fatal("job ran after shutdown") })
 	time.Sleep(20 * time.Millisecond)
+}
+
+// TestShutdownWaitsForInFlightThenCancels asserts the graceful-drain contract:
+// Shutdown first WAITS for in-flight jobs to finish on their own (without
+// cancelling them) up to the drain deadline. A job that finishes within the
+// window runs to completion uncancelled, and Shutdown blocks until it returns.
+func TestShutdownWaitsForInFlightThenCancels(t *testing.T) {
+	d := New(2)
+
+	started := make(chan struct{})
+	var cancelled atomic.Bool
+	var completed atomic.Bool
+
+	// A short job (well under the drain window): it must run to completion WITHOUT
+	// observing a cancelled context.
+	d.Submit("1", func(ctx context.Context) {
+		close(started)
+		select {
+		case <-time.After(100 * time.Millisecond):
+			completed.Store(true)
+		case <-ctx.Done():
+			cancelled.Store(true)
+		}
+	})
+	recv(t, started, "job did not start")
+
+	// Generous drain window so the 100ms job finishes inside it. Shutdown must
+	// block until the job returns on its own.
+	drainStart := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := d.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown returned error: %v", err)
+	}
+
+	if cancelled.Load() {
+		t.Fatal("in-flight job was cancelled during the drain window — it should have been left to finish")
+	}
+	if !completed.Load() {
+		t.Fatal("in-flight job did not complete on its own before Shutdown returned")
+	}
+	// Shutdown must have blocked for roughly the job's duration (not returned
+	// immediately by cancelling).
+	if elapsed := time.Since(drainStart); elapsed < 80*time.Millisecond {
+		t.Fatalf("Shutdown returned in %v, expected it to block until the job finished", elapsed)
+	}
+}
+
+// TestShutdownCancelsSurvivorsAfterDrain asserts that a job still running when the
+// drain deadline elapses gets its context cancelled (the backstop), and Shutdown
+// reports the deadline error rather than hanging forever.
+func TestShutdownCancelsSurvivorsAfterDrain(t *testing.T) {
+	d := New(2)
+
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+
+	// A long job that only exits when its context is cancelled. The drain window is
+	// short, so it must be cancelled at the deadline.
+	d.Submit("1", func(ctx context.Context) {
+		close(started)
+		<-ctx.Done()
+		close(cancelled)
+	})
+	recv(t, started, "job did not start")
+
+	// Short drain window: the job outlives it and must be cancelled.
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	err := d.Shutdown(ctx)
+	if err == nil {
+		t.Fatal("Shutdown returned nil, want a deadline error when a survivor had to be cancelled")
+	}
+	// The survivor's context must have been cancelled at the deadline so it unwinds.
+	recv(t, cancelled, "survivor job was not cancelled after the drain deadline")
+}
+
+// TestCloseIsImmediate asserts Close cancels in-flight jobs and returns without
+// waiting for the drain window (the no-drain path used by callers that don't
+// block).
+func TestCloseIsImmediate(t *testing.T) {
+	d := New(2)
+
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	d.Submit("1", func(ctx context.Context) {
+		close(started)
+		<-ctx.Done()
+		close(cancelled)
+	})
+	recv(t, started, "job did not start")
+
+	done := make(chan struct{})
+	go func() {
+		d.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return promptly — it should not wait for a drain")
+	}
+	recv(t, cancelled, "Close did not cancel the in-flight job")
 }
 
 // TestSubmitRacesShutdown hammers the Submit||Shutdown window: many goroutines

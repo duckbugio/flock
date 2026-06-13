@@ -70,6 +70,22 @@ type Config struct {
 	LogLevel              string `env:"LOG_LEVEL" envDefault:"INFO"`
 	MaxConcurrentChatRuns int    `env:"MAX_CONCURRENT_CHAT_RUNS" envDefault:"4"`
 
+	// ShutdownDrainSeconds bounds the graceful-drain window on SIGTERM: how long
+	// the dispatcher WAITS for in-flight runs to finish on their own before
+	// cancelling the survivors (a run that finishes within the window delivers its
+	// real answer, not "⏹ Stopped."). It must stay strictly below the Docker
+	// stop_grace_period (75s) so the process self-exits before SIGKILL. The default
+	// is 45s; set SHUTDOWN_DRAIN_SECONDS to override.
+	ShutdownDrainSeconds int `env:"SHUTDOWN_DRAIN_SECONDS" envDefault:"45"`
+
+	// PendingStorePath is the JSON file persisting chatID -> interrupted-run marker
+	// (prompt + anchor message id + start time) so a run killed mid-flight on a
+	// deploy is auto-resumed on the next startup. When empty it defaults to
+	// <APPROVED_DIRECTORY>/pending.json (see PendingStoreFile), which lives under
+	// the workspace data dir — a persisted named volume, so the marker survives a
+	// --force-recreate — never inside a repo.
+	PendingStorePath string `env:"PENDING_STORE_PATH"`
+
 	// SessionStorePath is the JSON file persisting chatID -> session_id for
 	// --resume continuity across messages and restarts (plan §4). When empty it
 	// defaults to <APPROVED_DIRECTORY>/sessions.json (see SessionStoreFile), which
@@ -224,6 +240,34 @@ func (c Config) SessionStoreFile() string {
 		return c.SessionStorePath
 	}
 	return filepath.Join(c.ApprovedDirectory, "sessions.json")
+}
+
+// defaultShutdownDrain is the fallback graceful-drain window applied when
+// SHUTDOWN_DRAIN_SECONDS is non-positive. Draining must never be fully disabled
+// (a zero window would cancel every in-flight run immediately), so a bad/zero
+// override falls back to the documented 45s default.
+const defaultShutdownDrain = 45 * time.Second
+
+// ShutdownDrain returns the graceful-drain window as a Duration: how long
+// Shutdown waits for in-flight runs to finish before cancelling survivors. A
+// non-positive SHUTDOWN_DRAIN_SECONDS falls back to defaultShutdownDrain so the
+// drain is never disabled.
+func (c Config) ShutdownDrain() time.Duration {
+	if c.ShutdownDrainSeconds <= 0 {
+		return defaultShutdownDrain
+	}
+	return time.Duration(c.ShutdownDrainSeconds) * time.Second
+}
+
+// PendingStoreFile returns the path to the JSON interrupted-run store, defaulting
+// to <ApprovedDirectory>/pending.json when PENDING_STORE_PATH is unset so it
+// lives under the workspace data dir alongside the session/cost stores, never
+// inside any repo.
+func (c Config) PendingStoreFile() string {
+	if strings.TrimSpace(c.PendingStorePath) != "" {
+		return c.PendingStorePath
+	}
+	return filepath.Join(c.ApprovedDirectory, "pending.json")
 }
 
 // RateLimitWindow returns the per-user rate-limit window as a Duration, or 0
