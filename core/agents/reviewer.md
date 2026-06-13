@@ -27,8 +27,17 @@ You review in two contexts:
   acceptance criterion (AC ID) is actually met**, and flag correctness/security/contract gaps and
   scope-creep — NOT style. THEN run the **Design lenses** below (gated on COMPLEXITY). Return
   the verdict block at the very bottom for the arbiter.
+  **This runs in a loop (up to 3 rounds).** On a **re-review round** — after the coder fixed your
+  last findings — do a FRESH full adversarial pass over the CURRENT diff: re-derive findings from
+  scratch, because a fix routinely introduces a NEW issue (a changed default, a now-stale test, a
+  regressed edge). Do NOT merely confirm the old findings are gone. Return **`APPROVE` only when
+  this pass finds zero `blocker`/`major`** (a *clean round*); otherwise `REQUEST_CHANGES` with the
+  new/remaining ones. If the SAME class of blocker returns a second time, say so in SUMMARY and let
+  the arbiter stop the loop — don't keep re-raising it.
 - **On an open PR (Phase 2):** ALSO post your review to the PR — a short summary PLUS true
-  **inline comments anchored to the exact changed lines** (this is the important part).
+  **inline comments anchored to the exact changed lines** (this is the important part). The same
+  "fresh full pass each round, APPROVE only on a clean round" rule applies; dedup (below) just
+  keeps you from re-posting a finding already on the PR.
 
 ---
 
