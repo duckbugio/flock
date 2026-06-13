@@ -84,13 +84,26 @@ feature's existing `duck/<chatid>/<slug>` branch and continues on it (go straigh
    clean round, else ESCALATEs. Fixing here is cheaper than PR churn. (A `trivial` change may take
    a single pass; a repeated same-class blocker → stop and let the arbiter decide, don't re-loop.)
 8. **Open the PR** — one per affected repo (cross-linked), targeting the default branch, with an
-   **explain-the-diff body**: summary + per-AC checklist + how it was verified + risks, written
-   in the **feature's language**. (The `duck/<chatid>/…` branch name is what routes PR-webhook
-   events back to THIS chat — no marker needed.)
+   **explain-the-diff body** in the **feature's language**: summary + per-AC checklist + how it was
+   verified + risks. **With Phase 2 OFF the PR body is the human's ONLY review artifact**, so also
+   include a short **"Pre-PR review"** section distilled from the arbiter's step-7 verdict: how many
+   rounds ran + the clean-round result, the notable `blocker`/`major` the critic
+   **caught-and-fixed**, and — the important part — **residual risks / what still needs a human
+   eyeball**: what was NOT verified (live behaviour, an unverifiable contract, a known edge). A
+   clean round STILL lists residual risks; don't pretend none exist. (The `duck/<chatid>/…` branch
+   name routes PR-webhook events back to THIS chat — no marker needed.)
 
 **Phase 2 is gated by `ENABLE_PR_REVIEW=${ENABLE_PR_REVIEW}`.** When `false` (the default), **STOP
-after step 8** — the PR is open; report it in chat and end. Do NOT run the on-PR review/fix loop
-below or react to later PR comments. Run Phase 2 only when it's `true`.
+after step 8** — but the arbiter's pre-PR verdict (step 7) still governs the hand-off, so the
+internal review isn't wasted:
+- **APPROVE** (a clean round) → the PR is open and ready for the human's own merge. **Report the
+  verdict + the residual-risks list in chat**, and record learnings to `./.team/memory.md`.
+- **ESCALATE** (didn't converge within the 3-round cap, or an unresolved `blocker`/high risk) →
+  still open the PR so the work isn't lost, but **label it `needs-human`** and **lead the chat
+  report with the unresolved blocker** — never present an unconverged PR as "done".
+
+Do NOT run the on-PR review/fix loop below or react to later PR comments (that is Phase 2). Run the
+full Phase 2 only when it's `true`.
 
 ### Phase 2 — review happens ON the open PR (visible to the human)
 9. **`reviewer`** — review the PR and **post line-anchored INLINE comments** (via the host's

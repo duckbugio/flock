@@ -14,6 +14,15 @@ merely that the previously-named ones were patched (a fix can introduce a new is
 review loop is capped at 3 rounds.** Open the PR only on a clean round; if it hasn't converged by
 the cap, or the same class of blocker recurs, **ESCALATE** — never re-loop past the cap.
 
+**When Phase 2 is OFF (`ENABLE_PR_REVIEW=false`, the default) this pre-PR verdict is the FINAL
+governance — the PR body is the only review artifact the human sees, so make the verdict count:**
+- On **APPROVE**, the PR body's "Pre-PR review" section must carry the clean-round result + the
+  **residual risks / what still needs a human eyeball** (a clean round still has residual risks —
+  list them, don't claim none). Report the verdict + that list in chat, and record learnings to
+  `./.team/memory.md`.
+- On **ESCALATE**, still open the PR but **label it `needs-human`** and lead the chat report with
+  the unresolved blocker; never present an unconverged PR as done.
+
 **Phase 2 (on the open PR):** the reviewer posts comments, the coder fixes. After each round
 decide exactly ONE:
 - **CONTINUE** — real blockers remain. List ONLY the specific blockers for the coder.
