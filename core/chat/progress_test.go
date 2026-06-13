@@ -20,7 +20,7 @@ func fakeClock(d *time.Duration) func() time.Duration {
 
 func TestFrameCounterDrivenByClockNotEvents(t *testing.T) {
 	var elapsed time.Duration
-	p := NewProgress(fakeClock(&elapsed), 5)
+	p := NewProgress(fakeClock(&elapsed), 5, "")
 
 	// No events observed yet: the counter still advances purely from the clock,
 	// proving it is wall-clock driven (the §7.2 frozen-counter fix).
@@ -48,7 +48,7 @@ func TestFrameCounterDrivenByClockNotEvents(t *testing.T) {
 
 func TestActivityRingBounded(t *testing.T) {
 	var elapsed time.Duration
-	p := NewProgress(fakeClock(&elapsed), 3)
+	p := NewProgress(fakeClock(&elapsed), 3, "")
 
 	for _, tool := range []string{"Read", "Grep", "Edit", "Bash", "Write"} {
 		p.Observe(claude.Event{Type: claude.ToolUse, Tool: tool})
@@ -74,7 +74,7 @@ func TestActivityRingBounded(t *testing.T) {
 
 func TestObserveTextAndIgnoredEvents(t *testing.T) {
 	var elapsed time.Duration
-	p := NewProgress(fakeClock(&elapsed), 5)
+	p := NewProgress(fakeClock(&elapsed), 5, "")
 
 	if p.Observe(claude.Event{Type: claude.SystemInit, SessionID: "s1"}) {
 		t.Fatal("SystemInit should not change the ring")
@@ -160,7 +160,7 @@ func TestToolUseDetailEnrichment(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var elapsed time.Duration
-			p := NewProgress(fakeClock(&elapsed), 5)
+			p := NewProgress(fakeClock(&elapsed), 5, "")
 			p.Observe(claude.Event{Type: claude.ToolUse, Tool: tc.tool, ToolInput: []byte(tc.input)})
 			frame := p.Frame()
 			if !strings.Contains(frame, tc.wantSub) {
@@ -207,7 +207,7 @@ func TestToolLinePrefixPerTool(t *testing.T) {
 
 func TestToolUseDetailCollapsesMultilineCommand(t *testing.T) {
 	var elapsed time.Duration
-	p := NewProgress(fakeClock(&elapsed), 5)
+	p := NewProgress(fakeClock(&elapsed), 5, "")
 	p.Observe(claude.Event{
 		Type:      claude.ToolUse,
 		Tool:      "Bash",
@@ -225,7 +225,7 @@ func TestToolUseDetailTruncatedToBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	detail := toolDetail("Bash", input)
+	detail := toolDetail("Bash", input, "")
 	if got := utf8.RuneCountInString(detail); got != toolDetailMax {
 		t.Fatalf("detail rune count = %d, want %d (truncated with ellipsis)", got, toolDetailMax)
 	}
@@ -353,7 +353,7 @@ func TestToolDetailRedactsSecrets(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			detail := toolDetail(tc.tool, []byte(tc.input))
+			detail := toolDetail(tc.tool, []byte(tc.input), "")
 			if !strings.Contains(detail, tc.wantSub) {
 				t.Fatalf("detail %q does not contain %q", detail, tc.wantSub)
 			}
@@ -396,7 +396,7 @@ func TestToolDetailRedactsQuotedKeySecret(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
-			detail := toolDetail("Bash", input)
+			detail := toolDetail("Bash", input, "")
 			if strings.Contains(detail, tc.miss) {
 				t.Fatalf("detail leaked JSON-body secret %q: %q", tc.miss, detail)
 			}
@@ -411,15 +411,98 @@ func TestToolDetailNonObjectJSON(t *testing.T) {
 	// Valid JSON that is not an object unmarshals into map[string]any with an
 	// error, so the detail falls back to "" (bare tool name).
 	for _, in := range []string{`"just a string"`, `[1,2,3]`, `42`} {
-		if got := toolDetail("Read", []byte(in)); got != "" {
+		if got := toolDetail("Read", []byte(in), ""); got != "" {
 			t.Fatalf("toolDetail(%q) = %q, want empty", in, got)
 		}
 	}
 }
 
+func TestRepoRelPath(t *testing.T) {
+	cases := []struct {
+		name    string
+		path    string
+		baseDir string
+		want    string
+	}{
+		{
+			name:    "under workdir relativized with repo segment kept",
+			path:    "/workspace/chat_123/roost/web/src/components/SettingsForm.tsx",
+			baseDir: "/workspace/chat_123",
+			want:    "roost/web/src/components/SettingsForm.tsx",
+		},
+		{
+			name:    "outside workdir unchanged",
+			path:    "/etc/passwd",
+			baseDir: "/workspace/chat_123",
+			want:    "/etc/passwd",
+		},
+		{
+			name:    "sibling dir would need leading dotdot so unchanged",
+			path:    "/workspace/chat_999/roost/main.go",
+			baseDir: "/workspace/chat_123",
+			want:    "/workspace/chat_999/roost/main.go",
+		},
+		{
+			name:    "empty baseDir unchanged",
+			path:    "/workspace/chat_123/roost/web/App.tsx",
+			baseDir: "",
+			want:    "/workspace/chat_123/roost/web/App.tsx",
+		},
+		{
+			name:    "non-absolute path under baseDir unchanged",
+			path:    "relative/path.go",
+			baseDir: "/workspace/chat_123",
+			want:    "relative/path.go",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := repoRelPath(tc.path, tc.baseDir); got != tc.want {
+				t.Fatalf("repoRelPath(%q, %q) = %q, want %q", tc.path, tc.baseDir, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestToolDetailFilePathRelativized(t *testing.T) {
+	input, err := json.Marshal(map[string]string{
+		"file_path": "/workspace/chat_123/roost/web/src/components/SettingsForm.tsx",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// Under the workdir → repo-relative (repo segment kept).
+	if got := toolDetail("Read", input, "/workspace/chat_123"); got != "roost/web/src/components/SettingsForm.tsx" {
+		t.Fatalf("toolDetail relativized = %q, want repo-relative path", got)
+	}
+	// Empty baseDir → unchanged absolute path.
+	if got := toolDetail("Read", input, ""); got != "/workspace/chat_123/roost/web/src/components/SettingsForm.tsx" {
+		t.Fatalf("toolDetail with empty baseDir = %q, want unchanged absolute path", got)
+	}
+}
+
+func TestFrameRendersFilePathRelative(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5, "/workspace/chat_123")
+	input, err := json.Marshal(map[string]string{
+		"file_path": "/workspace/chat_123/roost/web/src/components/SettingsForm.tsx",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Read", ToolInput: input})
+	frame := p.Frame()
+	if !strings.Contains(frame, "📖 Read · roost/web/src/components/SettingsForm.tsx") {
+		t.Fatalf("frame should render repo-relative Read line, got: %q", frame)
+	}
+	if strings.Contains(frame, "/workspace/chat_123/") {
+		t.Fatalf("frame should not contain the absolute workdir prefix, got: %q", frame)
+	}
+}
+
 func TestActivitySnippetTruncated(t *testing.T) {
 	var elapsed time.Duration
-	p := NewProgress(fakeClock(&elapsed), 5)
+	p := NewProgress(fakeClock(&elapsed), 5, "")
 	// A single (hence most-recent) line longer than recentSnippetMax is capped at
 	// recentSnippetMax; the emoji prefix rides on top of that text budget.
 	long := strings.Repeat("a", recentSnippetMax+200)
@@ -450,7 +533,7 @@ func TestActivitySnippetTruncated(t *testing.T) {
 // same length is truncated to olderSnippetMax.
 func TestPositionalSnippetCaps(t *testing.T) {
 	var elapsed time.Duration
-	p := NewProgress(fakeClock(&elapsed), 5)
+	p := NewProgress(fakeClock(&elapsed), 5, "")
 
 	// Length is longer than olderSnippetMax but shorter than recentSnippetMax, so
 	// it is untruncated only while it is the most-recent line.
@@ -494,7 +577,7 @@ func TestPositionalSnippetCaps(t *testing.T) {
 // assembled frame stays within frameBudgetMax (and therefore below TelegramMaxMessage).
 func TestFrameBudgetNeverExceedsLimit(t *testing.T) {
 	var elapsed time.Duration
-	p := NewProgress(fakeClock(&elapsed), 5)
+	p := NewProgress(fakeClock(&elapsed), 5, "")
 	for i := 0; i < 5; i++ {
 		p.Observe(claude.Event{Type: claude.Text, Text: strings.Repeat("x", recentSnippetMax+500)})
 	}
@@ -514,7 +597,7 @@ func TestFrameBudgetNeverExceedsLimit(t *testing.T) {
 // stored text at recentSnippetMax, which is below the frame budget by design.
 func TestSingleOversizedLineHardTruncated(t *testing.T) {
 	var elapsed time.Duration
-	p := NewProgress(fakeClock(&elapsed), 5)
+	p := NewProgress(fakeClock(&elapsed), 5, "")
 	p.push(thoughtPrefix + strings.Repeat("z", frameBudgetMax+2000))
 	frame := p.Frame()
 	if frame == "" {
@@ -542,7 +625,7 @@ func TestSingleOversizedLineHardTruncated(t *testing.T) {
 func TestFrameBudgetDropsOldestLines(t *testing.T) {
 	var elapsed time.Duration
 	const ring = 20
-	p := NewProgress(fakeClock(&elapsed), ring)
+	p := NewProgress(fakeClock(&elapsed), ring, "")
 	// Each line is a max-length older snippet tagged with its index at the FRONT, so
 	// the tag survives end-truncation and lets us tell which lines were kept.
 	for i := 0; i < ring; i++ {
@@ -593,7 +676,7 @@ func TestFormatElapsed(t *testing.T) {
 // TestFormatElapsedInHeader confirms the humanized form reaches the rendered header.
 func TestFormatElapsedInHeader(t *testing.T) {
 	var elapsed time.Duration
-	p := NewProgress(fakeClock(&elapsed), 5)
+	p := NewProgress(fakeClock(&elapsed), 5, "")
 	elapsed = 1281 * time.Second
 	if got := p.Frame(); !strings.Contains(got, "Working… (21m 21s)") {
 		t.Fatalf("header not humanized: %q", got)
@@ -605,7 +688,7 @@ func TestFormatElapsedInHeader(t *testing.T) {
 func TestElidedIndicatorHiddenWhenAllShown(t *testing.T) {
 	var elapsed time.Duration
 	const ring = 5
-	p := NewProgress(fakeClock(&elapsed), ring)
+	p := NewProgress(fakeClock(&elapsed), ring, "")
 	for i := 0; i < ring; i++ {
 		p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash"})
 	}
@@ -620,7 +703,7 @@ func TestElidedIndicatorShownWhenEvicted(t *testing.T) {
 	var elapsed time.Duration
 	const ring = 5
 	const extra = 37
-	p := NewProgress(fakeClock(&elapsed), ring)
+	p := NewProgress(fakeClock(&elapsed), ring, "")
 	for i := 0; i < ring+extra; i++ {
 		p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash"})
 	}
@@ -646,7 +729,7 @@ func TestElidedIndicatorShownWhenEvicted(t *testing.T) {
 func TestElidedIndicatorCountsBudgetDrops(t *testing.T) {
 	var elapsed time.Duration
 	const ring = 20
-	p := NewProgress(fakeClock(&elapsed), ring)
+	p := NewProgress(fakeClock(&elapsed), ring, "")
 	for i := 0; i < ring; i++ {
 		p.push(thoughtPrefix + "L" + strconv.Itoa(i) + " " + strings.Repeat("x", olderSnippetMax))
 	}
