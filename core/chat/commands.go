@@ -28,5 +28,8 @@ func (s *Service) StopChat(chatID ChatID) bool {
 	}
 	s.mu.Unlock()
 	s.dispatch.Cancel(chatID)
+	// Purge the lane's markers too: /stop drops the running run AND any queued jobs,
+	// none of which the user wants resumed (there is no resubmit to preserve).
+	s.clearLanePending(chatID)
 	return running
 }

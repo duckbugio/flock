@@ -857,43 +857,56 @@ func sendCommandReply(ctx context.Context, b *bot.Bot, chatID int64, text string
 // on startup so the user sees the bot picking the run back up after a restart.
 const resumeNotice = "🔄 Resuming after a restart…"
 
-// resumePending re-injects every interrupted run recorded in the pending store so
-// a run killed mid-flight on a deploy/restart continues WITHOUT the user re-sending
-// their message. For each marker it best-effort edits the dangling anchor into a
-// short resume notice (non-fatal on failure), then re-injects the prompt through
-// the Service (Inject -> Submit), letting the dispatcher's concurrency cap throttle
-// the replay. Markers are intentionally left in place: only a clean terminal clears
-// them, so a crash mid-replay re-resumes on the next boot (idempotent). A nil store
-// (open failed) yields an empty set, so this is a safe no-op.
+// resumePending re-submits every interrupted run recorded in the pending store so
+// a run killed mid-flight (or merely queued behind a running run) on a
+// deploy/restart continues WITHOUT the user re-sending their message. The store
+// holds a per-chat FIFO queue; for each chat its markers are replayed IN ORDER.
+// For each marker it best-effort edits the dangling anchor into a short resume
+// notice (only when an anchor id was captured; non-fatal on failure), then
+// re-submits via ResumePending, which REUSES the marker's id so the resumed run
+// clears the SAME on-disk marker on its clean terminal — never a duplicate. The
+// dispatcher's concurrency cap throttles the replay. Order is best-effort: a
+// concurrent same-chat submit may interleave enqueue vs dispatch order — the
+// guarantee is no-loss, not strict order. Markers are intentionally left in place
+// (cleared by id only on a clean terminal), so a crash mid-replay re-resumes only
+// the not-yet-cleared markers on the next boot, and never double-runs a marker
+// within one boot (each is resumed once). A nil store (open failed) yields an
+// empty set, so this is a safe no-op.
 func resumePending(
 	ctx context.Context, b *bot.Bot, svc *chat.Service, store *pending.FileStore, logger *slog.Logger,
 ) {
 	markers := store.All()
-	if len(markers) == 0 {
+	total := 0
+	for _, q := range markers {
+		total += len(q)
+	}
+	if total == 0 {
 		return
 	}
-	logger.Info("resuming interrupted runs after restart", "count", len(markers))
-	for chatID, m := range markers {
+	logger.Info("resuming interrupted runs after restart", "count", total)
+	for chatID, queue := range markers {
 		id, err := strconv.ParseInt(chatID, 10, 64)
 		if err != nil {
 			logger.Warn("pending: bad chat id; skipping resume", "chat_id", chatID)
 			continue
 		}
-		// Best-effort: turn the frozen "Working…" anchor into a resume notice so the
-		// user knows the run was picked back up. A failed/absent edit never blocks the
-		// resume.
-		if m.AnchorMsgID != "" {
-			if anchor, perr := strconv.Atoi(m.AnchorMsgID); perr == nil {
-				if _, eerr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
-					ChatID:    id,
-					MessageID: anchor,
-					Text:      resumeNotice,
-				}); eerr != nil {
-					logger.Debug("edit dangling anchor on resume", "chat_id", chatID, "error", eerr)
+		for _, m := range queue {
+			// Best-effort: turn the frozen "Working…" anchor into a resume notice so the
+			// user knows the run was picked back up. A failed/absent edit never blocks the
+			// resume.
+			if m.AnchorMsgID != "" {
+				if anchor, perr := strconv.Atoi(m.AnchorMsgID); perr == nil {
+					if _, eerr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
+						ChatID:    id,
+						MessageID: anchor,
+						Text:      resumeNotice,
+					}); eerr != nil {
+						logger.Debug("edit dangling anchor on resume", "chat_id", chatID, "error", eerr)
+					}
 				}
 			}
+			svc.ResumePending(chatID, m)
 		}
-		svc.Inject(chatID, m.Prompt)
 	}
 }
 

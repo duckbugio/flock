@@ -263,56 +263,116 @@ func (f *fakeSessions) sets() []string {
 	return append([]string(nil), f.setLog...)
 }
 
-// fakePending is an in-memory pendingStore for the marker tests. It records the
-// current markers plus a log of Set/Delete calls so a test can assert what was
-// written and when.
+// fakePending is an in-memory pendingStore for the marker tests, modelling the
+// real per-chat FIFO queue + by-id clearing. It records the current queues plus a
+// log of mutating calls so a test can assert what was written and when.
 type fakePending struct {
-	mu     sync.Mutex
-	store  map[ChatID]pending.Marker
-	setLog []ChatID
-	delLog []ChatID
+	mu      sync.Mutex
+	store   map[ChatID][]pending.Marker
+	nextID  int
+	enqLog  []ChatID // chat ids that had a marker enqueued, in order
+	remLog  []ChatID // chat ids whose marker was Remove'd (by id), in order
+	clearLg []ChatID // chat ids whose whole lane was Clear'd, in order
 }
 
 func newFakePending() *fakePending {
-	return &fakePending{store: map[ChatID]pending.Marker{}}
+	return &fakePending{store: map[ChatID][]pending.Marker{}, nextID: 1}
 }
 
-func (f *fakePending) Set(chatID ChatID, marker pending.Marker) error {
+func (f *fakePending) Enqueue(chatID ChatID, marker pending.Marker) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.store[chatID] = marker
-	f.setLog = append(f.setLog, chatID)
+	id := strconv.Itoa(f.nextID)
+	f.nextID++
+	marker.ID = id
+	f.store[chatID] = append(f.store[chatID], marker)
+	f.enqLog = append(f.enqLog, chatID)
+	return id, nil
+}
+
+func (f *fakePending) SetAnchor(chatID ChatID, id, anchorMsgID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.store[chatID] {
+		if f.store[chatID][i].ID == id {
+			f.store[chatID][i].AnchorMsgID = anchorMsgID
+			return nil
+		}
+	}
 	return nil
 }
 
-func (f *fakePending) Delete(chatID ChatID) error {
+func (f *fakePending) Remove(chatID ChatID, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	q := f.store[chatID]
+	for i := range q {
+		if q[i].ID == id {
+			q = append(q[:i], q[i+1:]...)
+			if len(q) == 0 {
+				delete(f.store, chatID)
+			} else {
+				f.store[chatID] = q
+			}
+			f.remLog = append(f.remLog, chatID)
+			return nil
+		}
+	}
+	return nil
+}
+
+func (f *fakePending) Clear(chatID ChatID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.store, chatID)
-	f.delLog = append(f.delLog, chatID)
+	f.clearLg = append(f.clearLg, chatID)
 	return nil
 }
 
-// has reports whether a marker is stored for testChatID (the id every marker test
-// submits under), mirroring fakeSessions.get's param-free style.
+func (f *fakePending) All() map[ChatID][]pending.Marker {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[ChatID][]pending.Marker{}
+	for k, v := range f.store {
+		out[k] = append([]pending.Marker(nil), v...)
+	}
+	return out
+}
+
+// count reports how many markers are queued for testChatID (the id every marker
+// test submits under).
+func (f *fakePending) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.store[testChatID])
+}
+
+// has reports whether any marker is stored for testChatID (the id every marker
+// test submits under), mirroring fakeSessions.get's param-free style.
 func (f *fakePending) has() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	_, ok := f.store[testChatID]
-	return ok
+	return len(f.store[testChatID]) > 0
 }
 
+// get returns the first queued marker for testChatID.
 func (f *fakePending) get() (pending.Marker, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	m, ok := f.store[testChatID]
-	return m, ok
+	q := f.store[testChatID]
+	if len(q) == 0 {
+		return pending.Marker{}, false
+	}
+	return q[0], true
 }
 
-func (f *fakePending) deletes() []ChatID {
+// removes returns the chat ids whose marker was cleared by id (Remove) or whose
+// lane was cleared (Clear), in call order — every path that drops a marker.
+func (f *fakePending) removes() []ChatID {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]ChatID(nil), f.delLog...)
+	out := append([]ChatID(nil), f.remLog...)
+	return append(out, f.clearLg...)
 }
 
 // newTestServiceWithPending builds a Service wired to a pending store (and a fake
@@ -996,10 +1056,11 @@ func TestSessionPreservedOnShutdown(t *testing.T) {
 	}
 }
 
-// TestPendingMarkerSetAtStart asserts the interrupted-run marker is written at run
-// START (before the run can be torn down), capturing the prompt and the anchor id,
-// and is present while the run is still in flight.
-func TestPendingMarkerSetAtStart(t *testing.T) {
+// TestPendingMarkerSetAtSubmit asserts the interrupted-run marker is enqueued at
+// SUBMIT (so a queued run is captured too), carries the prompt and a process id,
+// gains the anchor message id once the anchor is sent, and is present while the
+// run is still in flight.
+func TestPendingMarkerSetAtSubmit(t *testing.T) {
 	fc := newFakeChat()
 	pend := newFakePending()
 	// gate is never closed: the run blocks after SystemInit so we can inspect the
@@ -1037,8 +1098,8 @@ func TestPendingMarkerClearedOnNormalFinish(t *testing.T) {
 		return text == finalAnswer && !stop
 	})
 	waitUntil(t, func() bool { return !pend.has() })
-	if dels := pend.deletes(); len(dels) == 0 || dels[len(dels)-1] != testChatID {
-		t.Fatalf("marker not cleared on normal finish; deletes=%v", dels)
+	if dels := pend.removes(); len(dels) == 0 || dels[len(dels)-1] != testChatID {
+		t.Fatalf("marker not cleared on normal finish; removes=%v", dels)
 	}
 }
 
@@ -1085,7 +1146,7 @@ func TestPendingMarkerSurvivesShutdown(t *testing.T) {
 
 	// The marker must SURVIVE the shutdown so the run is auto-resumed on restart.
 	if !pend.has() {
-		t.Fatalf("marker was cleared on shutdown; deletes=%v — a killed run must stay resumable", pend.deletes())
+		t.Fatalf("marker was cleared on shutdown; removes=%v — a killed run must stay resumable", pend.removes())
 	}
 }
 
@@ -1128,7 +1189,7 @@ func TestPendingMarkerClearedOnTimeout(t *testing.T) {
 
 	svc.Handle(context.Background(), testChatID, 100, "1", "long task")
 
-	// The marker is written at run start while the run is in flight.
+	// The marker is enqueued at submit while the run is in flight.
 	waitUntil(t, func() bool { return pend.has() })
 
 	// The per-run timeout cancels the run (non-shutdown cause), the user sees the
@@ -1141,8 +1202,8 @@ func TestPendingMarkerClearedOnTimeout(t *testing.T) {
 	// ...and the timeout terminal clears the marker (cause is DeadlineExceeded, not
 	// ErrShutdown), so the run is not auto-resumed.
 	waitUntil(t, func() bool { return !pend.has() })
-	if dels := pend.deletes(); len(dels) == 0 || dels[len(dels)-1] != testChatID {
-		t.Fatalf("marker not cleared on timeout; deletes=%v", dels)
+	if dels := pend.removes(); len(dels) == 0 || dels[len(dels)-1] != testChatID {
+		t.Fatalf("marker not cleared on timeout; removes=%v", dels)
 	}
 }
 
@@ -1179,11 +1240,11 @@ func TestPendingMarkerClearedOnSpawnError(t *testing.T) {
 
 	svc.Handle(context.Background(), testChatID, 100, "1", "hello")
 
-	// The spawn-error terminal must clear the marker the run wrote at start. The
-	// marker is set and cleared within the same dispatched run, so assert on the
-	// Delete log (the transient marker may never be observable mid-flight).
+	// The spawn-error terminal must clear the marker enqueued at submit. The marker
+	// is enqueued and cleared around the same dispatched run, so assert on the
+	// remove log (the transient marker may never be observable mid-flight).
 	waitUntil(t, func() bool {
-		dels := pend.deletes()
+		dels := pend.removes()
 		return len(dels) > 0 && dels[len(dels)-1] == testChatID
 	})
 	if pend.has() {
@@ -1213,7 +1274,133 @@ func TestPendingMarkerSurvivesSpawnErrorOnShutdown(t *testing.T) {
 
 	// The marker must SURVIVE so the run is auto-resumed on restart.
 	if !pend.has() {
-		t.Fatalf("marker cleared on shutdown-caused spawn error; deletes=%v — a killed run must stay resumable", pend.deletes())
+		t.Fatalf("marker cleared on shutdown-caused spawn error; removes=%v — a killed run must stay resumable", pend.removes())
+	}
+}
+
+// TestPendingQueuedAndRunningBothSurviveShutdown is the finding-#1 regression: a
+// chat with one RUNNING run (A) and one QUEUED-but-never-started run (B) on the
+// same serial lane must keep BOTH markers when the process is shut down, so BOTH
+// resume on restart. The old per-chat single marker could hold only one of them
+// and a queued job never reached run-start to mark itself, silently losing B.
+func TestPendingQueuedAndRunningBothSurviveShutdown(t *testing.T) {
+	fc := newFakeChat()
+	pend := newFakePending()
+	// gate never closes: A blocks after SystemInit (in flight), so B stays queued
+	// behind it on the serial per-chat lane and never starts.
+	fr := &sessionRunner{emitInit: "s1", emitFinal: "s1", gate: make(chan struct{})}
+	svc, d := newTestServiceWithPending(t, fr, fc, pend)
+
+	// Two submissions on the SAME chat: A runs (and blocks), B queues behind it.
+	svc.Handle(context.Background(), testChatID, 100, "1", "run A")
+	svc.Handle(context.Background(), testChatID, 100, "2", "queue B")
+
+	// Both markers must be enqueued at submit (A in flight, B still queued).
+	waitUntil(t, func() bool { return pend.count() == 2 })
+
+	// Short drain window: the gated A never finishes (cause ErrShutdown), B never
+	// starts, so neither reaches a clean terminal.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_ = d.Shutdown(shutdownCtx)
+
+	// BOTH markers must survive so BOTH runs auto-resume on restart.
+	if got := pend.count(); got != 2 {
+		t.Fatalf("after shutdown queue len = %d, want 2 (both queued+running must survive); removes=%v", got, pend.removes())
+	}
+	prompts := map[string]bool{}
+	for _, m := range pend.All()[testChatID] {
+		prompts[m.Prompt] = true
+	}
+	if !prompts["run A"] || !prompts["queue B"] {
+		t.Fatalf("surviving markers = %v, want both 'run A' and 'queue B'", prompts)
+	}
+}
+
+// TestPendingSupersedeDoesNotLoseSuccessor asserts an edit-supersede (Cancel +
+// clear-lane + enqueue the new run) leaves exactly the NEW run's marker, and the
+// cancelled run's by-id clear cannot remove that successor. This is the
+// concurrency property: clear-by-id means a stale run never drops a newer marker.
+func TestPendingSupersedeDoesNotLoseSuccessor(t *testing.T) {
+	fc := newFakeChat()
+	pend := newFakePending()
+	// The first run blocks after SystemInit so it is genuinely in flight when the
+	// edit supersedes it.
+	fr := &sessionRunner{emitInit: "s1", emitFinal: "s1", gate: make(chan struct{})}
+	svc, d := newTestServiceWithPending(t, fr, fc, pend)
+	defer d.Close()
+
+	// Original message (msg id 1) starts a run and is recorded as the chat's latest.
+	svc.Handle(context.Background(), testChatID, 100, "1", "original")
+	waitUntil(t, func() bool { return pend.has() })
+
+	// Edit that same message: supersede cancels the in-flight run, clears the lane,
+	// and enqueues the new run.
+	svc.HandleEdit(context.Background(), testChatID, 100, "1", "edited")
+
+	// The new run's marker must be the one that survives; the cancelled run's by-id
+	// clear must not remove it. Eventually the queue holds exactly the edited run.
+	waitUntil(t, func() bool {
+		q := pend.All()[testChatID]
+		return len(q) == 1 && q[0].Prompt == "edited"
+	})
+}
+
+// TestPendingStopClearsLane asserts /stop (via svc.Stop) purges the WHOLE lane's
+// markers — both the running run and any queued successors — so nothing the user
+// deliberately stopped is auto-resumed.
+func TestPendingStopClearsLane(t *testing.T) {
+	fc := newFakeChat()
+	pend := newFakePending()
+	fr := &sessionRunner{emitInit: "s1", emitFinal: "s1", gate: make(chan struct{})}
+	svc, d := newTestServiceWithPending(t, fr, fc, pend)
+	defer d.Close()
+
+	// A runs (blocks), B queues behind it — two markers on the lane.
+	svc.Handle(context.Background(), testChatID, 100, "1", "run A")
+	svc.Handle(context.Background(), testChatID, 100, "2", "queue B")
+	waitUntil(t, func() bool { return pend.count() == 2 })
+
+	// Stop the running run: it cancels the lane AND clears every marker.
+	waitUntil(t, func() bool { return svc.Stop("1") })
+
+	waitUntil(t, func() bool { return pend.count() == 0 })
+}
+
+// TestResumePendingReusesIDNoDuplicate asserts ResumePending replays a marker by
+// REUSING its existing id (not enqueuing a fresh one), so the resumed run clears
+// the SAME on-disk marker on its clean terminal and never leaves a duplicate. It
+// mirrors the startup replay: the store already holds the persisted markers.
+func TestResumePendingReusesIDNoDuplicate(t *testing.T) {
+	fc := newFakeChat()
+	pend := newFakePending()
+	fr := &fakeRunner{events: []claude.Event{
+		{Type: claude.SystemInit, SessionID: "s1"},
+		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer, SessionID: "s1"}},
+	}}
+	svc, d := newTestServiceWithPending(t, fr, fc, pend)
+	defer d.Close()
+
+	// Seed two persisted markers (as if left behind by a deploy), in order.
+	idA, _ := pend.Enqueue(testChatID, pending.Marker{Prompt: "A", StartedAt: 1})
+	idB, _ := pend.Enqueue(testChatID, pending.Marker{Prompt: "B", StartedAt: 2})
+
+	// Replay both in order, exactly as resumePending does — reusing their ids.
+	for _, m := range pend.All()[testChatID] {
+		svc.ResumePending(testChatID, m)
+	}
+
+	// Each resumed run clears its OWN marker by id on its clean terminal; no fresh
+	// marker is enqueued, so the lane drains to empty (no duplicate left behind).
+	waitUntil(t, func() bool { return pend.count() == 0 })
+
+	// The runs reused the seeded ids — no fresh ids were minted at replay (Enqueue
+	// was called exactly twice, by the seed above).
+	if got := len(pend.enqLog); got != 2 {
+		t.Fatalf("Enqueue called %d times, want 2 (replay must reuse ids, not enqueue)", got)
+	}
+	if idA == idB {
+		t.Fatalf("seeded ids collided: %q", idA)
 	}
 }
 
