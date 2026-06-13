@@ -8,6 +8,7 @@ package chat
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -136,6 +137,11 @@ type Progress struct {
 	elapsed  func() time.Duration
 	ring     []string
 	ringSize int
+	// baseDir is the run's working directory. File-path tool details are shown
+	// relative to it (see repoRelPath) so the progress frame reads
+	// "📖 Read · roost/web/…" instead of the noisy absolute "/workspace/chat_…/…".
+	// An empty baseDir disables relativization (paths are shown unchanged).
+	baseDir string
 	// total counts every activity line ever pushed (not no-op/ignored events), so
 	// Frame can show how many lines have scrolled off above the visible window.
 	total int
@@ -144,14 +150,16 @@ type Progress struct {
 // NewProgress returns a Progress whose header counter reads from elapsed, the
 // time since the run started. Injecting elapsed (rather than calling time.Now
 // internally) keeps Frame deterministic for tests. ringSize <= 0 selects the
-// default.
-func NewProgress(elapsed func() time.Duration, ringSize int) *Progress {
+// default. baseDir is the run's working directory used to shorten file-path tool
+// details to repo-relative form (empty disables it; see repoRelPath).
+func NewProgress(elapsed func() time.Duration, ringSize int, baseDir string) *Progress {
 	if ringSize <= 0 {
 		ringSize = defaultRingSize
 	}
 	return &Progress{
 		elapsed:  elapsed,
 		ringSize: ringSize,
+		baseDir:  baseDir,
 		ring:     make([]string, 0, ringSize),
 	}
 }
@@ -161,7 +169,7 @@ func NewProgress(elapsed func() time.Duration, ringSize int) *Progress {
 // Final / FinalError to render the terminal message. It reports whether the
 // activity ring changed, so callers can skip a redundant edit.
 func (p *Progress) Observe(e claude.Event) bool {
-	line, ok := activityLine(e)
+	line, ok := activityLine(e, p.baseDir)
 	if !ok {
 		return false
 	}
@@ -174,7 +182,7 @@ func (p *Progress) Observe(e claude.Event) bool {
 // upper bound (recentSnippetMax) when stored — enough for any ring position — and
 // Frame() re-caps it tighter per recency. The emoji prefix is added on top of the
 // text budget, so it is never split or counted against the cap.
-func activityLine(e claude.Event) (string, bool) {
+func activityLine(e claude.Event, baseDir string) (string, bool) {
 	switch e.Type {
 	case claude.ToolUse:
 		tool := e.Tool
@@ -182,7 +190,7 @@ func activityLine(e claude.Event) (string, bool) {
 			tool = "tool"
 		}
 		line := tool
-		if detail := toolDetail(tool, e.ToolInput); detail != "" {
+		if detail := toolDetail(tool, e.ToolInput, baseDir); detail != "" {
 			line += toolDetailSeparator + detail
 		}
 		return toolLinePrefix(tool) + truncateRunes(line, recentSnippetMax), true
@@ -209,8 +217,9 @@ func activityLine(e claude.Event) (string, bool) {
 // best-effort and purely cosmetic: any empty, malformed, or unrecognized input
 // yields "" so the caller falls back to the bare tool name. The chosen value is
 // whitespace-collapsed and truncated to toolDetailMax runes so one long command or
-// path can't dominate the line.
-func toolDetail(tool string, input json.RawMessage) string {
+// path can't dominate the line. baseDir (the run's working dir) shortens file-path
+// details to repo-relative form; see repoRelPath.
+func toolDetail(tool string, input json.RawMessage, baseDir string) string {
 	if len(input) == 0 {
 		return ""
 	}
@@ -256,6 +265,13 @@ func toolDetail(tool string, input json.RawMessage) string {
 		raw = strField("subagent_type")
 	}
 
+	// For the file-path tools, shorten the absolute path to repo-relative BEFORE
+	// whitespace-collapse and truncation, so the budget is spent on the meaningful
+	// tail (repo/dir/file) rather than the constant "/workspace/chat_…" prefix.
+	if key == "file_path" {
+		raw = repoRelPath(raw, baseDir)
+	}
+
 	detail := collapseWhitespace(raw)
 	// Redact obvious secret-bearing fragments BEFORE truncation, but ONLY for the
 	// CLI-shaped fields that can actually carry a credential: a shell command or a
@@ -270,6 +286,33 @@ func toolDetail(tool string, input json.RawMessage) string {
 		return ""
 	}
 	return truncateRunes(detail, toolDetailMax)
+}
+
+// repoRelPath shortens an absolute file path to one relative to baseDir (the run's
+// working directory) for the cosmetic progress line, turning the noisy
+// "/workspace/chat_123/roost/web/src/App.tsx" into "roost/web/src/App.tsx" — the
+// repo segment is kept since baseDir is the workspace root, not the repo root. It
+// is deliberately conservative and never fabricates "../.." noise: when the path
+// can't be cleanly expressed under baseDir it returns the input unchanged. The
+// fallbacks (all return path as-is): an empty baseDir (relativization disabled), a
+// filepath.Rel error, or a result that escapes baseDir (starts with ".."). Paths in
+// this codebase are POSIX, so filepath.Rel on linux already yields '/' separators.
+func repoRelPath(path, baseDir string) string {
+	if baseDir == "" {
+		return path
+	}
+	rel, err := filepath.Rel(baseDir, path)
+	if err != nil {
+		return path
+	}
+	// A leading ".." means the path is outside baseDir (e.g. a sibling dir or an
+	// absolute path that doesn't share the prefix); keep the original full path
+	// rather than show "../../something". A bare "." means the path IS baseDir (no
+	// real file_path is the workspace root, but guard it so we never render "·  .").
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return path
+	}
+	return rel
 }
 
 // secretRedactions masks common secret-bearing fragments in a tool detail before

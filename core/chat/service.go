@@ -345,7 +345,7 @@ func (s *Service) run(ctx context.Context, chatID ChatID, userID int64, prompt s
 	}
 
 	start := s.nowFunc()
-	prog := NewProgress(func() time.Duration { return s.nowFunc().Sub(start) }, 0)
+	prog := NewProgress(func() time.Duration { return s.nowFunc().Sub(start) }, 0, workdir)
 
 	// The anchor: a persistent message that carries the Stop button (a draft can't)
 	// and is later edited into the final answer. It stays static while live progress
