@@ -1089,6 +1089,63 @@ func TestPendingMarkerSurvivesShutdown(t *testing.T) {
 	}
 }
 
+// newTestServiceWithPendingTimeout builds a Service wired to a pending store with
+// a per-run timeout, for the timeout marker-clear test. It mirrors
+// newTestServiceWithPending but injects a Timeout so a gated run hits the per-run
+// deadline (cause context.DeadlineExceeded, NOT dispatch.ErrShutdown).
+func newTestServiceWithPendingTimeout(
+	t *testing.T, r claude.Runner, c Transport, p pendingStore, timeout time.Duration,
+) (*Service, *dispatch.Dispatcher) {
+	t.Helper()
+	d := dispatch.New(4)
+	s := New(Config{
+		Runner:     r,
+		Transport:  c,
+		Dispatcher: d,
+		Workspace:  &fakeWorkspace{},
+		Pending:    p,
+		Timeout:    timeout,
+		Logger:     slog.New(slog.DiscardHandler),
+	})
+	s.tick = 5 * time.Millisecond
+	return s, d
+}
+
+// TestPendingMarkerClearedOnTimeout asserts a run that hits its per-run timeout
+// (ctx deadline expires for a non-shutdown reason — cause
+// context.DeadlineExceeded, NOT dispatch.ErrShutdown) reaches finish and clears
+// its marker, so a timed-out run is NOT auto-resumed. This is the symmetric
+// counterpart to the normal-finish, Stop, and spawn-error clear tests, and the
+// inverse of TestPendingMarkerSurvivesShutdown (the one terminal that preserves it).
+func TestPendingMarkerClearedOnTimeout(t *testing.T) {
+	fc := newFakeChat()
+	pend := newFakePending()
+	// gate never closes: the run blocks after SystemInit until the per-run timeout
+	// fires and cancels it with cause context.DeadlineExceeded.
+	fr := &sessionRunner{emitInit: "s1", emitFinal: "s1", gate: make(chan struct{})}
+	svc, d := newTestServiceWithPendingTimeout(t, fr, fc, pend, 30*time.Millisecond)
+	defer d.Close()
+
+	svc.Handle(context.Background(), testChatID, 100, "1", "long task")
+
+	// The marker is written at run start while the run is in flight.
+	waitUntil(t, func() bool { return pend.has() })
+
+	// The per-run timeout cancels the run (non-shutdown cause), the user sees the
+	// terminal "Stopped" notice...
+	waitUntil(t, func() bool {
+		text, stop := fc.snapshot()
+		return strings.Contains(text, "Stopped") && !stop
+	})
+
+	// ...and the timeout terminal clears the marker (cause is DeadlineExceeded, not
+	// ErrShutdown), so the run is not auto-resumed.
+	waitUntil(t, func() bool { return !pend.has() })
+	if dels := pend.deletes(); len(dels) == 0 || dels[len(dels)-1] != testChatID {
+		t.Fatalf("marker not cleared on timeout; deletes=%v", dels)
+	}
+}
+
 // spawnErrorRunner fails to start: Run returns a non-nil error and never emits
 // any events, modelling the CLI failing to spawn. When block is non-nil Run
 // waits on it (or ctx.Done) before returning the error, letting a test cancel

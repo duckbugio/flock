@@ -286,6 +286,15 @@ func (d *Dispatcher) Shutdown(ctx context.Context) error {
 	// give them a brief, bounded grace to deliver a terminal/persist a marker before
 	// the caller exits the process. The grace is independent of the (now-expired)
 	// drain ctx so a survivor's "Stopped"/marker write isn't itself cut off.
+	//
+	// Order matters: rootStop sets the shutdown cause (ErrShutdown) BEFORE the
+	// per-chat cancels below, so every in-flight survivor observes ErrShutdown and
+	// keeps its interrupted-run marker to drive auto-resume on restart. A user Stop
+	// whose own per-chat cancel happens to land in the narrow window just before
+	// this rootStop is instead seen as a clean context.Canceled (marker cleared, no
+	// resume). That race is intentionally left unguarded: it is vanishingly rare,
+	// user-initiated, and resolves in the safe direction — a run the user just
+	// stopped should not auto-resume — so no locking or reordering is warranted.
 	d.rootStop(ErrShutdown)
 	for _, q := range chats {
 		q.mu.Lock()
