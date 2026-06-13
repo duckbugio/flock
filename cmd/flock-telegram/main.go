@@ -882,13 +882,15 @@ func resumePending(
 		// Best-effort: turn the frozen "Working…" anchor into a resume notice so the
 		// user knows the run was picked back up. A failed/absent edit never blocks the
 		// resume.
-		if anchor, perr := strconv.Atoi(m.AnchorMsgID); perr == nil && m.AnchorMsgID != "" {
-			if _, eerr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
-				ChatID:    id,
-				MessageID: anchor,
-				Text:      resumeNotice,
-			}); eerr != nil {
-				logger.Debug("edit dangling anchor on resume", "chat_id", chatID, "error", eerr)
+		if m.AnchorMsgID != "" {
+			if anchor, perr := strconv.Atoi(m.AnchorMsgID); perr == nil {
+				if _, eerr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
+					ChatID:    id,
+					MessageID: anchor,
+					Text:      resumeNotice,
+				}); eerr != nil {
+					logger.Debug("edit dangling anchor on resume", "chat_id", chatID, "error", eerr)
+				}
 			}
 		}
 		svc.Inject(chatID, m.Prompt)

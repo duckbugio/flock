@@ -1089,6 +1089,77 @@ func TestPendingMarkerSurvivesShutdown(t *testing.T) {
 	}
 }
 
+// spawnErrorRunner fails to start: Run returns a non-nil error and never emits
+// any events, modelling the CLI failing to spawn. When block is non-nil Run
+// waits on it (or ctx.Done) before returning the error, letting a test cancel
+// the run's context (e.g. via Shutdown) first so the failure is observed under a
+// shutdown cause.
+type spawnErrorRunner struct {
+	err   error
+	block chan struct{}
+}
+
+func (r *spawnErrorRunner) Run(ctx context.Context, _ string, _ claude.Options) (<-chan claude.Event, error) {
+	if r.block != nil {
+		select {
+		case <-r.block:
+		case <-ctx.Done():
+		}
+	}
+	return nil, r.err
+}
+
+// TestPendingMarkerClearedOnSpawnError asserts a run whose CLI fails to spawn
+// (runner.Run returns an error) clears its marker — a clean, non-shutdown
+// terminal that returns before finish, so it must NOT be auto-resumed. A
+// persistent spawn error would otherwise re-resume and re-leak every boot.
+func TestPendingMarkerClearedOnSpawnError(t *testing.T) {
+	fc := newFakeChat()
+	pend := newFakePending()
+	fr := &spawnErrorRunner{err: errors.New("spawn failed")}
+	svc, d := newTestServiceWithPending(t, fr, fc, pend)
+	defer d.Close()
+
+	svc.Handle(context.Background(), testChatID, 100, "1", "hello")
+
+	// The spawn-error terminal must clear the marker the run wrote at start. The
+	// marker is set and cleared within the same dispatched run, so assert on the
+	// Delete log (the transient marker may never be observable mid-flight).
+	waitUntil(t, func() bool {
+		dels := pend.deletes()
+		return len(dels) > 0 && dels[len(dels)-1] == testChatID
+	})
+	if pend.has() {
+		t.Fatalf("marker still present after spawn error; it must be cleared")
+	}
+}
+
+// TestPendingMarkerSurvivesSpawnErrorOnShutdown asserts a spawn failure caused by
+// the dispatcher SHUTTING DOWN keeps its marker so the next startup auto-resumes
+// it — the spawn-error clear is gated exactly like finish on the shutdown cause.
+func TestPendingMarkerSurvivesSpawnErrorOnShutdown(t *testing.T) {
+	fc := newFakeChat()
+	pend := newFakePending()
+	// block never closes: Run waits until Shutdown cancels its context (cause
+	// ErrShutdown), then returns the error — a shutdown-caused start failure.
+	fr := &spawnErrorRunner{err: errors.New("spawn failed"), block: make(chan struct{})}
+	svc, d := newTestServiceWithPending(t, fr, fc, pend)
+
+	svc.Handle(context.Background(), testChatID, 100, "1", "resume me")
+	waitUntil(t, func() bool { return pend.has() })
+
+	// Short drain window: the gated Run never returns until cancelled, so Shutdown
+	// cancels it with the ErrShutdown cause after the deadline.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_ = d.Shutdown(shutdownCtx)
+
+	// The marker must SURVIVE so the run is auto-resumed on restart.
+	if !pend.has() {
+		t.Fatalf("marker cleared on shutdown-caused spawn error; deletes=%v — a killed run must stay resumable", pend.deletes())
+	}
+}
+
 // errorResultRunner emits a SystemInit (so the session id is captured) followed
 // by a terminal Result whose IsError flag is configurable. It lets the
 // stale-session self-heal tests drive an is_error vs a clean Result. When init is

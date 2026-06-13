@@ -336,8 +336,9 @@ func (s *Service) run(ctx context.Context, chatID ChatID, userID int64, prompt s
 	// workspace resolves and BEFORE the run can be torn down — so a run killed at
 	// the drain deadline (or even before SystemInit) always leaves a resumable
 	// prompt behind. The anchor id is not known yet (the anchor is sent below); it
-	// is filled in once available. finish clears the marker on every terminal path,
-	// and run-start is the ONLY writer, so a finished/stopped run is never resumed.
+	// is filled in once available. Every terminal that wrote a marker clears it on a
+	// clean terminal (finish, or clearPendingUnlessShutdown on an early return), and
+	// run-start is the ONLY writer, so a finished/stopped run is never resumed.
 	startedAt := s.nowFunc()
 	s.markPending(chatID, pending.Marker{Prompt: prompt, StartedAt: startedAt.UnixMilli()})
 
@@ -367,6 +368,10 @@ func (s *Service) run(ctx context.Context, chatID ChatID, userID int64, prompt s
 	events, err := s.runner.Run(ctx, prompt, opts)
 	if err != nil {
 		s.log.Error("start run", "error", err)
+		// A spawn failure is a clean (non-shutdown) terminal that never reaches
+		// finish, so clear the marker we wrote above — gated exactly like finish so a
+		// shutdown-caused start failure still keeps its marker and auto-resumes.
+		s.clearPendingUnlessShutdown(ctx, chatID)
 		if _, sErr := s.chat.Send(ctx, chatID, FinalError(err), "", true); sErr != nil {
 			s.log.Error("send start error", "error", sErr)
 		}
@@ -592,6 +597,20 @@ func (s *Service) clearPending(chatID ChatID) {
 	}
 }
 
+// clearPendingUnlessShutdown clears chatID's marker on a CLEAN terminal but
+// keeps it when the terminal was caused by the dispatcher SHUTTING DOWN the
+// process (drain-deadline cancel / Close): such a run was killed by a
+// deploy/restart, so its marker must SURVIVE to drive the auto-resume. The two
+// are told apart by the cancellation cause — a per-chat Stop/supersede cancels
+// with context.Canceled, a shutdown with dispatch.ErrShutdown. Every terminal
+// that wrote a marker and does NOT route through finish must call this so a
+// finished/stopped/spawn-failed run is never resumed.
+func (s *Service) clearPendingUnlessShutdown(ctx context.Context, chatID ChatID) {
+	if !errors.Is(context.Cause(ctx), dispatch.ErrShutdown) {
+		s.clearPending(chatID)
+	}
+}
+
 // finish renders the terminal message and replaces the progress message with it
 // (chunked when the answer exceeds the platform's message size limit).
 func (s *Service) finish(
@@ -600,19 +619,13 @@ func (s *Service) finish(
 	// Use a background context for delivery: the run ctx may be cancelled by Stop
 	// or shutdown, but the final message should still reach the user.
 	deliverCtx := context.WithoutCancel(ctx)
-	// Clear the interrupted-run marker on every CLEAN terminal (normal Result,
+	// Clear the interrupted-run marker on this CLEAN terminal (normal Result,
 	// RunError, timeout, user Stop / /stop / edit-supersede) so a finished or
-	// deliberately stopped run is NOT auto-resumed after a later restart. The ONE
-	// exception is a terminal caused by the dispatcher SHUTTING DOWN the process
-	// (drain-deadline cancel / Close): that run was killed by a deploy/restart, so
-	// its marker must SURVIVE to drive the auto-resume — we keep it and let the next
-	// startup re-inject. The two are told apart by the cancellation cause: a
-	// per-chat Stop/supersede cancels with context.Canceled, a shutdown with
-	// dispatch.ErrShutdown. Run-start is the only writer, so a cleared run stays
-	// cleared.
-	if !errors.Is(context.Cause(ctx), dispatch.ErrShutdown) {
-		s.clearPending(chatID)
-	}
+	// deliberately stopped run is NOT auto-resumed after a later restart, while a
+	// shutdown-caused terminal keeps its marker to drive the auto-resume. See
+	// clearPendingUnlessShutdown. Run-start is the only writer, so a cleared run
+	// stays cleared.
+	s.clearPendingUnlessShutdown(ctx, chatID)
 	// Clear the live draft preview (empty text) so it doesn't linger beside the
 	// persisted answer. Best-effort; harmless if no draft was ever streamed.
 	_ = s.chat.StreamDraft(deliverCtx, chatID, runID, "", false)
