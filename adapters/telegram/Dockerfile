@@ -40,10 +40,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 # the SAME single `apt-get update`, on purpose. An extra apt source / a second
 # `apt-get update` previously tipped the QEMU-emulated arm64 build over its memory
 # limit (OOM), so we do not add one. Version is intentionally unpinned (apt latest).
+# `make` ships here too (it lives in the base Debian repos) so the team can invoke a
+# project's own Makefile targets; the other dev-experience runners (task, just) come
+# from release tarballs below since they are not in the Debian repos.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg git ripgrep ffmpeg chromium; \
+        ca-certificates curl gnupg git ripgrep ffmpeg chromium make; \
     install -m 0755 -d /etc/apt/keyrings; \
     curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc; \
     chmod a+r /etc/apt/keyrings/docker.asc; \
@@ -68,6 +71,40 @@ RUN set -eux; \
     tar -xzf /tmp/gh.tgz -C /tmp; \
     install -m 0755 "/tmp/gh_${ver}_linux_${arch}/bin/gh" /usr/local/bin/gh; \
     rm -rf /tmp/gh.tgz "/tmp/gh_${ver}_linux_${arch}"
+
+# Task (go-task) runner so the team can drive a project's own Taskfile.yml targets
+# (e.g. `task lint`, `task test`). Installed from the official GitHub release tarball
+# for the SAME reason as `gh` above: an apt source for it would add a second
+# `apt-get update` that OOMs the QEMU-emulated arm64 build. The tarball ships the
+# `task` binary at its root; arch comes from dpkg (amd64/arm64). Latest release with
+# a pinned fallback if the GitHub API is unreachable/rate-limited at build time.
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    ver="$(curl -fsSL https://api.github.com/repos/go-task/task/releases/latest 2>/dev/null | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')"; \
+    [ -n "$ver" ] || ver="3.40.0"; \
+    curl -fsSL "https://github.com/go-task/task/releases/download/v${ver}/task_linux_${arch}.tar.gz" -o /tmp/task.tgz; \
+    tar -xzf /tmp/task.tgz -C /tmp task; \
+    install -m 0755 /tmp/task /usr/local/bin/task; \
+    rm -f /tmp/task.tgz /tmp/task
+
+# just runner so the team can drive a project's own justfile recipes (e.g. `just
+# check`). Same tarball-not-apt rationale as `gh`/`task` above (arm64 OOM avoidance).
+# just's release assets are named by LLVM target triple, NOT dpkg arch, so we map
+# amd64 -> x86_64-unknown-linux-musl and arm64 -> aarch64-unknown-linux-musl; the
+# tag carries no leading `v`. The tarball ships the `just` binary at its root. Latest
+# release with a pinned fallback if the GitHub API is unreachable at build time.
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) triple="x86_64-unknown-linux-musl" ;; \
+        arm64) triple="aarch64-unknown-linux-musl" ;; \
+        *) echo "unsupported arch for just: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    ver="$(curl -fsSL https://api.github.com/repos/casey/just/releases/latest 2>/dev/null | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p')"; \
+    [ -n "$ver" ] || ver="1.36.0"; \
+    curl -fsSL "https://github.com/casey/just/releases/download/${ver}/just-${ver}-${triple}.tar.gz" -o /tmp/just.tgz; \
+    tar -xzf /tmp/just.tgz -C /tmp just; \
+    install -m 0755 /tmp/just /usr/local/bin/just; \
+    rm -f /tmp/just.tgz /tmp/just
 
 # `shot` screenshot helper: the Node implementation (driving system chromium via
 # puppeteer-core) lives at /opt/duck/shotter/shot.mjs; the thin wrapper goes on
