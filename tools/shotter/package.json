@@ -1,0 +1,10 @@
+{
+  "name": "duck-shotter",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local dependencies for the `shot` screenshot helper baked into the runtime images. puppeteer-core drives the apt-installed system Chromium (no bundled browser is downloaded).",
+  "type": "module",
+  "dependencies": {
+    "puppeteer-core": "25.1.0"
+  }
+}

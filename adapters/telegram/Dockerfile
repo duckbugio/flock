@@ -50,7 +50,7 @@ RUN set -eux; \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list; \
     apt-get update; \
     apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin; \
-    npm install -g @anthropic-ai/claude-code puppeteer-core; \
+    npm install -g @anthropic-ai/claude-code; \
     npm cache clean --force; \
     apt-get clean; rm -rf /var/lib/apt/lists/*
 
@@ -71,11 +71,21 @@ RUN set -eux; \
 
 # `shot` screenshot helper: the Node implementation (driving system chromium via
 # puppeteer-core) lives at /opt/duck/shotter/shot.mjs; the thin wrapper goes on
-# PATH at /usr/local/bin/shot. Both are root-owned + world-executable/readable so
-# the uid 1000 `claude` runtime user can run them as a system tool.
-COPY tools/shotter/shot.mjs /opt/duck/shotter/shot.mjs
+# PATH at /usr/local/bin/shot. puppeteer-core is installed as a LOCAL dependency in
+# the script's own directory (NOT global) because shot.mjs is an ES module, and ESM
+# `import` resolution walks up from the script dir / ignores NODE_PATH — so the
+# package must live in /opt/duck/shotter/node_modules to resolve. Everything is
+# root-owned + world-readable/executable so the uid 1000 `claude` runtime user can
+# run it as a system tool. The COPY/npm run as root at build time; chromium runs as
+# the unprivileged user at runtime.
+COPY tools/shotter/shot.mjs tools/shotter/package.json tools/shotter/package-lock.json /opt/duck/shotter/
 COPY tools/shotter/shot /usr/local/bin/shot
-RUN chmod 0755 /usr/local/bin/shot; chmod 0644 /opt/duck/shotter/shot.mjs
+RUN set -eux; \
+    npm install --omit=dev --prefix /opt/duck/shotter; \
+    npm cache clean --force; \
+    chmod 0755 /usr/local/bin/shot; \
+    chmod 0644 /opt/duck/shotter/shot.mjs; \
+    chmod -R a+rX /opt/duck/shotter
 
 # Non-root runtime user; pre-create writable dirs so named volumes inherit uid 1000.
 # /app/data is kept for volume-layout parity with the previous image. The node base
