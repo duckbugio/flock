@@ -118,7 +118,7 @@ RUN set -eux; \
 COPY tools/shotter/shot.mjs tools/shotter/package.json tools/shotter/package-lock.json /opt/duck/shotter/
 COPY tools/shotter/shot /usr/local/bin/shot
 RUN set -eux; \
-    npm install --omit=dev --prefix /opt/duck/shotter; \
+    npm ci --omit=dev --prefix /opt/duck/shotter; \
     npm cache clean --force; \
     chmod 0755 /usr/local/bin/shot; \
     chmod 0644 /opt/duck/shotter/shot.mjs; \

@@ -55,10 +55,10 @@ let browser;
 try {
   browser = await puppeteer.launch({
     executablePath,
-    headless: 'new',
+    headless: true,
     // Container-safe flags: no sandbox (we run unprivileged in a container) and
     // do not rely on /dev/shm, which is tiny by default and crashes Chromium.
-    args: ['--no-sandbox', '--disable-dev-shm-usage', '--headless=new'],
+    args: ['--no-sandbox', '--disable-dev-shm-usage'],
   });
 
   const page = await browser.newPage();
@@ -77,7 +77,10 @@ try {
           const timer = setInterval(() => {
             window.scrollTo(0, y);
             y += step;
-            if (y >= document.body.scrollHeight + window.innerHeight) {
+            const docHeight =
+              document.body?.scrollHeight ??
+              document.documentElement.scrollHeight;
+            if (y >= docHeight + window.innerHeight) {
               clearInterval(timer);
               window.scrollTo(0, 0);
               resolve();
