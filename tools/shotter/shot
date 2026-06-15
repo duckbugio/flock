@@ -1,0 +1,15 @@
+#!/bin/sh
+# shot — on-PATH wrapper around the Node screenshot helper.
+#
+# Installed at /usr/local/bin/shot in the runtime images. The implementation
+# lives at /opt/duck/shotter/shot.mjs and drives the apt-installed system
+# Chromium via puppeteer-core (installed globally). NODE_PATH points at the
+# global module dir so the script resolves puppeteer-core regardless of the
+# caller's cwd or uid.
+set -eu
+
+SHOT_HOME="${SHOT_HOME:-/opt/duck/shotter}"
+NODE_PATH="${NODE_PATH:-$(npm root -g)}"
+export NODE_PATH
+
+exec node "$SHOT_HOME/shot.mjs" "$@"

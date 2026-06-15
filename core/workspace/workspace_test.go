@@ -217,15 +217,18 @@ func TestRenderedClaudeMDHasOutboxSection(t *testing.T) {
 		t.Fatalf("read CLAUDE.md: %v", err)
 	}
 	got := string(body)
-	for _, want := range []string{"## Sending files to the user", "outbox/", "outbox/sent/"} {
+	for _, want := range []string{
+		"## Sending files to the user", "outbox/", "outbox/sent/",
+		"## Taking webpage screenshots", "shot <url> <out.png>", "--full",
+	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("rendered CLAUDE.md missing %q; got:\n%s", want, got)
 		}
 	}
 
 	// The template FILE on disk must be unchanged (byte-identical) and must NOT
-	// itself contain the outbox section — the append happens only to the rendered
-	// output.
+	// itself contain the appended sections — the append happens only to the
+	// rendered output.
 	after, err := os.ReadFile(r.TemplatePath)
 	if err != nil {
 		t.Fatalf("read template after: %v", err)
@@ -235,6 +238,9 @@ func TestRenderedClaudeMDHasOutboxSection(t *testing.T) {
 	}
 	if strings.Contains(string(after), "## Sending files to the user") {
 		t.Fatalf("template file must not contain the outbox section")
+	}
+	if strings.Contains(string(after), "## Taking webpage screenshots") {
+		t.Fatalf("template file must not contain the screenshot section")
 	}
 }
 

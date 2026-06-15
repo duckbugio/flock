@@ -112,6 +112,25 @@ in ` + "`outbox/`" + ` is sent to the user as a Telegram document and archived
 under ` + "`outbox/sent/`" + `. Do not put files you want delivered inside a repo.
 `
 
+// shotConvention is appended to every rendered CLAUDE.md so the dev-team agents
+// know the runtime image ships a screenshot tool. Like outboxConvention it lives
+// here (not in the protected template) so the template file on disk stays
+// byte-identical.
+const shotConvention = `
+
+## Taking webpage screenshots
+
+The runtime image ships a ` + "`shot`" + ` command (on PATH) that screenshots a web
+page using the bundled system Chromium:
+
+    shot <url> <out.png> [--full] [--width=N] [--height=N] [--wait=ms]
+
+Use ` + "`--full`" + ` for a full-page capture (it autoscrolls first to load lazy
+content). Writing the PNG into ` + "`outbox/`" + ` delivers it to the user in chat
+(see the outbox convention above). Known limit: pages that require authentication —
+e.g. a Telegram Mini App that needs ` + "`initData`" + ` — will not render.
+`
+
 // renderClaudeMD reads the template, substitutes the three configured
 // placeholders, appends the outbox convention, drops any stale CLAUDE.md, and
 // writes the fresh file.
@@ -130,9 +149,10 @@ func (r *Renderer) renderClaudeMD(ws string) error {
 		"${GIT_HOST}", r.GitHost,
 	).Replace(string(raw))
 
-	// Append the outbox convention to the RENDERED output (after substitution),
-	// keeping the protected template file on disk byte-identical (AC6).
+	// Append the outbox + screenshot conventions to the RENDERED output (after
+	// substitution), keeping the protected template file on disk byte-identical.
 	rendered += outboxConvention
+	rendered += shotConvention
 
 	dst := filepath.Join(ws, "CLAUDE.md")
 	// Drop a possibly stale/root-owned stub so the write recreates it fresh,

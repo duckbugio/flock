@@ -37,17 +37,22 @@ FROM node:24-bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# chromium is the Debian system browser that backs the `shot` screenshot helper
+# (see /opt/duck/shotter below); it is installed in THIS existing apt layer, under
+# the SAME single `apt-get update`, on purpose. An extra apt source / a second
+# `apt-get update` previously tipped the QEMU-emulated arm64 build over its memory
+# limit (OOM), so we do not add one. Version is intentionally unpinned (apt latest).
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg git ripgrep ffmpeg; \
+        ca-certificates curl gnupg git ripgrep ffmpeg chromium; \
     install -m 0755 -d /etc/apt/keyrings; \
     curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc; \
     chmod a+r /etc/apt/keyrings/docker.asc; \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list; \
     apt-get update; \
     apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin; \
-    npm install -g @anthropic-ai/claude-code; \
+    npm install -g @anthropic-ai/claude-code puppeteer-core; \
     npm cache clean --force; \
     apt-get clean; rm -rf /var/lib/apt/lists/*
 
@@ -65,6 +70,14 @@ RUN set -eux; \
     tar -xzf /tmp/gh.tgz -C /tmp; \
     install -m 0755 "/tmp/gh_${ver}_linux_${arch}/bin/gh" /usr/local/bin/gh; \
     rm -rf /tmp/gh.tgz "/tmp/gh_${ver}_linux_${arch}"
+
+# `shot` screenshot helper: the Node implementation (driving system chromium via
+# puppeteer-core) lives at /opt/duck/shotter/shot.mjs; the thin wrapper goes on
+# PATH at /usr/local/bin/shot. Both are root-owned + world-executable/readable so
+# the uid 1000 `claude` runtime user can run them as a system tool.
+COPY tools/shotter/shot.mjs /opt/duck/shotter/shot.mjs
+COPY tools/shotter/shot /usr/local/bin/shot
+RUN chmod 0755 /usr/local/bin/shot; chmod 0644 /opt/duck/shotter/shot.mjs
 
 # Non-root runtime user; pre-create writable dirs so named volumes inherit uid 1000.
 # /app/data is kept for volume-layout parity with the previous image. The node base
