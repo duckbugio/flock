@@ -50,8 +50,9 @@ const toolDetailSeparator = " · "
 // Telegram's 4096 limit counts) is <= source length. The limit therefore still holds.
 const frameBudgetMax = 3500
 
-// separatorRunes is the rune count of the "\n\n" that separates the header from
-// the activity lines in a frame.
+// separatorRunes is the rune count of the "\n\n" blank-line separator placed
+// between each block of a frame — the header, the optional "+N earlier" indicator,
+// and every activity line — so the steps read as visually separated blocks.
 const separatorRunes = 2
 
 // Activity-line prefixes: a thought balloon for the model's text, and a wrench as
@@ -470,19 +471,14 @@ func (p *Progress) Frame() string {
 	// shown count), so each dropped line raises N by one — keeping the indicator
 	// self-consistent with the drop loop below.
 	assemble := func(ringLines []string) string {
-		var b strings.Builder
-		_, _ = b.WriteString(header)
-		// A blank line sets the activity ("thoughts") apart from the Working header.
-		_, _ = b.WriteString("\n")
+		// Join the header, the optional "+N earlier" indicator and each activity line
+		// with a blank line between them, so the steps read as separated blocks.
+		blocks := []string{header}
 		if hidden := p.total - len(ringLines); hidden > 0 {
-			_ = b.WriteByte('\n')
-			_, _ = fmt.Fprintf(&b, elidedFormat, hidden)
+			blocks = append(blocks, fmt.Sprintf(elidedFormat, hidden))
 		}
-		for _, line := range ringLines {
-			_ = b.WriteByte('\n')
-			_, _ = b.WriteString(line)
-		}
-		return b.String()
+		blocks = append(blocks, ringLines...)
+		return strings.Join(blocks, "\n\n")
 	}
 	for len(lines) > 1 && utf8.RuneCountInString(assemble(lines)) > frameBudgetMax {
 		lines = lines[1:]
@@ -501,8 +497,8 @@ func (p *Progress) Frame() string {
 	// capLine's TEXT cap keeps the whole frame in bounds.
 	overhead := utf8.RuneCountInString(header) + separatorRunes
 	if hidden := p.total - 1; hidden > 0 {
-		// The indicator line plus its leading newline.
-		overhead += 1 + utf8.RuneCountInString(fmt.Sprintf(elidedFormat, hidden))
+		// The indicator block plus its own blank-line separator before the line.
+		overhead += separatorRunes + utf8.RuneCountInString(fmt.Sprintf(elidedFormat, hidden))
 	}
 	for _, prefix := range activityPrefixes {
 		if strings.HasPrefix(lines[0], prefix) {
