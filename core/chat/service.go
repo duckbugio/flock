@@ -41,7 +41,16 @@ const minEditInterval = 3 * time.Second
 // anchorText is the persistent message sent at the start of a run. It carries the
 // Stop button (which an ephemeral draft can't) and is later edited into the final
 // answer; the live progress streams separately as a draft.
-const anchorText = "⏳ Working…"
+//
+// Its wording is deliberately NOT the live frame's "Working… (Ns)" header. Where
+// drafts are supported (Telegram 1:1) the anchor and the draft are two SEPARATE
+// bubbles shown side by side, so a "Working…" anchor read as a duplicate of the
+// live "Working… (Ns)" preview (the reported double-bubble bug). A neutral holder
+// line pairs with the live draft without looking like a second progress message.
+// In the edit fallback (groups, VK — no draft) render() overwrites the anchor with
+// the live frame on the first tick, so this text only shows for the brief
+// pre-first-tick instant there; the single-bubble behavior is unchanged.
+const anchorText = "⏳ In progress…"
 
 // workspaceEnsurer resolves a chat's isolated workspace path, creating it (and
 // rendering CLAUDE.md + agents) on first use. *workspace.Renderer satisfies it;

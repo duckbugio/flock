@@ -523,10 +523,12 @@ func TestRunStreamsProgressAsDraftThenClears(t *testing.T) {
 
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
-	// The anchor was sent as the fixed Stop-bearing anchor text — progress did NOT
-	// ride it (it streams as drafts).
-	if len(fc.sent) == 0 || !strings.Contains(fc.sent[0], "Working") {
-		t.Fatalf("anchor not sent as the Working anchor; sent=%v", fc.sent)
+	// The anchor was sent as the fixed Stop-bearing holder text (anchorText) —
+	// progress did NOT ride it (it streams as drafts). The anchor text is
+	// deliberately NOT the live "Working… (Ns)" frame so it can't read as a
+	// duplicate of the draft preview beside it (the double-bubble fix).
+	if len(fc.sent) == 0 || fc.sent[0] != anchorText {
+		t.Fatalf("anchor not sent as the fixed anchor text %q; sent=%v", anchorText, fc.sent)
 	}
 	// Live progress streamed via at least one draft preview...
 	if len(fc.drafts) == 0 || !strings.Contains(fc.drafts[0], "Working") {
@@ -642,18 +644,21 @@ func TestEditFallbackRespectsMinInterval(t *testing.T) {
 		t.Fatal("no edits happened in fallback mode; counter would be frozen")
 	}
 
-	// The counter advanced across windows: the anchor text shows the elapsed seconds
-	// climbing past the first window, proving the throttle didn't park render().
-	text, _ := fc.snapshot()
-	if !strings.Contains(text, "Working") {
-		t.Fatalf("anchor not showing progress: %q", text)
-	}
-	wantSecs := (windows * 5 * int(step)) / int(time.Second)
-	if wantSecs > 0 && !strings.Contains(text, "("+strconv.Itoa(wantSecs)+"s)") &&
-		!strings.Contains(text, "("+strconv.Itoa(wantSecs-1)+"s)") &&
-		!strings.Contains(text, "("+strconv.Itoa(wantSecs-2)+"s)") {
-		t.Fatalf("counter did not advance to ~%ds: %q", wantSecs, text)
-	}
+	// The counter advanced across windows without the throttle freezing render().
+	// Advancing the clock one more full minEditInterval past the loop's last value
+	// puts the next fast tick unambiguously past the throttle window — whatever the
+	// exact time of the last in-loop edit — so one final edit is deterministically
+	// due. Poll for the counter to reach that value: the real ticker fires the edit
+	// asynchronously, so sampling a single instant is racy under -race scheduling
+	// (the prior approach intermittently observed the counter one window behind when
+	// the last tick had not yet landed or the throttle window straddled the ceiling).
+	clk.advance(minEditInterval)
+	wantSecs := (windows*5*int(step) + int(minEditInterval)) / int(time.Second)
+	waitUntil(t, func() bool {
+		text, _ := fc.snapshot()
+		return strings.Contains(text, "Working") &&
+			strings.Contains(text, "("+strconv.Itoa(wantSecs)+"s)")
+	})
 
 	close(gate)
 }
