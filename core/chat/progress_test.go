@@ -54,10 +54,11 @@ func TestActivityRingBounded(t *testing.T) {
 		p.Observe(claude.Event{Type: claude.ToolUse, Tool: tool})
 	}
 	frame := p.Frame()
-	lines := strings.Split(frame, "\n")
-	// 1 header + 1 blank separator + 1 "+2 earlier" indicator + 3 activity lines.
-	if len(lines) != 6 {
-		t.Fatalf("expected header + blank + indicator + 3 ring lines, got %d lines: %q", len(lines), frame)
+	// Blocks are separated by a blank line ("\n\n"): 1 header + 1 "+2 earlier"
+	// indicator + 3 activity lines (the ring is bounded to ringSize=3).
+	blocks := strings.Split(frame, "\n\n")
+	if len(blocks) != 5 {
+		t.Fatalf("expected header + indicator + 3 ring lines, got %d blocks: %q", len(blocks), frame)
 	}
 	// Five pushed, three shown: two scrolled off above the window.
 	if !strings.Contains(frame, "+2 earlier") {
@@ -69,6 +70,28 @@ func TestActivityRingBounded(t *testing.T) {
 	}
 	if strings.Contains(frame, "Read") || strings.Contains(frame, "Grep") {
 		t.Fatalf("ring did not evict oldest tools: %q", frame)
+	}
+}
+
+// TestFrameSeparatesStepsWithBlankLine asserts each activity step is set apart by a
+// blank line, so the steps read as separated blocks instead of a run-together wall.
+func TestFrameSeparatesStepsWithBlankLine(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5, "")
+	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Read"})
+	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash"})
+
+	frame := p.Frame()
+	// Blocks are separated by a blank line ("\n\n"): the header + one block per step.
+	blocks := strings.Split(frame, "\n\n")
+	if len(blocks) != 3 {
+		t.Fatalf("expected header + 2 blank-line-separated steps, got %d blocks: %q", len(blocks), frame)
+	}
+	// Each activity block is a single line — no two steps run together inside a block.
+	for _, b := range blocks[1:] {
+		if strings.Contains(b, "\n") {
+			t.Fatalf("steps not blank-line separated; block has an embedded newline: %q", b)
+		}
 	}
 }
 
