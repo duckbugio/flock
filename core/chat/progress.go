@@ -113,9 +113,10 @@ func buildActivityPrefixes() []string {
 }
 
 // elidedFormat renders the "+N earlier" indicator prepended to the activity block
-// when older lines have scrolled off above the visible window. It is plain English
-// to match the rest of the UI ("Working…", "Stop").
-const elidedFormat = "+%d earlier"
+// when older lines have scrolled off above the visible window. The leading clock
+// emoji matches the activity-line style (every line carries an emoji prefix), so
+// the indicator reads as part of the ring instead of a bare stray line.
+const elidedFormat = "🕓 +%d earlier"
 
 // Units used by formatElapsed to humanize the elapsed counter.
 const (
@@ -191,8 +192,13 @@ func activityLine(e claude.Event, baseDir string) (string, bool) {
 			tool = "tool"
 		}
 		line := tool
-		if detail := toolDetail(tool, e.ToolInput, baseDir); detail != "" {
-			line += toolDetailSeparator + detail
+		// Bash is shown as just "⌨️ Bash": the command itself is long, noisy, and adds
+		// little to the live progress (and can carry secrets). Every other tool still
+		// shows its detail (file path, pattern, query…) — only Bash is bare.
+		if !strings.EqualFold(tool, "bash") {
+			if detail := toolDetail(tool, e.ToolInput, baseDir); detail != "" {
+				line += toolDetailSeparator + detail
+			}
 		}
 		return toolLinePrefix(tool) + truncateRunes(line, recentSnippetMax), true
 	case claude.Text:

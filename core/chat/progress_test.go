@@ -137,7 +137,10 @@ func TestToolUseDetailEnrichment(t *testing.T) {
 			name: "notebookedit file_path", tool: "NotebookEdit",
 			input: `{"file_path":"nb.ipynb"}`, wantSub: "✏️ NotebookEdit · nb.ipynb", wantSep: true,
 		},
-		{name: "bash command", tool: "Bash", input: `{"command":"go test ./..."}`, wantSub: "⌨️ Bash · go test ./...", wantSep: true},
+		{
+			name: "bash command hidden", tool: "Bash",
+			input: `{"command":"go test ./..."}`, wantSub: "⌨️ Bash", wantSep: false, wantMiss: " · ",
+		},
 		{
 			name: "grep pattern", tool: "Grep",
 			input: `{"pattern":"func main","path":"core"}`, wantSub: "🔍 Grep · func main", wantSep: true,
@@ -228,17 +231,33 @@ func TestToolLinePrefixPerTool(t *testing.T) {
 	}
 }
 
-func TestToolUseDetailCollapsesMultilineCommand(t *testing.T) {
+// TestToolDetailCollapsesMultilineCommand checks toolDetail collapses a multi-line
+// detail to one line. Bash is no longer shown with its command in the live frame
+// (see activityLine), so this exercises toolDetail directly rather than via Frame.
+func TestToolDetailCollapsesMultilineCommand(t *testing.T) {
+	got := toolDetail("Bash", []byte("{\"command\":\"echo one\\n   echo two\\n\\techo three\"}"), "")
+	if got != "echo one echo two echo three" {
+		t.Fatalf("multi-line command not collapsed to one line: %q", got)
+	}
+}
+
+// TestActivityLineHidesBashCommand asserts a Bash tool_use renders as a bare
+// "⌨️ Bash" line — never its command — while another tool still shows its detail.
+func TestActivityLineHidesBashCommand(t *testing.T) {
 	var elapsed time.Duration
 	p := NewProgress(fakeClock(&elapsed), 5, "")
-	p.Observe(claude.Event{
-		Type:      claude.ToolUse,
-		Tool:      "Bash",
-		ToolInput: []byte("{\"command\":\"echo one\\n   echo two\\n\\techo three\"}"),
-	})
+	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash", ToolInput: []byte(`{"command":"echo secret"}`)})
+	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Read", ToolInput: []byte(`{"file_path":"main.go"}`)})
+
 	frame := p.Frame()
-	if !strings.Contains(frame, "⌨️ Bash · echo one echo two echo three") {
-		t.Fatalf("multi-line command not collapsed to one line: %q", frame)
+	if !strings.Contains(frame, "⌨️ Bash") {
+		t.Fatalf("Bash line missing: %q", frame)
+	}
+	if strings.Contains(frame, "echo secret") {
+		t.Fatalf("Bash command leaked into the frame: %q", frame)
+	}
+	if !strings.Contains(frame, "📖 Read · main.go") {
+		t.Fatalf("non-Bash tool lost its detail: %q", frame)
 	}
 }
 
@@ -735,9 +754,9 @@ func TestElidedIndicatorShownWhenEvicted(t *testing.T) {
 		t.Fatalf("expected +%d earlier indicator: %q", extra, frame)
 	}
 	// The indicator must be the FIRST line of the activity block: header, blank,
-	// then the indicator.
+	// then the indicator (carrying the clock-emoji prefix, like the activity lines).
 	lines := strings.Split(frame, "\n")
-	if len(lines) < 3 || lines[2] != "+"+strconv.Itoa(extra)+" earlier" {
+	if len(lines) < 3 || lines[2] != "🕓 +"+strconv.Itoa(extra)+" earlier" {
 		t.Fatalf("indicator not first activity line: %q", frame)
 	}
 	// Exactly ringSize activity lines are kept below the indicator.
