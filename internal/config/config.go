@@ -145,6 +145,14 @@ type Config struct {
 	TeamTemplatePath string `env:"TEAM_TEMPLATE_PATH" envDefault:"/opt/duck/CLAUDE.workspace.md.tmpl"`
 	TeamAgentsDir    string `env:"TEAM_AGENTS_DIR" envDefault:"/opt/duck/agents"`
 
+	// EnableContext7 wires the context7 MCP docs server into every run (an
+	// .mcp.json is written at startup and passed via --mcp-config). context7 gives
+	// the agent up-to-date, version-specific library/API docs so it stops guessing
+	// outdated APIs — the highest-leverage accuracy boost for a coding agent. The
+	// free tier needs no key; an unreachable server never breaks a run. Set
+	// ENABLE_CONTEXT7=false to opt out.
+	EnableContext7 bool `env:"ENABLE_CONTEXT7" envDefault:"true"`
+
 	// Git startup wiring (core/gitsetup). Mirrors the Python entrypoint's git
 	// portion. GitToken/GitUser also feed the inline credential helper and the
 	// Gitea poller; they are read from the env, never written to a config file.

@@ -371,6 +371,38 @@ func TestBuildArgs_AddDirNeverSwallowsPrompt(t *testing.T) {
 	}
 }
 
+// TestBuildArgs_MCPConfig asserts --mcp-config is emitted only when MCPConfig is
+// set, and — being variadic like --add-dir — its value is followed by a flag (the
+// variadic stop) so it can't swallow the prompt or another flag's value.
+func TestBuildArgs_MCPConfig(t *testing.T) {
+	const prompt = "hi"
+	for _, a := range buildArgs(Options{Workdir: "/ws", Model: "m", MaxTurns: 40}, prompt, false) {
+		if a == "--mcp-config" {
+			t.Fatal("--mcp-config emitted when MCPConfig empty")
+		}
+	}
+	args := buildArgs(Options{Workdir: "/ws", MCPConfig: "/etc/mcp.json", Model: "m", MaxTurns: 40}, prompt, false)
+	idx := -1
+	for i, a := range args {
+		if a == "--mcp-config" {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		t.Fatalf("--mcp-config not emitted when MCPConfig set; args = %q", args)
+	}
+	if idx+2 >= len(args) {
+		t.Fatalf("--mcp-config at the tail with nothing after its value; args = %q", args)
+	}
+	if got := args[idx+1]; got != "/etc/mcp.json" {
+		t.Fatalf("--mcp-config value = %q, want /etc/mcp.json; args = %q", got, args)
+	}
+	if next := args[idx+2]; !strings.HasPrefix(next, "--") {
+		t.Fatalf("token after --mcp-config value must be a flag (variadic stop), got %q; args = %q", next, args)
+	}
+}
+
 // TestBuildArgs_Effort covers the CLAUDE_EFFORT mapping in buildArgs: empty emits
 // nothing, a standard level (max) becomes "--effort max", "ultracode" takes the
 // --settings '{"ultracode":true}' path (NOT --effort, since ultracode is not a
