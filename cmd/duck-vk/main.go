@@ -1,8 +1,8 @@
 // Command duck-vk is the Go VKontakte (VK) community-bot adapter for flock. Each
 // allowed VK user's DM/mention is dispatched to that chat's isolated workspace
 // and run through the core/claude Runner; the event stream renders to one live
-// "Working… (Ns)" progress message with a Stop button (edited in place, as VK has
-// no ephemeral draft), replaced by the final answer on completion. Runs are
+// "Working… (Ns)" progress message with a Stop button (edited in place), replaced
+// by the final answer on completion. Runs are
 // parallel across chats (capped) and serial within a chat (core/dispatch); each
 // chat gets its own /workspace/chat_<peer_id> with a rendered CLAUDE.md + agents
 // (core/workspace). It wires the SAME shared core/chat.Service the Telegram

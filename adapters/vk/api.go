@@ -2,7 +2,7 @@
 // core/chat conversation layer. It is a hand-rolled net/http client against the
 // VK API (https://api.vk.com/method/<method>, v=5.199) — deliberately NO VK SDK,
 // to keep the dependency tree minimal (net/http only). It implements
-// core/chat.Transport (Send/Edit/Delete/SendDocument/StreamDraft/SendStarNudge/
+// core/chat.Transport (Send/Edit/Delete/SendDocument/SendStarNudge/
 // Capabilities) over messages.send/messages.edit/messages.delete and the
 // docs.* upload dance, classifies VK flood/rate errors for the RetryAfter seam,
 // renders the inline Stop keyboard, runs the Bots Long Poll receive loop, maps

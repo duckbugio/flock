@@ -112,14 +112,6 @@ func TestSendDocumentUploadsThenSends(t *testing.T) {
 	}
 }
 
-func TestStreamDraftUnsupported(t *testing.T) {
-	c := NewBotChat(NewClient("tok"), 100, 1)
-	err := c.StreamDraft(context.Background(), "200", "draft", "frame", true)
-	if !errors.Is(err, errDraftUnsupported) {
-		t.Errorf("StreamDraft error = %v, want errDraftUnsupported (Service falls back to Edit)", err)
-	}
-}
-
 func TestRetryAfterClassifiesFloodErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

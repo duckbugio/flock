@@ -23,10 +23,11 @@ import (
 	"github.com/duckbugio/flock/core/pending"
 )
 
-// tickInterval is how often the wall-clock ticker refreshes the progress frame
-// when no event arrives — it advances the elapsed counter/spinner during a silent
-// tool call (§7.2). Activity events refresh the live draft immediately (see the run
-// loop), so this only governs the quiet-period cadence.
+// tickInterval is how often the wall-clock ticker re-renders the progress frame —
+// it advances the elapsed counter/spinner and flushes any activity folded into the
+// ring since the last tick. Activity events only update the in-memory ring; the
+// ticker is the sole render trigger (real edits are further throttled to
+// minEditInterval), so this is the progress refresh cadence.
 const tickInterval = 1 * time.Second
 
 // minEditInterval throttles real edits in the rate-limited fallback path. Drafts
@@ -423,10 +424,9 @@ func (s *Service) run(
 	start := s.nowFunc()
 	prog := NewProgress(func() time.Duration { return s.nowFunc().Sub(start) }, 0, workdir)
 
-	// The anchor: a persistent message that carries the Stop button (a draft can't)
-	// and is later edited into the final answer. It stays static while live progress
-	// streams as a draft; only the fallback path (no draft support) edits it. An
-	// empty id means no anchor was created (Send failed) — we can still deliver.
+	// The anchor: a persistent message that carries the Stop button and is edited in
+	// place with the live progress frame, then with the final answer. An empty id
+	// means no anchor was created (Send failed) — we can still deliver.
 	progressMsgID, err := s.chat.Send(ctx, chatID, anchorText, runID, false)
 	if err != nil {
 		// Without an anchor we can still deliver the result; keep going.

@@ -86,25 +86,6 @@ func TestHTTPRichTransportEdit(t *testing.T) {
 	}
 }
 
-func TestHTTPRichTransportStreamDraft(t *testing.T) {
-	rs := newRichServer(t, `{"ok":true,"result":true}`)
-	tr := newHTTPRichTransport("123:ABC", rs.srv.URL, rs.srv.Client())
-
-	if err := tr.streamDraft(context.Background(), 555, 99, richMarkdown("frame")); err != nil {
-		t.Fatalf("streamDraft: %v", err)
-	}
-	if !strings.HasSuffix(rs.lastPath, "/sendRichMessageDraft") {
-		t.Errorf("path = %q, want .../sendRichMessageDraft", rs.lastPath)
-	}
-	// draft_id is an integer per the verified schema.
-	if rs.lastBody["draft_id"].(float64) != 99 {
-		t.Errorf("draft_id = %v, want 99", rs.lastBody["draft_id"])
-	}
-	if rs.richMessageField(t)["markdown"] != "frame" {
-		t.Errorf("rich_message.markdown = %v, want frame", rs.richMessageField(t)["markdown"])
-	}
-}
-
 // TestHTTPRichTransportRedactsToken asserts a transport-level error (net/http
 // embeds the token-bearing request URL in its message) never leaks the token.
 func TestHTTPRichTransportRedactsToken(t *testing.T) {

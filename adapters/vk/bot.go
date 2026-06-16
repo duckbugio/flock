@@ -139,18 +139,6 @@ func (c *botChat) warnKeyboardsDisabled() {
 	})
 }
 
-// StreamDraft is unsupported on VK: it has no ephemeral live-draft primitive, so
-// this returns an error unconditionally. The Service treats that as "drafts
-// unsupported" and falls back to editing the anchor message (the rate-limited
-// progress path), exactly as on a platform without drafts.
-func (c *botChat) StreamDraft(_ context.Context, _ chat.ChatID, _, _ string, _ bool) error {
-	return errDraftUnsupported
-}
-
-// errDraftUnsupported signals the Service that VK cannot stream an ephemeral
-// draft, so it should drive progress via Edit instead.
-var errDraftUnsupported = errors.New("vk: live draft preview unsupported; use message edits")
-
 // Delete removes messageID for everyone; failures are non-fatal to the caller.
 func (c *botChat) Delete(ctx context.Context, chatID chat.ChatID, messageID chat.MessageID) error {
 	return c.api.MessagesDelete(ctx, parsePeerID(chatID), parseMessageID(messageID))

@@ -50,7 +50,6 @@ type fakeChat struct {
 	sent    []string // every Send'd text, in order
 	docs    []string // every SendDocument'd filename, in order
 	nudges  []string // every SendStarNudge'd text, in order
-	drafts  []string // StreamDraft'd text; the run loop no longer drafts, so tests assert this stays empty
 	editErr error    // when set, Edit returns it (e.g. a 429 to exercise throttling)
 	edits   int      // count of Edit calls (progress + final), for the throttle test
 }
@@ -97,13 +96,6 @@ func (f *fakeChat) editCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.edits
-}
-
-func (f *fakeChat) StreamDraft(_ context.Context, _ ChatID, _, text string, _ bool) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.drafts = append(f.drafts, text)
-	return nil
 }
 
 func (f *fakeChat) Delete(_ context.Context, _ ChatID, messageID MessageID) error {
@@ -522,11 +514,6 @@ func TestRunDeliversSingleProgressBubble(t *testing.T) {
 	// place (progress, then the answer) — one persistent message for the whole run.
 	if len(fc.sent) == 0 || fc.sent[0] != anchorText {
 		t.Fatalf("anchor not sent as the fixed anchor text %q; sent=%v", anchorText, fc.sent)
-	}
-	// No draft preview was ever streamed: the single bubble is the anchor edited in
-	// place, so a 1:1 chat shows no second "Working…" bubble beside it.
-	if len(fc.drafts) != 0 {
-		t.Fatalf("progress must not stream as a draft (single-bubble); drafts=%v", fc.drafts)
 	}
 	// The answer replaced the anchor via an Edit (waitUntil already saw the anchor
 	// text become the answer with the Stop button cleared), not a fresh Send.
