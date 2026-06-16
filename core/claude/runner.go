@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os/exec"
 	"strconv"
 	"sync"
@@ -74,11 +75,19 @@ type ImageInput struct {
 
 // Options configures a single Run.
 type Options struct {
-	SessionID string   // resume an existing session; omit --resume when empty
-	Workdir   string   // working/allowed dir; also the child's cwd
-	Model     string   // --model value
-	MaxTurns  int      // --max-turns value
-	Env       []string // child environment (auth, etc.); inherited when nil
+	SessionID string // resume an existing session; omit --resume when empty
+	Workdir   string // working/allowed dir; also the child's cwd
+	Model     string // --model value
+	MaxTurns  int    // --max-turns value
+	// Effort selects the reasoning effort level / "ultracode" mode passed to the
+	// claude CLI. Empty means "pass nothing" (the model's default effort applies).
+	// The standard levels (low, medium, high, xhigh, max) map to the --effort flag.
+	// The special value "ultracode" is NOT a valid --effort value: it is a Claude
+	// Code setting (xhigh to the model PLUS dynamic-workflow orchestration) that can
+	// only be enabled via --settings '{"ultracode":true}'. An unrecognized value is
+	// ignored (logged) so a bad env can't break the CLI invocation. See buildArgs.
+	Effort string
+	Env    []string // child environment (auth, etc.); inherited when nil
 	// Images, when non-empty, switches the run to stream-json stdin input: the
 	// prompt and these image blocks are written as one user message to the child's
 	// stdin (then stdin is closed), enabling Claude vision. When empty the run uses
@@ -212,6 +221,7 @@ func buildArgs(o Options, prompt string, stdinMode bool) []string {
 	if o.MaxTurns > 0 {
 		args = append(args, "--max-turns", strconv.Itoa(o.MaxTurns))
 	}
+	args = applyEffort(args, o.Effort)
 	args = append(args, "--permission-mode", "bypassPermissions")
 	if o.SessionID != "" {
 		args = append(args, "--resume", o.SessionID)
@@ -220,6 +230,94 @@ func buildArgs(o Options, prompt string, stdinMode bool) []string {
 		args = append(args, prompt)
 	}
 	return args
+}
+
+// effortUltracode is the special effort value that selects Claude Code's
+// "ultracode" mode (xhigh to the model PLUS dynamic-workflow orchestration). It
+// is NOT a valid --effort level and is NOT accepted by --effort or
+// CLAUDE_CODE_EFFORT_LEVEL — it can only be enabled via --settings, the /effort
+// menu, or an SDK control request, so we set it via --settings '{"ultracode":true}'.
+const effortUltracode = "ultracode"
+
+// standardEfforts is the set of values accepted by the CLI's --effort flag (the
+// regular reasoning-effort levels). "ultracode" is deliberately NOT here — it
+// takes the --settings path instead (see applyEffort).
+var standardEfforts = map[string]struct{}{
+	"low":    {},
+	"medium": {},
+	"high":   {},
+	"xhigh":  {},
+	"max":    {},
+}
+
+// applyEffort appends the effort-related CLI flags for the configured level and
+// returns the extended args. The mapping is:
+//   - "" (empty/unset): append nothing — the model's default effort applies.
+//   - "ultracode": enable Claude Code's ultracode setting via --settings. If args
+//     ALREADY carries a --settings flag (e.g. flock passes one for permissions),
+//     "ultracode": true is MERGED into that existing JSON (parse -> set key ->
+//     re-marshal) so we never emit a second, conflicting --settings; otherwise a
+//     fresh --settings '{"ultracode":true}' is appended. (As of this writing
+//     buildArgs does NOT pass --settings, so the append branch is taken; the merge
+//     branch is kept so adding a --settings flag later stays correct.)
+//   - a standard level (low/medium/high/xhigh/max): append --effort <level>.
+//   - any other value: ignore it (logged) so a bad CLAUDE_EFFORT env can't break
+//     the CLI invocation.
+func applyEffort(args []string, effort string) []string {
+	switch effort {
+	case "":
+		return args
+	case effortUltracode:
+		return applyUltracode(args)
+	default:
+		if _, ok := standardEfforts[effort]; ok {
+			return append(args, "--effort", effort)
+		}
+		slog.Warn("ignoring unknown claude effort level", "effort", effort)
+		return args
+	}
+}
+
+// applyUltracode enables the ultracode setting. If args already contains a
+// --settings flag, its JSON value is parsed, "ultracode": true is set, and the
+// value is re-marshaled in place (so a single merged --settings is emitted). If
+// the existing value can't be parsed as a JSON object, it is left untouched and
+// ultracode is skipped (logged) rather than risk corrupting the existing
+// settings. When no --settings flag is present, a fresh one is appended.
+func applyUltracode(args []string) []string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] != "--settings" {
+			continue
+		}
+		merged, ok := mergeUltracode(args[i+1])
+		if !ok {
+			slog.Warn("could not merge ultracode into existing --settings; leaving settings unchanged",
+				"settings", args[i+1])
+			return args
+		}
+		args[i+1] = merged
+		return args
+	}
+	return append(args, "--settings", `{"ultracode":true}`)
+}
+
+// mergeUltracode parses the existing --settings JSON object, sets
+// "ultracode": true, and re-marshals it. It returns ok=false when the value is
+// not a JSON object (so the caller leaves the original settings untouched).
+func mergeUltracode(settings string) (string, bool) {
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(settings), &obj); err != nil {
+		return "", false
+	}
+	if obj == nil {
+		obj = map[string]any{}
+	}
+	obj["ultracode"] = true
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
 }
 
 // userMessageEnvelope builds the single newline-terminated stream-json "user"
