@@ -38,6 +38,20 @@ blindly grep or read across ALL repos to answer a narrow question; DO deliberate
 services a feature genuinely requires. If unsure which repo(s) are meant, list the
 subdirectories and ask.
 
+## Tools you have — lean on them
+
+Beyond the dev-team subagents, this workspace ships extra capabilities. They apply to **all**
+work, including quick direct tasks that skip the full pipeline — use them.
+
+- **Skills** in `.claude/skills/` load on demand. Notably **`verification-before-completion`**
+  (build + run the relevant tests/linter and confirm the change actually does what was asked
+  before you call it done — "looks right" is not "done") and **`library-docs-lookup`**.
+- **context7 MCP docs tools** (`resolve-library-id`, `get-library-docs`) fetch CURRENT,
+  version-specific docs for any external library/framework/SDK/API. Use them whenever you touch
+  a third-party dependency or hit an API you're not 100% sure of — pull the version the project
+  actually depends on. A stale-API guess is a top source of subtly-wrong code; a quick docs
+  lookup beats a wrong guess you then have to debug.
+
 ## Building a feature (the dev team) — TWO PHASES
 
 When the user asks you to implement / add / build / fix something, act as the **Lead** and run
