@@ -42,19 +42,17 @@ func openRealStore(path string) (*session.FileStore, error) {
 // the final state. It is safe for concurrent use because edits arrive from the
 // ticker goroutine and the run goroutine.
 type fakeChat struct {
-	mu       sync.Mutex
-	nextID   int
-	texts    map[MessageID]string // current text per message id
-	hasStop  map[MessageID]bool   // whether the message currently shows a Stop button
-	deleted  map[MessageID]bool
-	sent     []string // every Send'd text, in order
-	docs     []string // every SendDocument'd filename, in order
-	nudges   []string // every SendStarNudge'd text, in order
-	drafts   []string // every successful StreamDraft'd text, in order (live preview)
-	draftMD  []bool   // asMarkdown flag for each successful StreamDraft, parallel to drafts
-	draftErr error    // when set, StreamDraft returns it (simulates no draft support)
-	editErr  error    // when set, Edit returns it (e.g. a 429 to exercise throttling)
-	edits    int      // count of Edit calls (progress + final), for the throttle test
+	mu      sync.Mutex
+	nextID  int
+	texts   map[MessageID]string // current text per message id
+	hasStop map[MessageID]bool   // whether the message currently shows a Stop button
+	deleted map[MessageID]bool
+	sent    []string // every Send'd text, in order
+	docs    []string // every SendDocument'd filename, in order
+	nudges  []string // every SendStarNudge'd text, in order
+	drafts  []string // StreamDraft'd text; the run loop no longer drafts, so tests assert this stays empty
+	editErr error    // when set, Edit returns it (e.g. a 429 to exercise throttling)
+	edits   int      // count of Edit calls (progress + final), for the throttle test
 }
 
 func newFakeChat() *fakeChat {
@@ -101,14 +99,10 @@ func (f *fakeChat) editCount() int {
 	return f.edits
 }
 
-func (f *fakeChat) StreamDraft(_ context.Context, _ ChatID, _, text string, asMarkdown bool) error {
+func (f *fakeChat) StreamDraft(_ context.Context, _ ChatID, _, text string, _ bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.draftErr != nil {
-		return f.draftErr
-	}
 	f.drafts = append(f.drafts, text)
-	f.draftMD = append(f.draftMD, asMarkdown)
 	return nil
 }
 
@@ -501,10 +495,11 @@ func TestRunRendersProgressThenFinal(t *testing.T) {
 	})
 }
 
-// TestRunStreamsProgressAsDraftThenClears asserts live progress is pushed via the
-// rate-limit-free draft preview (not by editing the anchor), and that the draft is
-// cleared when the answer is finalized into the anchor.
-func TestRunStreamsProgressAsDraftThenClears(t *testing.T) {
+// TestRunDeliversSingleProgressBubble asserts a run is exactly ONE chat bubble: the
+// anchor (carrying the Stop button) is edited in place with progress and then with
+// the final answer, and NO draft preview is ever streamed — so a 1:1 chat no longer
+// shows a second "Working…" bubble beside the anchor.
+func TestRunDeliversSingleProgressBubble(t *testing.T) {
 	fc := newFakeChat()
 	fr := &fakeRunner{events: []claude.Event{
 		{Type: claude.SystemInit, SessionID: "s1"},
@@ -523,57 +518,20 @@ func TestRunStreamsProgressAsDraftThenClears(t *testing.T) {
 
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
-	// The anchor was sent as the fixed Stop-bearing holder text (anchorText) —
-	// progress did NOT ride it (it streams as drafts). The anchor text is
-	// deliberately NOT the live "Working… (Ns)" frame so it can't read as a
-	// duplicate of the draft preview beside it (the double-bubble fix).
+	// The anchor was sent as the fixed Stop-bearing anchor text; it is then edited in
+	// place (progress, then the answer) — one persistent message for the whole run.
 	if len(fc.sent) == 0 || fc.sent[0] != anchorText {
 		t.Fatalf("anchor not sent as the fixed anchor text %q; sent=%v", anchorText, fc.sent)
 	}
-	// Live progress streamed via at least one draft preview...
-	if len(fc.drafts) == 0 || !strings.Contains(fc.drafts[0], "Working") {
-		t.Fatalf("progress not streamed as a draft; drafts=%v", fc.drafts)
-	}
-	// ...rendered as markdown/HTML so `code` and **bold** don't show as raw text.
-	if !fc.draftMD[0] {
-		t.Fatalf("progress draft not pushed with asMarkdown=true; draftMD=%v", fc.draftMD)
-	}
-	// ...and the draft is cleared (empty) once the answer is finalized.
-	last := len(fc.drafts) - 1
-	if fc.drafts[last] != "" {
-		t.Fatalf("draft not cleared on finish; last draft = %q", fc.drafts[last])
-	}
-	// The clear is plain (no formatting) — empty text carries no markdown.
-	if fc.draftMD[last] {
-		t.Fatalf("draft clear should be plain (asMarkdown=false); draftMD=%v", fc.draftMD)
-	}
-}
-
-// TestRunFallsBackToEditsWhenDraftFails asserts that if draft streaming is
-// unsupported (StreamDraft errors), the run still delivers the answer by editing
-// the anchor — nothing is lost and no draft is recorded.
-func TestRunFallsBackToEditsWhenDraftFails(t *testing.T) {
-	fc := newFakeChat()
-	fc.draftErr = errors.New("drafts unsupported")
-	fr := &fakeRunner{events: []claude.Event{
-		{Type: claude.ToolUse, Tool: "Bash"},
-		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer}},
-	}}
-	svc, d := newTestService(t, fr, fc)
-	defer d.Close()
-
-	svc.Handle(context.Background(), "100", 100, "1", "hello")
-
-	// Despite drafts failing, the answer still lands — delivered by editing the anchor.
-	waitUntil(t, func() bool {
-		text, stop := fc.snapshot()
-		return text == finalAnswer && !stop
-	})
-
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
+	// No draft preview was ever streamed: the single bubble is the anchor edited in
+	// place, so a 1:1 chat shows no second "Working…" bubble beside it.
 	if len(fc.drafts) != 0 {
-		t.Fatalf("no draft should succeed in fallback mode; got %v", fc.drafts)
+		t.Fatalf("progress must not stream as a draft (single-bubble); drafts=%v", fc.drafts)
+	}
+	// The answer replaced the anchor via an Edit (waitUntil already saw the anchor
+	// text become the answer with the Stop button cleared), not a fresh Send.
+	if fc.edits == 0 {
+		t.Fatalf("answer not delivered by editing the anchor; edits=%d", fc.edits)
 	}
 }
 
@@ -597,14 +555,13 @@ func (c *manualClock) advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// TestEditFallbackRespectsMinInterval drives the rate-limited Edit fallback (drafts
-// disabled) with many fast ticks while advancing the injected clock in small steps,
-// and asserts that real edits are bounded to roughly one per minEditInterval window
-// (not one per tick) AND that the rendered counter still advances across windows —
-// i.e. the throttle bounds edits without freezing the counter.
-func TestEditFallbackRespectsMinInterval(t *testing.T) {
+// TestProgressEditsRespectMinInterval drives the rate-limited progress edits with
+// many fast ticks while advancing the injected clock in small steps, and asserts
+// that real edits are bounded to roughly one per minEditInterval window (not one per
+// tick) AND that the rendered counter still advances across windows — i.e. the
+// throttle bounds edits without freezing the counter.
+func TestProgressEditsRespectMinInterval(t *testing.T) {
 	fc := newFakeChat()
-	fc.draftErr = errors.New("drafts unsupported") // force the edit fallback
 	gate := make(chan struct{})
 	fr := &fakeRunner{
 		events: []claude.Event{{Type: claude.ToolUse, Tool: "Bash"}},
