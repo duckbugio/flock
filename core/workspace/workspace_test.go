@@ -96,6 +96,47 @@ func TestEnsureRendersWorkspace(t *testing.T) {
 	}
 }
 
+// TestEnsureCopiesSkills asserts the skills tree (each <name>/SKILL.md) is mirrored
+// into the workspace's .claude/skills/, preserving the subdirectory layout.
+func TestEnsureCopiesSkills(t *testing.T) {
+	r := newTestRenderer(t)
+	skills := t.TempDir()
+	skillDir := filepath.Join(skills, "verification")
+	if err := os.MkdirAll(skillDir, 0o750); err != nil {
+		t.Fatalf("mkdir skill: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# verify"), 0o600); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	r.SkillsDir = skills
+
+	ws, err := r.Ensure("9")
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	dst := filepath.Join(ws, ".claude", "skills", "verification", "SKILL.md")
+	body, err := os.ReadFile(dst) //nolint:gosec // G304: controlled temp/workspace path
+	if err != nil {
+		t.Fatalf("SKILL.md not copied: %v", err)
+	}
+	if string(body) != "# verify" {
+		t.Fatalf("SKILL.md content = %q, want %q", body, "# verify")
+	}
+}
+
+// TestEnsureSkillsOptional asserts an unset SkillsDir is a no-op: Ensure succeeds
+// and writes no .claude/skills/ directory.
+func TestEnsureSkillsOptional(t *testing.T) {
+	r := newTestRenderer(t) // SkillsDir unset
+	ws, err := r.Ensure("8")
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ws, ".claude", "skills")); !os.IsNotExist(err) {
+		t.Fatalf("skills dir should not exist when SkillsDir unset (err=%v)", err)
+	}
+}
+
 // TestUploadsDir asserts the uploads dir resolves to <workspace>/uploads, is
 // created, and is NOT nested inside any directory that contains a .git (so
 // uploaded files can never enter a repo working tree / commit — AC4).

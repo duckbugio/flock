@@ -31,6 +31,9 @@ type Renderer struct {
 	TemplatePath string
 	// AgentsDir holds the dev-team agent *.md files to copy into .claude/agents/.
 	AgentsDir string
+	// SkillsDir holds the Agent Skills to copy into .claude/skills/ (each skill is a
+	// <name>/SKILL.md subdirectory). Empty or a missing dir disables skills.
+	SkillsDir string
 
 	// PrePRCycles, PrReviewCycles, EnablePRReview and GitHost are substituted into
 	// the template for the ${PRE_PR_CYCLES} ${PR_REVIEW_CYCLES} ${ENABLE_PR_REVIEW}
@@ -61,6 +64,9 @@ func (r *Renderer) Ensure(chatID string) (string, error) {
 		return "", err
 	}
 	if err := r.copyAgents(agentsDst); err != nil {
+		return "", err
+	}
+	if err := r.copySkills(filepath.Join(ws, ".claude", "skills")); err != nil {
 		return "", err
 	}
 	return ws, nil
@@ -169,4 +175,54 @@ func (r *Renderer) copyAgents(agentsDst string) error {
 		}
 	}
 	return nil
+}
+
+// copySkills mirrors SkillsDir into skillsDst, preserving each skill's
+// subdirectory layout (.claude/skills/<name>/SKILL.md plus any supporting files).
+// A skill loads on demand, so this is additive context that costs nothing until
+// used. An empty or absent SkillsDir is a no-op (skills are an optional feature);
+// only a copy failure inside an existing dir is an error.
+func (r *Renderer) copySkills(skillsDst string) error {
+	if r.SkillsDir == "" {
+		return nil
+	}
+	info, err := os.Stat(r.SkillsDir)
+	if os.IsNotExist(err) {
+		return nil // not baked in this image — skip silently (optional feature)
+	}
+	if err != nil {
+		return fmt.Errorf("stat skills dir: %w", err)
+	}
+	if !info.IsDir() {
+		return nil
+	}
+	return filepath.WalkDir(r.SkillsDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(r.SkillsDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		dst := filepath.Join(skillsDst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(dst, dirPerm)
+		}
+		//nolint:gosec // G304: path comes from WalkDir over an internal baked dir.
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read skill %s: %w", rel, err)
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), dirPerm); err != nil {
+			return fmt.Errorf("create skill dir %s: %w", rel, err)
+		}
+		//nolint:gosec // G703: dst is a join of internal dirs and baked entry names.
+		if err := os.WriteFile(dst, data, filePerm); err != nil {
+			return fmt.Errorf("write skill %s: %w", rel, err)
+		}
+		return nil
+	})
 }

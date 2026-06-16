@@ -78,6 +78,7 @@ COPY --from=build /out/flock-telegram /usr/local/bin/flock-telegram
 
 # Shared team config — rendered per chat into the workspace by core/workspace at runtime.
 COPY --chown=claude:claude core/agents/*.md /opt/duck/agents/
+COPY --chown=claude:claude core/skills /opt/duck/skills
 COPY --chown=claude:claude core/CLAUDE.workspace.md.tmpl /opt/duck/CLAUDE.workspace.md.tmpl
 
 USER claude
