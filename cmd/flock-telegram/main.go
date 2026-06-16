@@ -115,6 +115,7 @@ func run() int {
 		BaseDir:        cfg.ApprovedDirectory,
 		TemplatePath:   cfg.TeamTemplatePath,
 		AgentsDir:      cfg.TeamAgentsDir,
+		SkillsDir:      cfg.TeamSkillsDir,
 		PrePRCycles:    cfg.PrePRCycles,
 		PrReviewCycles: cfg.PrReviewCycles,
 		EnablePRReview: cfg.EnablePRReview,

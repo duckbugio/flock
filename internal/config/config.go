@@ -144,6 +144,10 @@ type Config struct {
 	// Dockerfile's /opt/duck layout). Rendered per chat by core/workspace.
 	TeamTemplatePath string `env:"TEAM_TEMPLATE_PATH" envDefault:"/opt/duck/CLAUDE.workspace.md.tmpl"`
 	TeamAgentsDir    string `env:"TEAM_AGENTS_DIR" envDefault:"/opt/duck/agents"`
+	// TeamSkillsDir holds the Agent Skills baked into the image (each skill is a
+	// <name>/SKILL.md subdirectory) copied into each workspace's .claude/skills/.
+	// Empty or a missing dir disables skill rendering (the run just has no skills).
+	TeamSkillsDir string `env:"TEAM_SKILLS_DIR" envDefault:"/opt/duck/skills"`
 
 	// EnableContext7 wires the context7 MCP docs server into every run (an
 	// .mcp.json is written at startup and passed via --mcp-config). context7 gives
