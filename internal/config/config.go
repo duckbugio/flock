@@ -56,6 +56,12 @@ type Config struct {
 	ClaudeModel          string `env:"CLAUDE_MODEL" envDefault:"claude-opus-4-8"`
 	ClaudeBin            string `env:"CLAUDE_BIN" envDefault:"claude"`
 	ClaudeMaxTurns       int    `env:"CLAUDE_MAX_TURNS" envDefault:"40"`
+	// ClaudeEffort is the reasoning effort level passed to the claude CLI (set by
+	// roost via CLAUDE_EFFORT). Standard levels (low, medium, high, xhigh, max) map
+	// to --effort; the special value "ultracode" enables Claude Code's ultracode
+	// setting (via --settings). Empty (the default) passes nothing, so the model's
+	// default effort applies. The mapping/validation lives in core/claude buildArgs.
+	ClaudeEffort string `env:"CLAUDE_EFFORT"`
 
 	// ClaudeTimeoutSeconds bounds a single run's delivery: it is applied as a
 	// per-run context deadline. When it elapses the run is cancelled (delivery

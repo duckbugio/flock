@@ -92,6 +92,7 @@ func run() int {
 	opts := claude.Options{
 		Model:    cfg.ClaudeModel,
 		MaxTurns: cfg.ClaudeMaxTurns,
+		Effort:   cfg.ClaudeEffort,
 		Env:      claudeEnv(cfg),
 	}
 

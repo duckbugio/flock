@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -368,6 +369,125 @@ func TestBuildArgs_AddDirNeverSwallowsPrompt(t *testing.T) {
 	if next := args[idx+2]; !strings.HasPrefix(next, "--") || next == prompt {
 		t.Fatalf("token after --add-dir value must be a flag, got %q; args = %q", next, args)
 	}
+}
+
+// TestBuildArgs_Effort covers the CLAUDE_EFFORT mapping in buildArgs: empty emits
+// nothing, a standard level (max) becomes "--effort max", "ultracode" takes the
+// --settings '{"ultracode":true}' path (NOT --effort, since ultracode is not a
+// valid --effort value), and an unknown value is ignored so a bad env can't break
+// the invocation. buildArgs does not currently emit a --settings flag of its own,
+// so the ultracode case must append exactly one fresh --settings (the merge path
+// is exercised separately by TestApplyEffort_UltracodeMerges).
+func TestBuildArgs_Effort(t *testing.T) {
+	const prompt = "hello"
+	tests := []struct {
+		name          string
+		effort        string
+		wantEffort    string // expected value after "--effort"; "" means no --effort flag
+		wantSettings  string // expected value after "--settings"; "" means no --settings flag
+		wantNoEffort  bool   // assert "--effort" is entirely absent
+		wantNoSetting bool   // assert "--settings" is entirely absent
+	}{
+		{name: "empty passes nothing", effort: "", wantNoEffort: true, wantNoSetting: true},
+		{name: "standard low", effort: "low", wantEffort: "low", wantNoSetting: true},
+		{name: "standard max", effort: "max", wantEffort: "max", wantNoSetting: true},
+		{name: "standard xhigh", effort: "xhigh", wantEffort: "xhigh", wantNoSetting: true},
+		{name: "ultracode via settings", effort: "ultracode", wantSettings: `{"ultracode":true}`, wantNoEffort: true},
+		{name: "unknown ignored", effort: "bogus", wantNoEffort: true, wantNoSetting: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			args := buildArgs(Options{Model: "m", MaxTurns: 40, Effort: tc.effort}, prompt, false)
+
+			if tc.wantNoEffort && flagValue(args, "--effort") != "" {
+				t.Errorf("expected no --effort flag; args = %q", args)
+			}
+			if tc.wantEffort != "" {
+				if got := flagValue(args, "--effort"); got != tc.wantEffort {
+					t.Errorf("--effort = %q, want %q; args = %q", got, tc.wantEffort, args)
+				}
+			}
+			if tc.wantNoSetting && flagValue(args, "--settings") != "" {
+				t.Errorf("expected no --settings flag; args = %q", args)
+			}
+			if tc.wantSettings != "" {
+				got := flagValue(args, "--settings")
+				if got == "" {
+					t.Fatalf("expected --settings flag; args = %q", args)
+				}
+				// Compare semantically (key set), not byte-for-byte, so map ordering
+				// in the marshaled JSON can't flake the test.
+				if !jsonEqual(t, got, tc.wantSettings) {
+					t.Errorf("--settings = %q, want equivalent of %q; args = %q", got, tc.wantSettings, args)
+				}
+			}
+			// The prompt must always survive as the trailing arg regardless of effort.
+			if len(args) == 0 || args[len(args)-1] != prompt {
+				t.Errorf("prompt must remain the last arg; args = %q", args)
+			}
+		})
+	}
+}
+
+// TestApplyEffort_UltracodeMerges asserts the MERGE branch of the ultracode path:
+// when the args already carry a --settings flag (e.g. flock starts passing one for
+// permissions), "ultracode": true is merged INTO that existing JSON object rather
+// than appended as a second, conflicting --settings. Existing keys are preserved.
+func TestApplyEffort_UltracodeMerges(t *testing.T) {
+	args := []string{"--settings", `{"permissions":{"allow":["Bash"]}}`}
+	got := applyEffort(args, "ultracode")
+
+	// Exactly one --settings flag must remain (no duplicate appended).
+	if n := countFlag(got, "--settings"); n != 1 {
+		t.Fatalf("want exactly one --settings flag after merge, got %d; args = %q", n, got)
+	}
+	val := flagValue(got, "--settings")
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(val), &obj); err != nil {
+		t.Fatalf("merged --settings is not valid JSON: %v; value = %q", err, val)
+	}
+	if got, ok := obj["ultracode"].(bool); !ok || !got {
+		t.Errorf("merged --settings missing ultracode:true; value = %q", val)
+	}
+	if _, ok := obj["permissions"]; !ok {
+		t.Errorf("merge dropped the existing permissions key; value = %q", val)
+	}
+}
+
+// flagValue returns the token immediately following the first occurrence of flag
+// in args, or "" if the flag is absent (or is the final token with no value).
+func flagValue(args []string, flag string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+// countFlag returns how many times flag appears in args.
+func countFlag(args []string, flag string) int {
+	n := 0
+	for _, a := range args {
+		if a == flag {
+			n++
+		}
+	}
+	return n
+}
+
+// jsonEqual reports whether two JSON strings decode to equal values, ignoring
+// object key ordering in the serialized form.
+func jsonEqual(t *testing.T, a, b string) bool {
+	t.Helper()
+	var av, bv any
+	if err := json.Unmarshal([]byte(a), &av); err != nil {
+		t.Fatalf("decode %q: %v", a, err)
+	}
+	if err := json.Unmarshal([]byte(b), &bv); err != nil {
+		t.Fatalf("decode %q: %v", b, err)
+	}
+	return reflect.DeepEqual(av, bv)
 }
 
 // TestRun_ImageStdinMode asserts that a run carrying an image switches to
