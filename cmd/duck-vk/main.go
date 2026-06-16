@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -94,6 +95,18 @@ func run() int {
 		MaxTurns: cfg.ClaudeMaxTurns,
 		Effort:   cfg.ClaudeEffort,
 		Env:      claudeEnv(cfg),
+	}
+	// Wire the context7 MCP docs server (up-to-date, version-specific library/API
+	// docs) into every run when enabled. A write failure is non-fatal — the bot
+	// runs without it, exactly as before.
+	if cfg.EnableContext7 {
+		mcpPath := filepath.Join(cfg.ApprovedDirectory, ".flock-mcp.json")
+		if err := claude.WriteContext7MCPConfig(mcpPath); err != nil {
+			logger.Warn("write context7 mcp config; running without docs MCP", "error", err)
+		} else {
+			opts.MCPConfig = mcpPath
+			logger.Info("context7 MCP enabled", "config", mcpPath)
+		}
 	}
 
 	ws := &workspace.Renderer{

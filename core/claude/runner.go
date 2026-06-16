@@ -79,6 +79,12 @@ type Options struct {
 	Workdir   string // working/allowed dir; also the child's cwd
 	Model     string // --model value
 	MaxTurns  int    // --max-turns value
+	// MCPConfig, when non-empty, is the path to an MCP servers JSON passed to the
+	// CLI as --mcp-config, so the run can use those tools (e.g. context7 library
+	// docs). It is set only when the config was written at startup, so an empty
+	// value (feature disabled or a write failure) is a no-op — and an unreachable
+	// MCP server never breaks a run, the CLI just runs without those tools.
+	MCPConfig string
 	// Effort selects the reasoning effort level / "ultracode" mode passed to the
 	// claude CLI. Empty means "pass nothing" (the model's default effort applies).
 	// The standard levels (low, medium, high, xhigh, max) map to the --effort flag.
@@ -214,6 +220,12 @@ func buildArgs(o Options, prompt string, stdinMode bool) []string {
 	// (--permission-mode at minimum) after its value stops the variadic in time.
 	if o.Workdir != "" {
 		args = append(args, "--add-dir", o.Workdir)
+	}
+	// --mcp-config is ALSO variadic (`--mcp-config <configs...>`); like --add-dir it
+	// must precede the single-value flags so the parser doesn't swallow them as extra
+	// config paths. The next flag (--model/--permission-mode) stops the variadic.
+	if o.MCPConfig != "" {
+		args = append(args, "--mcp-config", o.MCPConfig)
 	}
 	if o.Model != "" {
 		args = append(args, "--model", o.Model)
