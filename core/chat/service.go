@@ -38,19 +38,12 @@ const tickInterval = 1 * time.Second
 // never throttled by this — only the fallback edit branch.
 const minEditInterval = 3 * time.Second
 
-// anchorText is the persistent message sent at the start of a run. It carries the
-// Stop button (which an ephemeral draft can't) and is later edited into the final
-// answer; the live progress streams separately as a draft.
-//
-// Its wording is deliberately NOT the live frame's "Working… (Ns)" header. Where
-// drafts are supported (Telegram 1:1) the anchor and the draft are two SEPARATE
-// bubbles shown side by side, so a "Working…" anchor read as a duplicate of the
-// live "Working… (Ns)" preview (the reported double-bubble bug). A neutral holder
-// line pairs with the live draft without looking like a second progress message.
-// In the edit fallback (groups, VK — no draft) render() overwrites the anchor with
-// the live frame on the first tick, so this text only shows for the brief
-// pre-first-tick instant there; the single-bubble behavior is unchanged.
-const anchorText = "⏳ In progress…"
+// anchorText is the persistent progress message sent at the start of a run. It
+// carries the Stop button and is edited IN PLACE with the live "Working… (Ns)"
+// frame on each (throttled) tick, then edited into the final answer — so a whole
+// run is exactly ONE chat bubble, identical on every platform. This initial text
+// shows only until the first tick replaces it with the live frame.
+const anchorText = "⏳ Working…"
 
 // workspaceEnsurer resolves a chat's isolated workspace path, creating it (and
 // rendering CLAUDE.md + agents) on first use. *workspace.Renderer satisfies it;
@@ -454,30 +447,19 @@ func (s *Service) run(
 	var (
 		lastSent       string
 		throttledUntil time.Time
-		// lastEditAt is the wall-clock time of the last SUCCESSFUL fallback edit; its
-		// zero value lets the first fallback edit fire promptly (so a mid-run flip from
-		// draft to fallback isn't blocked). Only the edit fallback consults it.
-		lastEditAt time.Time
-		// draftStreaming holds while we push live progress as an ephemeral draft (the
-		// rate-limit-free path). The first failed StreamDraft flips it off and the run
-		// falls back to editing the anchor for its remainder.
-		draftStreaming = progressMsgID != ""
-		finalResult    *claude.RunResult
-		finalErr       error
+		// lastEditAt is the wall-clock time of the last SUCCESSFUL progress edit; its
+		// zero value lets the first edit fire promptly.
+		lastEditAt  time.Time
+		finalResult *claude.RunResult
+		finalErr    error
 	)
 
-	// Seed the live preview immediately so it appears without waiting for a tick.
-	if draftStreaming {
-		if err := s.chat.StreamDraft(ctx, chatID, runID, prog.Frame(), true); err != nil {
-			draftStreaming = false
-			s.log.Debug("draft streaming unsupported; falling back to edits", "error", err)
-		} else {
-			lastSent = prog.Frame()
-		}
-	}
-
-	// render pushes the current progress frame: as a rate-limit-free draft preview
-	// while draftStreaming holds, else by editing the anchor (rate-limit aware).
+	// render edits the single anchor message in place with the current progress
+	// frame, rate-limit aware. The anchor IS the one live progress bubble (it also
+	// carries the Stop button), so a run is exactly ONE message on every platform.
+	// Telegram caps message edits, so real edits are throttled to one per
+	// minEditInterval; the 1s ticker only advances the in-memory counter, and most
+	// ticks early-return on frame==lastSent or the throttle.
 	render := func() {
 		if progressMsgID == "" {
 			return
@@ -486,24 +468,14 @@ func (s *Service) run(
 		if frame == lastSent {
 			return
 		}
-		if draftStreaming {
-			err := s.chat.StreamDraft(ctx, chatID, runID, frame, true)
-			if err == nil {
-				lastSent = frame
-				return
-			}
-			// Drafts unsupported here: edit the anchor for the rest of the run.
-			draftStreaming = false
-			s.log.Debug("draft stream failed; falling back to edits", "error", err)
-		}
-		// Fallback: edit the anchor. Skip while rate-limited so we don't hammer the
-		// throttled endpoint (which prolongs the back-off and starves final delivery).
+		// Skip while rate-limited so we don't hammer the throttled endpoint (which
+		// prolongs the back-off and starves final delivery).
 		if !throttledUntil.IsZero() && s.nowFunc().Before(throttledUntil) {
 			return
 		}
-		// Also throttle real edits to one per minEditInterval: the 1s ticker would
-		// otherwise spam the rate-limited Edit endpoint and provoke the 429s above.
-		// The zero value of lastEditAt lets the first fallback edit fire immediately.
+		// Throttle real edits to one per minEditInterval: the 1s ticker would otherwise
+		// spam the rate-limited Edit endpoint and provoke 429s. The zero value of
+		// lastEditAt lets the first edit fire immediately.
 		if !lastEditAt.IsZero() && s.nowFunc().Sub(lastEditAt) < minEditInterval {
 			return
 		}
@@ -546,13 +518,11 @@ loop:
 			case claude.RunError:
 				finalErr = ev.Err
 			default:
-				// Fold the activity event into the renderer and, in draft mode, push it
-				// to the live preview RIGHT AWAY (drafts have no edit rate limit) so the
-				// stream reflects what's happening in real time instead of once a tick.
-				// In the edit fallback we leave rendering to the (rate-limited) ticker.
-				if prog.Observe(ev) && draftStreaming {
-					render()
-				}
+				// Fold the activity event into the renderer. Rendering is left to the
+				// (rate-limited) ticker — the Edit endpoint can't keep up with per-event
+				// edits, so an event only updates the in-memory ring and the next tick
+				// flushes it (throttled).
+				prog.Observe(ev)
 			}
 		}
 	}
@@ -564,7 +534,7 @@ loop:
 	// case their NEXT request is denied (the crossing request still ran).
 	s.recordCost(userID, finalResult)
 
-	s.finish(ctx, chatID, progressMsgID, runID, markerID, finalResult, finalErr, ctx.Err())
+	s.finish(ctx, chatID, progressMsgID, markerID, finalResult, finalErr, ctx.Err())
 
 	// Self-heal a stale/poisoned resume id: when a run that USED a resume session
 	// id terminates with an is_error Result, drop the stored session for this chat
@@ -704,7 +674,7 @@ func (s *Service) clearLanePending(chatID ChatID) {
 // finish renders the terminal message and replaces the progress message with it
 // (chunked when the answer exceeds the platform's message size limit).
 func (s *Service) finish(
-	ctx context.Context, chatID ChatID, progressMsgID MessageID, runID, markerID string,
+	ctx context.Context, chatID ChatID, progressMsgID MessageID, markerID string,
 	res *claude.RunResult, runErr, ctxErr error,
 ) {
 	// Use a background context for delivery: the run ctx may be cancelled by Stop
@@ -726,9 +696,6 @@ func (s *Service) finish(
 	if !genuinelyInterrupted {
 		s.removePending(chatID, markerID)
 	}
-	// Clear the live draft preview (empty text) so it doesn't linger beside the
-	// persisted answer. Best-effort; harmless if no draft was ever streamed.
-	_ = s.chat.StreamDraft(deliverCtx, chatID, runID, "", false)
 	var text string
 	switch {
 	case ctxErr != nil && res == nil && runErr == nil:
