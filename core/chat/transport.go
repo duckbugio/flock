@@ -34,13 +34,6 @@ type Transport interface {
 	// Edit updates an existing message's text (and Stop markup, when stopRunID is
 	// non-empty; empty clears the markup). asMarkdown behaves as for Send.
 	Edit(ctx context.Context, chatID ChatID, messageID MessageID, text, stopRunID string, asMarkdown bool) error
-	// StreamDraft streams text as an ephemeral live "draft" preview keyed by
-	// draftID: repeated calls update the same preview (rate-limit-free, unlike
-	// Edit) and an empty text clears it. Used for live run progress; the answer is
-	// persisted with Send/Edit. asMarkdown behaves as for Send/Edit (ignored when
-	// text is empty). Returns an error when the platform can't stream a draft, so
-	// the caller can fall back to editing a normal message.
-	StreamDraft(ctx context.Context, chatID ChatID, draftID, text string, asMarkdown bool) error
 	// Delete removes a message; failures are non-fatal to the caller.
 	Delete(ctx context.Context, chatID ChatID, messageID MessageID) error
 	// SendDocument uploads a local file to the chat as a document/attachment. The
@@ -67,10 +60,10 @@ type Capabilities struct {
 	// chunker (Telegram 4096). A non-positive value selects a safe default.
 	MaxMessageRunes int
 	// CanSendRich: the platform can render Bot API 10.1 rich messages (structured
-	// blocks + a native rich draft) instead of the legacy MarkdownToHTML/plain
-	// path. It is purely additive — false (the zero value) keeps a transport on the
-	// exact pre-rich behaviour, so a platform that does not set it (VK) needs no
-	// change. Telegram sets it from the ENABLE_RICH_MESSAGES flag; even there the
+	// blocks) instead of the legacy MarkdownToHTML/plain path. It is purely additive
+	// — false (the zero value) keeps a transport on the exact pre-rich behaviour, so
+	// a platform that does not set it (VK) needs no change. Telegram sets it from the
+	// ENABLE_RICH_MESSAGES flag; even there the
 	// rich path always falls back to MarkdownToHTML/plain on any error, so the flag
 	// is a feature toggle, never a hard dependency.
 	CanSendRich bool

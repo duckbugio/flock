@@ -1,4 +1,4 @@
-//nolint:testpackage // whitebox: tests the unexported rich gating/fallback in Send/Edit/StreamDraft
+//nolint:testpackage // whitebox: tests the unexported rich gating/fallback in Send/Edit
 package telegram
 
 import (
@@ -18,14 +18,11 @@ import (
 // fakeRich is a stub richTransport: it records calls and returns a configured id
 // or error so the gating/fallback decisions can be tested without HTTP.
 type fakeRich struct {
-	sendID    int
-	sendErr   error
-	editErr   error
-	draftErr  error
-	sendN     int32
-	editN     int32
-	draftN    int32
-	lastDraft inputRichMessage
+	sendID  int
+	sendErr error
+	editErr error
+	sendN   int32
+	editN   int32
 }
 
 func (f *fakeRich) send(_ context.Context, _ int64, _ inputRichMessage, _ models.ReplyMarkup) (int, error) {
@@ -38,15 +35,9 @@ func (f *fakeRich) edit(_ context.Context, _ int64, _ int, _ inputRichMessage, _
 	return f.editErr
 }
 
-func (f *fakeRich) streamDraft(_ context.Context, _, _ int64, msg inputRichMessage) error {
-	atomic.AddInt32(&f.draftN, 1)
-	f.lastDraft = msg
-	return f.draftErr
-}
-
 // legacyBotServer builds a *bot.Bot pointed at a fake Bot API that counts the
-// legacy sendMessage/editMessageText/sendMessageDraft calls and always succeeds.
-func legacyBotServer(t *testing.T, sendHits, editHits, draftHits *int32) *bot.Bot {
+// legacy sendMessage/editMessageText calls and always succeeds.
+func legacyBotServer(t *testing.T, sendHits, editHits *int32) *bot.Bot {
 	t.Helper()
 	ok := func(w http.ResponseWriter, _ *http.Request) {
 		if err := json.NewEncoder(w).Encode(map[string]any{
@@ -64,12 +55,6 @@ func legacyBotServer(t *testing.T, sendHits, editHits, draftHits *int32) *bot.Bo
 	mux.HandleFunc("/bot123:ABC/editMessageText", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(editHits, 1)
 		ok(w, r)
-	})
-	mux.HandleFunc("/bot123:ABC/sendMessageDraft", func(w http.ResponseWriter, _ *http.Request) {
-		atomic.AddInt32(draftHits, 1)
-		if err := json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": true}); err != nil {
-			t.Errorf("encode draft response: %v", err)
-		}
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -113,8 +98,8 @@ func TestTrySendRichGating(t *testing.T) {
 // TestSendRichSuccessSkipsLegacy: a successful rich send returns the rich id and
 // never touches the legacy sendMessage endpoint.
 func TestSendRichSuccessSkipsLegacy(t *testing.T) {
-	var sendHits, editHits, draftHits int32
-	b := legacyBotServer(t, &sendHits, &editHits, &draftHits)
+	var sendHits, editHits int32
+	b := legacyBotServer(t, &sendHits, &editHits)
 	c := &botChat{b: b, enableRich: true, rich: &fakeRich{sendID: 4242}}
 
 	id, err := c.Send(context.Background(), "555", "# Hi\n\nbody", "", true)
@@ -132,8 +117,8 @@ func TestSendRichSuccessSkipsLegacy(t *testing.T) {
 // TestSendRichErrorFallsBackToLegacy: a rich failure falls through to the legacy
 // sendMessage, which delivers the answer.
 func TestSendRichErrorFallsBackToLegacy(t *testing.T) {
-	var sendHits, editHits, draftHits int32
-	b := legacyBotServer(t, &sendHits, &editHits, &draftHits)
+	var sendHits, editHits int32
+	b := legacyBotServer(t, &sendHits, &editHits)
 	fr := &fakeRich{sendErr: errors.New("rich boom")}
 	c := &botChat{b: b, enableRich: true, rich: fr}
 
@@ -154,8 +139,8 @@ func TestSendRichErrorFallsBackToLegacy(t *testing.T) {
 
 // TestEditRichErrorFallsBackToLegacy mirrors the Send fallback for Edit.
 func TestEditRichErrorFallsBackToLegacy(t *testing.T) {
-	var sendHits, editHits, draftHits int32
-	b := legacyBotServer(t, &sendHits, &editHits, &draftHits)
+	var sendHits, editHits int32
+	b := legacyBotServer(t, &sendHits, &editHits)
 	fr := &fakeRich{editErr: errors.New("rich boom")}
 	c := &botChat{b: b, enableRich: true, rich: fr}
 
@@ -164,44 +149,6 @@ func TestEditRichErrorFallsBackToLegacy(t *testing.T) {
 	}
 	if atomic.LoadInt32(&editHits) != 1 {
 		t.Errorf("legacy editMessageText hits = %d, want 1 (fallback)", editHits)
-	}
-}
-
-// TestStreamDraftRichSuccessSkipsLegacy: a successful rich draft never touches the
-// legacy sendMessageDraft endpoint and carries the Markdown frame.
-func TestStreamDraftRichSuccessSkipsLegacy(t *testing.T) {
-	var sendHits, editHits, draftHits int32
-	b := legacyBotServer(t, &sendHits, &editHits, &draftHits)
-	fr := &fakeRich{}
-	c := &botChat{b: b, enableRich: true, rich: fr}
-
-	if err := c.StreamDraft(context.Background(), "555", "run-1", "**frame**", true); err != nil {
-		t.Fatalf("StreamDraft: %v", err)
-	}
-	if atomic.LoadInt32(&fr.draftN) != 1 {
-		t.Errorf("rich streamDraft calls = %d, want 1", fr.draftN)
-	}
-	if fr.lastDraft.Markdown != "**frame**" {
-		t.Errorf("draft markdown = %q, want the frame text", fr.lastDraft.Markdown)
-	}
-	if atomic.LoadInt32(&draftHits) != 0 {
-		t.Errorf("legacy sendMessageDraft hits = %d, want 0 (rich succeeded)", draftHits)
-	}
-}
-
-// TestStreamDraftRichErrorFallsBackToLegacy: a rich draft failure falls through to
-// the legacy SendMessageDraft.
-func TestStreamDraftRichErrorFallsBackToLegacy(t *testing.T) {
-	var sendHits, editHits, draftHits int32
-	b := legacyBotServer(t, &sendHits, &editHits, &draftHits)
-	fr := &fakeRich{draftErr: errors.New("rich boom")}
-	c := &botChat{b: b, enableRich: true, rich: fr}
-
-	if err := c.StreamDraft(context.Background(), "555", "run-1", "frame", true); err != nil {
-		t.Fatalf("StreamDraft: %v", err)
-	}
-	if atomic.LoadInt32(&draftHits) != 1 {
-		t.Errorf("legacy sendMessageDraft hits = %d, want 1 (fallback)", draftHits)
 	}
 }
 
@@ -238,8 +185,8 @@ func TestRecordRichBreaker(t *testing.T) {
 // TestRichBreakerStopsAttempts: once the breaker trips, Send stops attempting the
 // rich path during the cooldown (no further calls to the rich transport).
 func TestRichBreakerStopsAttempts(t *testing.T) {
-	var sendHits, editHits, draftHits int32
-	b := legacyBotServer(t, &sendHits, &editHits, &draftHits)
+	var sendHits, editHits int32
+	b := legacyBotServer(t, &sendHits, &editHits)
 	fr := &fakeRich{sendErr: errors.New("unsupported")}
 	c := &botChat{b: b, enableRich: true, rich: fr}
 
@@ -286,8 +233,8 @@ func TestRichBreakerCooldownProbe(t *testing.T) {
 // TestSendRichDisabledUsesLegacy: with the flag off, Send takes the legacy path
 // untouched (no rich transport configured).
 func TestSendRichDisabledUsesLegacy(t *testing.T) {
-	var sendHits, editHits, draftHits int32
-	b := legacyBotServer(t, &sendHits, &editHits, &draftHits)
+	var sendHits, editHits int32
+	b := legacyBotServer(t, &sendHits, &editHits)
 	c := &botChat{b: b, enableRich: false} // rich nil — exactly today's behaviour
 
 	if _, err := c.Send(context.Background(), "555", "hello", "", true); err != nil {
@@ -295,24 +242,5 @@ func TestSendRichDisabledUsesLegacy(t *testing.T) {
 	}
 	if atomic.LoadInt32(&sendHits) != 1 {
 		t.Errorf("legacy sendMessage hits = %d, want 1", sendHits)
-	}
-}
-
-// TestDraftIDToInt asserts the run-id → non-zero int64 mapping is stable and
-// distinguishes different ids (sendRichMessageDraft requires a non-zero integer).
-func TestDraftIDToInt(t *testing.T) {
-	if a, b := draftIDToInt("run-1"), draftIDToInt("run-1"); a != b {
-		t.Errorf("not stable: %d != %d", a, b)
-	}
-	if draftIDToInt("run-1") == draftIDToInt("run-2") {
-		t.Error("distinct run ids collided")
-	}
-	for _, s := range []string{"", "0", "run-1", "duck/-5238983644/x"} {
-		if draftIDToInt(s) == 0 {
-			t.Errorf("draftIDToInt(%q) = 0, want non-zero", s)
-		}
-		if draftIDToInt(s) < 0 {
-			t.Errorf("draftIDToInt(%q) = %d, want positive", s, draftIDToInt(s))
-		}
 	}
 }

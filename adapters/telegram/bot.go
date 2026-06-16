@@ -158,51 +158,6 @@ func (c *botChat) Edit(
 	return err
 }
 
-// StreamDraft streams text as an ephemeral live preview keyed by draftID (repeated
-// calls update the same preview; an empty text clears it). It is rate-limit-free
-// relative to EditMessageText, so it carries the live run progress while the answer
-// is persisted with Send/Edit. A draft can't hold an inline keyboard, which is why
-// the Stop button rides a separate anchor message. When asMarkdown is set the frame
-// is rendered as HTML, but — unlike Send/Edit — it falls back to a plain draft on ANY
-// error (not just a parse error) so enabling markup can never knock the preview off
-// the rate-limit-free draft path. asMarkdown is ignored when text is empty (clear).
-func (c *botChat) StreamDraft(ctx context.Context, chatID chat.ChatID, draftID, text string, asMarkdown bool) error {
-	// Rich path first: stream the frame as a native rich draft (sendRichMessageDraft),
-	// passing the Markdown straight through. On any failure fall through to the legacy
-	// HTML/plain draft below — identical contract, so the run loop's draft fallback is
-	// unaffected. Skipped for the empty-text clear (handled by the legacy path).
-	if c.richAttemptable(asMarkdown, text) {
-		err := c.rich.streamDraft(ctx, parseChatID(chatID), draftIDToInt(draftID), richMarkdown(text))
-		c.recordRich(err)
-		if err == nil {
-			return nil
-		}
-	}
-	params := &bot.SendMessageDraftParams{
-		ChatID:  parseChatID(chatID),
-		DraftID: draftID,
-		Text:    text,
-	}
-	if asMarkdown && text != "" {
-		params.Text = MarkdownToHTML(text)
-		params.ParseMode = models.ParseModeHTML
-	}
-	_, err := c.b.SendMessageDraft(ctx, params)
-	if err != nil && asMarkdown && text != "" {
-		// The HTML attempt failed — retry as PLAIN text, UNCONDITIONALLY (not only on
-		// an isParseError). The draft transport may reject parse_mode with an error that
-		// doesn't mention "parse", or not support it at all; if that error propagates,
-		// the run loop flips draftStreaming off and drops to the rate-limited edit
-		// fallback for the rest of the run (smooth ~1s preview -> throttled ~3s steps).
-		// A plain draft keeps the preview on the rate-limit-free path; worst case it is
-		// an unformatted but still-live frame.
-		params.Text = text
-		params.ParseMode = ""
-		_, err = c.b.SendMessageDraft(ctx, params)
-	}
-	return err
-}
-
 // trySendRich attempts to send text as a Bot API 10.1 rich message. It returns
 // (id, true) on success; ("", false) tells Send to fall back to the legacy
 // HTML/plain path. It is a no-op (false) unless rich is enabled, asMarkdown is
@@ -233,27 +188,6 @@ func (c *botChat) tryEditRich(
 	err := c.rich.edit(ctx, chatID, messageID, richMarkdown(text), stopMarkup(stopRunID))
 	c.recordRich(err)
 	return err == nil
-}
-
-// draftIDToInt maps the neutral string draft id (the run id) to the non-zero
-// int64 sendRichMessageDraft requires, stably: the same run id always yields the
-// same id (so Telegram animates updates to one draft), and a zero hash is bumped
-// to 1 since the API rejects draft_id 0.
-func draftIDToInt(draftID string) int64 {
-	const (
-		fnvOffset = 1469598103934665603
-		fnvPrime  = 1099511628211
-	)
-	var h uint64 = fnvOffset
-	for i := 0; i < len(draftID); i++ {
-		h ^= uint64(draftID[i])
-		h *= fnvPrime
-	}
-	id := int64(h >> 1) // shift out the sign bit so the id is always positive
-	if id == 0 {
-		id = 1
-	}
-	return id
 }
 
 // nowTime reads the breaker clock, defaulting to time.Now when none is injected.
