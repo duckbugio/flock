@@ -20,13 +20,14 @@ func TestIsReservedCommand(t *testing.T) {
 		{"help", true},
 		{"new", true},
 		{"stop", true},
+		{"schedule", true},
 		{"START", true},
 		{"Help", true},
 		{"NeW", true},
 		{"STOP", true},
+		{"Schedule", true},
 		{"loop", false},
 		{"goal", false},
-		{"schedule", false},
 		{"news", false},
 		{"", false},
 		{"new ", false},
@@ -44,9 +45,9 @@ func TestIsReservedCommand(t *testing.T) {
 
 // TestReservedCommandsShape guards the menu source: names are unique, lowercase,
 // non-empty, every command has a description, and the order is the documented
-// start, help, new, stop. "schedule" must NOT yet appear (a later PR adds it).
+// start, help, new, stop, schedule.
 func TestReservedCommandsShape(t *testing.T) {
-	wantOrder := []string{"start", "help", "new", "stop"}
+	wantOrder := []string{"start", "help", "new", "stop", "schedule"}
 	if len(chat.ReservedCommands) != len(wantOrder) {
 		t.Fatalf("ReservedCommands has %d entries, want %d", len(chat.ReservedCommands), len(wantOrder))
 	}
@@ -71,8 +72,8 @@ func TestReservedCommandsShape(t *testing.T) {
 		seen[c.Name] = true
 	}
 
-	if chat.IsReservedCommand("schedule") {
-		t.Error("schedule must not be reserved in this PR")
+	if !chat.IsReservedCommand("schedule") {
+		t.Error("schedule must be reserved (the bot owns /schedule)")
 	}
 }
 

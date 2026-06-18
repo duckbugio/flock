@@ -5,11 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/duckbugio/flock/core/chat"
 	"github.com/duckbugio/flock/core/claude"
+	"github.com/duckbugio/flock/core/schedule"
 )
 
 // fakeService records the Service calls the receiver makes.
@@ -306,6 +309,59 @@ func TestReceiverNewsNotTreatedAsNew(t *testing.T) {
 	}
 	if len(svc.handleCalls) != 1 || svc.handleCalls[0].prompt != "/news today" {
 		t.Errorf("/news should pass through to Handle with full text, got %+v", svc.handleCalls)
+	}
+}
+
+// TestReceiverScheduleDisabled: with no scheduler wired (ENABLE_SCHEDULER off),
+// "/schedule" replies with the disabled notice and is NOT forwarded to Claude.
+func TestReceiverScheduleDisabled(t *testing.T) {
+	svc := &fakeService{}
+	notices := &fakeNotice{}
+	r := newTestReceiver(svc, notices, false, nil) // no scheduler
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{
+		FromID: 42, PeerID: 200, Text: "/schedule list", ConversationMessageID: 5,
+	}))
+
+	if len(svc.handleCalls) != 0 {
+		t.Errorf("/schedule must not reach Claude when disabled, got %d Handle calls", len(svc.handleCalls))
+	}
+	if len(notices.texts) != 1 || notices.texts[0] != scheduleDisabledText {
+		t.Errorf("notice texts = %v, want one disabled notice", notices.texts)
+	}
+}
+
+// TestReceiverScheduleEnabledReachesDispatch: with a scheduler wired, "/schedule
+// add ..." reaches Manager.Dispatch (the job is persisted) and the reply is sent
+// as a notice — never forwarded to Claude.
+func TestReceiverScheduleEnabledReachesDispatch(t *testing.T) {
+	svc := &fakeService{}
+	notices := &fakeNotice{}
+	store, err := schedule.Open(filepath.Join(t.TempDir(), "schedules.json"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	mgr := schedule.NewManager(store, func(string, string) {}, nil, nil)
+	r := NewReceiver(ReceiverConfig{
+		Service:   svc,
+		GroupID:   123,
+		IsAllowed: func(uid int64) bool { return uid == 42 },
+		Notices:   notices,
+		Scheduler: mgr,
+	})
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{
+		FromID: 42, PeerID: 200, Text: "/schedule add job 0 9 * * 1 do the thing", ConversationMessageID: 6,
+	}))
+
+	if len(svc.handleCalls) != 0 {
+		t.Errorf("/schedule must not reach Claude when enabled, got %d Handle calls", len(svc.handleCalls))
+	}
+	if len(notices.texts) != 1 || !strings.Contains(notices.texts[0], "Added job #") {
+		t.Errorf("notice texts = %v, want one 'Added job #...' confirmation", notices.texts)
+	}
+	if got := store.List("200"); len(got) != 1 || got[0].Prompt != "do the thing" {
+		t.Errorf("store after add = %+v, want one job with prompt 'do the thing' for chat 200", got)
 	}
 }
 

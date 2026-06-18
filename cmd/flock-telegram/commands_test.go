@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/duckbugio/flock/core/chat"
 	"github.com/duckbugio/flock/core/claude"
 	"github.com/duckbugio/flock/core/dispatch"
+	"github.com/duckbugio/flock/core/schedule"
 	"github.com/duckbugio/flock/internal/config"
 )
 
@@ -141,9 +143,9 @@ func TestStartWelcomeText(t *testing.T) {
 // Claude as free text. Keying both off the same source and asserting equality makes
 // that impossible.
 func TestReservedHandlersMatchCanonicalSet(t *testing.T) {
-	// A nil *chat.Service is fine: we only inspect the map's key set, never invoke a
-	// handler closure.
-	handlers := reservedHandlers(config.Config{}, nil)
+	// A nil *chat.Service and nil *schedule.Manager are fine: we only inspect the
+	// map's key set, never invoke a handler closure.
+	handlers := reservedHandlers(config.Config{}, nil, nil)
 
 	if len(handlers) != len(chat.ReservedCommands) {
 		t.Fatalf("reservedHandlers has %d entries, want %d (chat.ReservedCommands)",
@@ -254,8 +256,9 @@ func newCommandTestBot(t *testing.T, cfg config.Config, svc messageSubmitter, re
 		t.Fatalf("build test bot: %v", err)
 	}
 	// Register the reserved-command handlers from the SAME canonical source main uses,
-	// so the routing (reserved handler vs default) is identical to production.
-	for name, h := range reservedHandlers(cfg, reservedSvc) {
+	// so the routing (reserved handler vs default) is identical to production. The
+	// scheduler is nil here (the pass-through tests do not exercise /schedule).
+	for name, h := range reservedHandlers(cfg, reservedSvc, nil) {
 		b.RegisterHandlerMatchFunc(commandMatch(name), h)
 	}
 	return b
@@ -302,6 +305,92 @@ func TestNativeCommandPassesThroughTelegram(t *testing.T) {
 
 	if got := svc.seen(); len(got) != 1 {
 		t.Fatalf("reserved /stop leaked to the run Service: Service saw %v, want only the native command", got)
+	}
+}
+
+// TestScheduleCommandDisabled: with no scheduler wired (mgr nil), /schedule is
+// routed to its own handler (never the default text/Claude path) and the handler
+// replies with the disabled notice. We assert routing by checking the pass-through
+// Service never sees the command.
+func TestScheduleCommandDisabled(t *testing.T) {
+	const userID = 42
+	cfg := config.Config{AllowedUsers: []int64{userID}}
+	svc := &recordingSubmitter{}
+	b := newCommandTestBot(t, cfg, svc, nil) // reservedSvc nil: /schedule needs no Service
+
+	b.ProcessUpdate(context.Background(), privateCommandUpdate(userID, 555, "/schedule list", len("/schedule")))
+
+	if got := svc.seen(); len(got) != 0 {
+		t.Fatalf("/schedule leaked to the run Service when disabled: saw %v", got)
+	}
+}
+
+// TestScheduleCommandEnabledReachesDispatch: with a scheduler wired into the
+// reserved handlers, "/schedule add ..." reaches Manager.Dispatch (the job is
+// persisted) and never reaches the pass-through Service.
+func TestScheduleCommandEnabledReachesDispatch(t *testing.T) {
+	const userID = 77 // a distinct sender so CreatedBy is asserted meaningfully
+	cfg := config.Config{AllowedUsers: []int64{userID}}
+	svc := &recordingSubmitter{}
+
+	store, err := schedule.Open(filepath.Join(t.TempDir(), "schedules.json"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	mgr := schedule.NewManager(store, func(string, string) {}, nil, nil)
+
+	defaultHandler := func(ctx context.Context, b *bot.Bot, update *models.Update) {
+		if msg := update.Message; msg != nil {
+			deps := messageDeps{cfg: cfg, service: svc}
+			handleMessage(ctx, deps, b, msg, false)
+		}
+	}
+	b, err := bot.New("123456:test-token",
+		bot.WithSkipGetMe(),
+		bot.WithNotAsyncHandlers(),
+		bot.WithHTTPClient(time.Minute, stubHTTPClient{}),
+		bot.WithDefaultHandler(defaultHandler),
+	)
+	if err != nil {
+		t.Fatalf("build test bot: %v", err)
+	}
+	for name, h := range reservedHandlers(cfg, nil, mgr) {
+		b.RegisterHandlerMatchFunc(commandMatch(name), h)
+	}
+
+	b.ProcessUpdate(context.Background(), privateCommandUpdate(
+		userID, 200, "/schedule add job 0 9 * * 1 do the thing", len("/schedule")))
+
+	if got := svc.seen(); len(got) != 0 {
+		t.Fatalf("/schedule leaked to the run Service when enabled: saw %v", got)
+	}
+	jobs := store.List("200")
+	if len(jobs) != 1 || jobs[0].Prompt != "do the thing" {
+		t.Fatalf("store after /schedule add = %+v, want one job with prompt 'do the thing'", jobs)
+	}
+	if jobs[0].CreatedBy != userID {
+		t.Errorf("job CreatedBy = %d, want the sender %d", jobs[0].CreatedBy, userID)
+	}
+}
+
+// TestCommandArgs asserts the /schedule arg extractor strips the leading command
+// token (with or without an @botname suffix) and trims surrounding whitespace.
+func TestCommandArgs(t *testing.T) {
+	tests := []struct {
+		text string
+		want string
+	}{
+		{"/schedule list", "list"},
+		{"/schedule add a 0 9 * * 1 do it", "add a 0 9 * * 1 do it"},
+		{"/schedule@duck_bot list", "list"},
+		{"/schedule", ""},
+		{"/schedule   ", ""},
+		{"  /schedule  list  ", "list"},
+	}
+	for _, tt := range tests {
+		if got := commandArgs(tt.text); got != tt.want {
+			t.Errorf("commandArgs(%q) = %q, want %q", tt.text, got, tt.want)
+		}
 	}
 }
 

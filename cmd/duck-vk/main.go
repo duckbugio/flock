@@ -33,6 +33,7 @@ import (
 	"github.com/duckbugio/flock/core/nudge"
 	"github.com/duckbugio/flock/core/poller"
 	"github.com/duckbugio/flock/core/ratelimit"
+	"github.com/duckbugio/flock/core/schedule"
 	"github.com/duckbugio/flock/core/session"
 	"github.com/duckbugio/flock/core/voice"
 	"github.com/duckbugio/flock/core/workspace"
@@ -205,6 +206,13 @@ func run() int {
 		Logger:     logger,
 	})
 
+	// Background cron scheduler (OFF by default). When enabled, open the durable
+	// per-chat job store and start the scheduler loop, firing each due job into the
+	// same dispatch lane a user message uses (svc.Inject, sentinel user 0). A
+	// store-open failure is non-fatal: log and continue WITHOUT the scheduler (mgr
+	// stays nil). With the flag off no store is opened and no goroutine runs.
+	mgr := buildScheduler(ctx, cfg, svc, logger)
+
 	guards := chat.GuardConfig{CostCapUSD: cfg.ClaudeMaxCostPerUser}
 	receiver := vk.NewReceiver(vk.ReceiverConfig{
 		Service:        svc,
@@ -214,11 +222,12 @@ func run() int {
 		Guards: func(userID int64) (bool, string) {
 			return chat.CheckGuards(limiter, costs, guards, userID)
 		},
-		Voice:    voiceTranscriber(vt),
-		Uploads:  up,
-		Notices:  vk.NewNoticeSender(api, time.Now().UnixNano(), logger),
-		EventAck: api.SendMessageEventAnswer,
-		Logger:   logger,
+		Voice:     voiceTranscriber(vt),
+		Uploads:   up,
+		Notices:   vk.NewNoticeSender(api, time.Now().UnixNano(), logger),
+		EventAck:  api.SendMessageEventAnswer,
+		Scheduler: mgr,
+		Logger:    logger,
 	})
 
 	// PR poller (same as Telegram): relay PR review comments on a duck/<chatid>/… PR
@@ -277,6 +286,32 @@ func voiceTranscriber(vt *vk.VoiceTranscriber) vkTranscriber {
 // interface when voice is disabled.
 type vkTranscriber interface {
 	Transcribe(ctx context.Context, url string) (string, error)
+}
+
+// buildScheduler opens the durable cron-job store and starts the background
+// scheduler when ENABLE_SCHEDULER is set, returning the Manager the /schedule
+// command dispatches to. It returns nil when the feature is disabled OR when the
+// store cannot be opened (non-fatal: log and run without the scheduler), so
+// /schedule replies with the disabled notice rather than crashing. The scheduler
+// fires each due job via svc.Inject — the same serialized per-chat lane a normal
+// message uses. Mirrors cmd/flock-telegram.
+func buildScheduler(ctx context.Context, cfg config.Config, svc *chat.Service, logger *slog.Logger) *schedule.Manager {
+	if !cfg.SchedulerEnabled() {
+		return nil
+	}
+	store, err := schedule.Open(cfg.ScheduleStoreFile())
+	if err != nil {
+		logger.Error("open schedule store; scheduler disabled", "path", cfg.ScheduleStoreFile(), "error", err)
+		return nil
+	}
+	mgr := schedule.NewManager(store, svc.Inject, time.Now, logger)
+	go func() {
+		if err := mgr.Run(ctx); err != nil && ctx.Err() == nil {
+			logger.Error("scheduler stopped", "error", err)
+		}
+	}()
+	logger.Info("scheduler enabled", "store", cfg.ScheduleStoreFile())
+	return mgr
 }
 
 // buildStarNudge assembles the post-task star-nudge config (GitHub-only; disabled

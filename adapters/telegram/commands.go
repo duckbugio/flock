@@ -89,7 +89,8 @@ func StripCommandMention(text, botUsername string) string {
 const HelpText = "Flock Telegram assistant — available commands:\n\n" +
 	"/help — show this message\n" +
 	"/new — start a fresh session (forget the current conversation)\n" +
-	"/stop — stop the run currently in progress\n\n" +
+	"/stop — stop the run currently in progress\n" +
+	"/schedule — manage scheduled jobs (when enabled)\n\n" +
 	"Send any other message to run it through the assistant."
 
 // WelcomeText is the static usage message replied to an allowed user who sends

@@ -98,6 +98,20 @@ type Config struct {
 	// lives under the workspace data dir, never inside a repo.
 	SessionStorePath string `env:"SESSION_STORE_PATH"`
 
+	// EnableScheduler gates the /schedule command and its background cron
+	// scheduler. OFF by default: with the flag off no schedule store is opened, no
+	// scheduler goroutine runs, and /schedule replies with a "disabled" notice, so
+	// behavior is byte-identical to a deployment without the feature. Set
+	// ENABLE_SCHEDULER=true to enable durable per-chat cron jobs (see SchedulerEnabled).
+	EnableScheduler bool `env:"ENABLE_SCHEDULER" envDefault:"false"`
+
+	// ScheduleStorePath is the JSON file persisting chatID -> the chat's cron jobs,
+	// reloaded on startup so scheduled jobs survive a restart. When empty it
+	// defaults to <APPROVED_DIRECTORY>/schedules.json (see ScheduleStoreFile), which
+	// lives under the workspace data dir alongside the session/pending stores, never
+	// inside a repo.
+	ScheduleStorePath string `env:"SCHEDULE_STORE_PATH"`
+
 	// Guardrails (Stage 9b). A per-user fixed-window RATE LIMIT and a per-user
 	// cumulative COST CAP enforced on the inbound message path. The defaults
 	// mirror adapters/telegram/.env.example.
@@ -312,6 +326,24 @@ func (c Config) PendingStoreFile() string {
 		return c.PendingStorePath
 	}
 	return filepath.Join(c.ApprovedDirectory, "pending.json")
+}
+
+// ScheduleStoreFile returns the path to the JSON cron-job store, defaulting to
+// <ApprovedDirectory>/schedules.json when SCHEDULE_STORE_PATH is unset so it lives
+// under the workspace data dir alongside the session/pending stores, never inside
+// any repo.
+func (c Config) ScheduleStoreFile() string {
+	if strings.TrimSpace(c.ScheduleStorePath) != "" {
+		return c.ScheduleStorePath
+	}
+	return filepath.Join(c.ApprovedDirectory, "schedules.json")
+}
+
+// SchedulerEnabled reports whether the /schedule command and its background cron
+// scheduler are active (ENABLE_SCHEDULER=true). When false the feature is a true
+// no-op: no store, no goroutine, and /schedule replies with a disabled notice.
+func (c Config) SchedulerEnabled() bool {
+	return c.EnableScheduler
 }
 
 // RateLimitWindow returns the per-user rate-limit window as a Duration, or 0

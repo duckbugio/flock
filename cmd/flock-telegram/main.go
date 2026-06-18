@@ -34,6 +34,7 @@ import (
 	"github.com/duckbugio/flock/core/pending"
 	"github.com/duckbugio/flock/core/poller"
 	"github.com/duckbugio/flock/core/ratelimit"
+	"github.com/duckbugio/flock/core/schedule"
 	"github.com/duckbugio/flock/core/session"
 	"github.com/duckbugio/flock/core/voice"
 	"github.com/duckbugio/flock/core/workspace"
@@ -277,6 +278,14 @@ func run() int {
 		Logger:     logger,
 	})
 
+	// Background cron scheduler (OFF by default). When enabled, open the durable
+	// per-chat job store and start the scheduler loop, firing each due job into the
+	// same dispatch lane a user message uses (svc.Inject, sentinel user 0). A
+	// store-open failure is non-fatal: log and continue WITHOUT the scheduler (mgr
+	// stays nil), like the rest of the best-effort startup wiring. With the flag off
+	// no store is opened and no goroutine runs — the path is a true no-op.
+	mgr := buildScheduler(ctx, cfg, svc, logger)
+
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, telegram.CallbackMatch(), bot.MatchTypePrefix, stopHandler(cfg, svc))
 	b.RegisterHandler(
 		bot.HandlerTypeCallbackQueryData, telegram.StarCallbackPrefix(), bot.MatchTypePrefix, starHandler(cfg, svc),
@@ -292,7 +301,7 @@ func run() int {
 	// explicit address). The set of names handled here is asserted, by test, to equal
 	// the canonical chat.ReservedCommands so a new reserved command can never be
 	// published in the menu yet leak to the model for lack of a handler.
-	handlers := reservedHandlers(cfg, svc)
+	handlers := reservedHandlers(cfg, svc, mgr)
 	for name, h := range handlers {
 		b.RegisterHandlerMatchFunc(commandMatch(name), h)
 	}
@@ -494,7 +503,7 @@ func handleMessage(ctx context.Context, deps messageDeps, b *bot.Bot, msg *model
 
 	// Normalize the group form of a forwarded slash command so an unknown command
 	// reaches Claude as a bare command: "/loop@duck_bot 5m" -> "/loop 5m". Reserved
-	// commands (/start /help /new /stop) are routed to their own handlers and never
+	// commands (/start /help /new /stop /schedule) are routed to their own handlers and never
 	// reach here, so this only ever touches Claude pass-through commands; it is a
 	// no-op when there is no leading "/command@botname".
 	text = telegram.StripCommandMention(text, cfg.TelegramBotUsername)
@@ -839,12 +848,13 @@ func reservedBotCommands() []models.BotCommand {
 // asserts this map's key set equals chat.ReservedCommands. Adding a reserved command
 // is therefore a two-line change here (plus the canonical entry); forgetting the
 // handler fails the test rather than silently leaking the command to Claude.
-func reservedHandlers(cfg config.Config, svc *chat.Service) map[string]bot.HandlerFunc {
+func reservedHandlers(cfg config.Config, svc *chat.Service, sched *schedule.Manager) map[string]bot.HandlerFunc {
 	return map[string]bot.HandlerFunc{
-		"start": startHandler(cfg),
-		"help":  helpHandler(cfg),
-		"new":   newHandler(cfg, svc),
-		"stop":  stopCommandHandler(cfg, svc),
+		"start":    startHandler(cfg),
+		"help":     helpHandler(cfg),
+		"new":      newHandler(cfg, svc),
+		"stop":     stopCommandHandler(cfg, svc),
+		"schedule": scheduleHandler(cfg, sched),
 	}
 }
 
@@ -930,6 +940,73 @@ func stopCommandHandler(cfg config.Config, svc *chat.Service) bot.HandlerFunc {
 		}
 		sendCommandReply(ctx, b, chatID, text)
 	}
+}
+
+// scheduleDisabledText is the reply when /schedule is used but the scheduler is
+// turned off (the default). It tells the operator exactly which flag enables it.
+const scheduleDisabledText = "Scheduler is disabled. Set ENABLE_SCHEDULER=true to enable it."
+
+// scheduleHandler serves /schedule from an allowed user. When the scheduler is
+// disabled (mgr == nil) it replies with the disabled notice; otherwise it strips
+// the leading /schedule token and hands the remaining args, the chat id, and the
+// sender's user id to the transport-neutral Manager.Dispatch, replying with its
+// result. Like the other reserved handlers it is allow-list gated (via
+// commandSender) and never starts a Claude run.
+func scheduleHandler(cfg config.Config, mgr *schedule.Manager) bot.HandlerFunc {
+	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
+		chatID, ok := commandSender(cfg, update.Message)
+		if !ok {
+			return
+		}
+		if mgr == nil {
+			sendCommandReply(ctx, b, chatID, scheduleDisabledText)
+			return
+		}
+		args := commandArgs(update.Message.Text)
+		reply := mgr.Dispatch(chatIDStr(chatID), update.Message.From.ID, args)
+		sendCommandReply(ctx, b, chatID, reply)
+	}
+}
+
+// commandArgs returns the text following the leading "/command[@botname]" token of
+// a slash-command message, i.e. the arguments. It drops the first whitespace-
+// delimited token (the command itself, including any @botname suffix) and trims
+// the surrounding whitespace, so "/schedule add x" yields "add x" and a bare
+// "/schedule" yields "".
+func commandArgs(text string) string {
+	text = strings.TrimSpace(text)
+	if i := strings.IndexFunc(text, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	}); i >= 0 {
+		return strings.TrimSpace(text[i+1:])
+	}
+	return ""
+}
+
+// buildScheduler opens the durable cron-job store and starts the background
+// scheduler when ENABLE_SCHEDULER is set, returning the Manager the /schedule
+// handler dispatches to. It returns nil when the feature is disabled OR when the
+// store cannot be opened (non-fatal: log and run without the scheduler), so the
+// handler replies with the disabled notice rather than crashing. The scheduler
+// fires each due job via svc.Inject — the same serialized per-chat lane a normal
+// message uses.
+func buildScheduler(ctx context.Context, cfg config.Config, svc *chat.Service, logger *slog.Logger) *schedule.Manager {
+	if !cfg.SchedulerEnabled() {
+		return nil
+	}
+	store, err := schedule.Open(cfg.ScheduleStoreFile())
+	if err != nil {
+		logger.Error("open schedule store; scheduler disabled", "path", cfg.ScheduleStoreFile(), "error", err)
+		return nil
+	}
+	mgr := schedule.NewManager(store, svc.Inject, time.Now, logger)
+	go func() {
+		if err := mgr.Run(ctx); err != nil && ctx.Err() == nil {
+			logger.Error("scheduler stopped", "error", err)
+		}
+	}()
+	logger.Info("scheduler enabled", "store", cfg.ScheduleStoreFile())
+	return mgr
 }
 
 // sendCommandReply posts a short command confirmation. Delivery failures are
