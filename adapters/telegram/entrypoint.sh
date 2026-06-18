@@ -1,5 +1,5 @@
 #!/bin/sh
-# Runtime setup for the DuckFlock bot image: wire git auth/identity from env and render
+# Runtime setup for the Flock bot image: wire git auth/identity from env and render
 # the shared team config into the workspace, then start the bot. Everything optional is
 # env-driven — with no git/voice/webhook env set, the bot still runs as a plain assistant.
 set -u

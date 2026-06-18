@@ -9,7 +9,7 @@
   <a href="README.ja.md">日本語</a>
 </p>
 
-# DuckFlock
+# Flock
 
 **Betreibe ein Claude Code KI-Entwicklungsteam auf deinem Server und steuere es per Chat.** Beschreibe ein Feature in Telegram oder VK; das Team plant es, baut es auf einem Branch, testet es, prüft es und öffnet einen PR — jeder Chat in seinem eigenen isolierten Workspace.
 

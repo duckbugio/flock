@@ -1,5 +1,5 @@
 ---
-- name: Deploy DuckFlock Telegram bot (Docker)
+- name: Deploy Flock Telegram bot (Docker)
   hosts: claude_bot
   become: true
   gather_facts: true

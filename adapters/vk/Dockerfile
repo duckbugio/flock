@@ -1,4 +1,4 @@
-# Self-contained image for the DuckFlock AI dev-team VK (VKontakte) bot (Go).
+# Self-contained image for the Flock AI dev-team VK (VKontakte) bot (Go).
 # A multi-stage build: compile the static Go binary, then assemble a slim runtime
 # with Node + the `claude` CLI and the tools the team shells out to.
 # Behaviour is toggled at RUNTIME via env (see .env.example).

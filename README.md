@@ -9,7 +9,7 @@
   <a href="README.ja.md">日本語</a>
 </p>
 
-# DuckFlock
+# Flock
 
 **Run a Claude Code AI dev team on your server and drive it from chat.** Describe a feature in Telegram or VK; the team plans it, builds it on a branch, tests it, reviews it, and opens a PR — each chat in its own isolated workspace.
 

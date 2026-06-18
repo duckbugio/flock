@@ -9,7 +9,7 @@
   <a href="README.ja.md">日本語</a>
 </p>
 
-# DuckFlock
+# Flock
 
 **Ejecuta un equipo de desarrollo con IA de Claude Code en tu servidor y dirígelo desde el chat.** Describe una funcionalidad en Telegram o VK; el equipo la planifica, la construye en una rama, la prueba, la revisa y abre un PR — cada chat en su propio espacio de trabajo aislado.
 
