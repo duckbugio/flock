@@ -48,6 +48,44 @@ func TestCommandName(t *testing.T) {
 	}
 }
 
+// TestStripCommandMention asserts the group-form normalizer strips ONLY a leading
+// "/command@botUsername" suffix that addresses THIS bot, so a forwarded native
+// Claude command reaches the model as a bare command. It must leave a plain
+// command, a different bot's mention, a mid-text "@bot", and empty/"/" inputs
+// untouched, and match the bot username case-insensitively (Telegram may
+// lowercase it).
+func TestStripCommandMention(t *testing.T) {
+	const bot = "duck_bot"
+	tests := []struct {
+		name        string
+		text        string
+		botUsername string
+		want        string
+	}{
+		{"no suffix unchanged", "/loop 5m", bot, "/loop 5m"},
+		{"group form stripped", "/loop@duck_bot 5m", bot, "/loop 5m"},
+		{"group form no args", "/loop@duck_bot", bot, "/loop"},
+		{"different bot untouched", "/loop@other_bot 5m", bot, "/loop@other_bot 5m"},
+		{"case-insensitive bot match", "/loop@Duck_Bot 5m", bot, "/loop 5m"},
+		{"lowercased delivery", "/loop@duck_bot 5m", "Duck_Bot", "/loop 5m"},
+		{"mid-text mention untouched", "ping @duck_bot now", bot, "ping @duck_bot now"},
+		{"non-command with mention untouched", "hi @duck_bot", bot, "hi @duck_bot"},
+		{"empty unchanged", "", bot, ""},
+		{"lone slash unchanged", "/", bot, "/"},
+		{"empty bot username is no-op", "/loop@duck_bot 5m", "", "/loop@duck_bot 5m"},
+		{"empty mention not our bot", "/loop@ 5m", bot, "/loop@ 5m"},
+		{"tab-delimited args preserved", "/loop@duck_bot\t5m", bot, "/loop\t5m"},
+		{"newline-delimited args preserved", "/loop@duck_bot\nmore", bot, "/loop\nmore"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := StripCommandMention(tc.text, tc.botUsername); got != tc.want {
+				t.Fatalf("StripCommandMention(%q, %q) = %q, want %q", tc.text, tc.botUsername, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestHelpTextListsCommands asserts the static /help payload exists and lists all
 // three slash commands — AC1. /help is a pure reply (it has no Service method, so
 // it can never submit a run); the constant IS the entire payload the handler

@@ -36,6 +36,47 @@ func CommandName(msg *models.Message) string {
 	return ""
 }
 
+// StripCommandMention normalizes the group form of a forwarded slash command so
+// Claude receives it as a bare command. In a group, Telegram appends "@botname"
+// to a tapped command (e.g. "/loop@duck_bot 5m"); this strips ONLY that
+// "@botUsername" suffix from the leading "/command" token, yielding "/loop 5m".
+//
+// It is intentionally conservative — a pure string transform with no entity
+// awareness — and a no-op unless ALL of these hold:
+//   - botUsername is non-empty,
+//   - text begins with "/",
+//   - the leading whitespace-delimited token contains "@<botUsername>" as its
+//     suffix (case-insensitive: Telegram may lowercase the username, so we match
+//     either casing).
+//
+// It never touches a non-leading token, so a mid-message "@botname" is left
+// intact, and it returns text unchanged when there is no leading command, no
+// "@" in the leading token, or the "@" addresses a DIFFERENT bot. Reserved
+// commands never reach this path (they are routed to their own handlers), so it
+// only ever normalizes Claude pass-through commands.
+func StripCommandMention(text, botUsername string) string {
+	if botUsername == "" || !strings.HasPrefix(text, "/") {
+		return text
+	}
+	// Split off only the leading token; preserve the remainder (including its
+	// original whitespace) verbatim.
+	rest := ""
+	token := text
+	if i := strings.IndexAny(text, " \t\n"); i >= 0 {
+		token = text[:i]
+		rest = text[i:]
+	}
+	at := strings.IndexByte(token, '@')
+	if at < 0 {
+		return text
+	}
+	mention := token[at+1:] // the addressed username, without the '@'
+	if !strings.EqualFold(mention, botUsername) {
+		return text // addressed to a different bot (or empty) — leave untouched
+	}
+	return token[:at] + rest
+}
+
 // HelpText is the static usage message replied to an allowed user who sends
 // /help. It lists the slash commands the adapter understands. It is an
 // engineering artifact (professional English, no duck flavor) and never reaches

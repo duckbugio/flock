@@ -543,10 +543,17 @@ func (c *manualClock) advance(d time.Duration) {
 }
 
 // TestProgressEditsRespectMinInterval drives the rate-limited progress edits with
-// many fast ticks while advancing the injected clock in small steps, and asserts
-// that real edits are bounded to roughly one per minEditInterval window (not one per
-// tick) AND that the rendered counter still advances across windows — i.e. the
-// throttle bounds edits without freezing the counter.
+// a fast ticker while advancing the injected clock one minEditInterval window at a
+// time, and asserts that real edits are bounded to roughly one per minEditInterval
+// window (not one per tick) AND that the rendered counter still advances across
+// windows — i.e. the throttle bounds edits without freezing the counter.
+//
+// It is deterministic by construction: after every clock advance that should permit
+// a new edit it polls (via waitUntil) until that edit has actually landed — the
+// counter reaches the value implied by the new clock — before advancing again. It
+// never sleeps a fixed wall-clock window "hoping" a real tick fired, so it cannot go
+// red under -race when the ticker goroutine is starved by CPU contention; a starved
+// tick only makes waitUntil poll a little longer.
 func TestProgressEditsRespectMinInterval(t *testing.T) {
 	fc := newFakeChat()
 	gate := make(chan struct{})
@@ -559,7 +566,7 @@ func TestProgressEditsRespectMinInterval(t *testing.T) {
 
 	clk := newManualClock()
 	svc.nowFunc = clk.now
-	svc.tick = time.Millisecond // tick fast so many ticks land per clock window
+	svc.tick = time.Millisecond // tick fast so a tick lands quickly once an edit is due
 
 	svc.Handle(context.Background(), "100", 100, "1", "go")
 
@@ -569,17 +576,35 @@ func TestProgressEditsRespectMinInterval(t *testing.T) {
 		return stop
 	})
 
-	// Advance the clock across several minEditInterval windows in small sub-interval
-	// steps, giving the fast ticker many chances to edit within each window.
+	// Walk the clock forward one full minEditInterval window per step. The run's
+	// elapsed counter is nowFunc()-start with start captured at clock 0, so after
+	// window i the counter reads i*minEditInterval seconds. Advancing by exactly
+	// minEditInterval puts the next tick at the throttle boundary (Sub >=
+	// minEditInterval), so exactly one new edit becomes due per window; lastEditAt is
+	// zero before the first window, so the first window's edit fires immediately too.
 	const windows = 4
-	step := minEditInterval / 5
-	for i := 0; i < windows*5; i++ {
-		clk.advance(step)
-		time.Sleep(3 * time.Millisecond) // let several real ticks fire at this clock value
+	intervalSecs := int(minEditInterval / time.Second)
+	for w := 1; w <= windows; w++ {
+		clk.advance(minEditInterval)
+		// Poll until this window's edit has actually landed: the counter reaches
+		// w*intervalSecs seconds. waitUntil makes this deterministic regardless of when
+		// the real ticker goroutine gets scheduled — no fixed sleep, no race.
+		wantSecs := w * intervalSecs
+		// A generous deadline: the millisecond ticker that fires render() runs in a
+		// background goroutine that can be starved for seconds under `go test -race
+		// ./...` (all packages in parallel saturating GOMAXPROCS). The wait is still
+		// deterministic — the clock is already advanced, so the next tick that runs
+		// renders exactly (wantSecs)s — it just may take a while to be scheduled.
+		waitUntilFor(t, 30*time.Second, func() bool {
+			text, _ := fc.snapshot()
+			return strings.Contains(text, "Working") &&
+				strings.Contains(text, "("+strconv.Itoa(wantSecs)+"s)")
+		})
 	}
 
 	// Edits during the run are throttled to ~one per window: with `windows` windows
-	// (plus the prompt first-edit) we expect far fewer than the hundreds of ticks.
+	// (plus at most the prompt first-edit) we expect far fewer than the thousands of
+	// ticks the millisecond ticker fired across this span.
 	progressEdits := fc.editCount()
 	if progressEdits > windows+2 {
 		t.Fatalf("edits not throttled: %d edits across %d windows", progressEdits, windows)
@@ -588,21 +613,14 @@ func TestProgressEditsRespectMinInterval(t *testing.T) {
 		t.Fatal("no edits happened in fallback mode; counter would be frozen")
 	}
 
-	// The counter advanced across windows without the throttle freezing render().
-	// Advancing the clock one more full minEditInterval past the loop's last value
-	// puts the next fast tick unambiguously past the throttle window — whatever the
-	// exact time of the last in-loop edit — so one final edit is deterministically
-	// due. Poll for the counter to reach that value: the real ticker fires the edit
-	// asynchronously, so sampling a single instant is racy under -race scheduling
-	// (the prior approach intermittently observed the counter one window behind when
-	// the last tick had not yet landed or the throttle window straddled the ceiling).
-	clk.advance(minEditInterval)
-	wantSecs := (windows*5*int(step) + int(minEditInterval)) / int(time.Second)
-	waitUntil(t, func() bool {
-		text, _ := fc.snapshot()
-		return strings.Contains(text, "Working") &&
-			strings.Contains(text, "("+strconv.Itoa(wantSecs)+"s)")
-	})
+	// The counter advanced across every window without the throttle freezing render():
+	// the final per-window waitUntil above already confirmed it reached the last
+	// window's value, so the rendered counter ends at windows*minEditInterval seconds.
+	wantFinalSecs := windows * intervalSecs
+	text, _ := fc.snapshot()
+	if !strings.Contains(text, "("+strconv.Itoa(wantFinalSecs)+"s)") {
+		t.Fatalf("final counter = %q, want it to contain (%ds)", text, wantFinalSecs)
+	}
 
 	close(gate)
 }
@@ -1676,7 +1694,16 @@ func firstOrEmpty(ids []string) string {
 // waitUntil polls cond up to a short deadline, failing the test on timeout.
 func waitUntil(t *testing.T, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	waitUntilFor(t, 2*time.Second, cond)
+}
+
+// waitUntilFor polls cond up to an explicit deadline, failing the test on timeout.
+// It lets a test that depends on a real background goroutine (e.g. the progress
+// ticker) tolerate scheduler starvation under -race with all packages in parallel —
+// a starved tick only makes the poll take longer, never fail spuriously.
+func waitUntilFor(t *testing.T, within time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
