@@ -25,7 +25,7 @@ const startCommand = "/start"
 // welcomeText is the static reply to /start: a short greeting + usage, mirroring
 // the Telegram adapter's WelcomeText. It is an engineering artifact (plain
 // English, no duck flavor) and never reaches the Claude Runner.
-const welcomeText = "Hi! I'm the DuckFlock assistant.\n\n" +
+const welcomeText = "Hi! I'm the Flock assistant.\n\n" +
 	"Send any message to run it through the assistant.\n" +
 	"/stop — stop the run currently in progress."
 

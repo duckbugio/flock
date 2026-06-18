@@ -1,4 +1,4 @@
-# DuckFlock AI dev-team Telegram bot — quick start:
+# Flock AI dev-team Telegram bot — quick start:
 #   cp .env.example .env   # fill in your tokens
 #   docker compose up -d
 #

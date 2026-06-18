@@ -40,7 +40,7 @@ func CommandName(msg *models.Message) string {
 // /help. It lists the slash commands the adapter understands. It is an
 // engineering artifact (professional English, no duck flavor) and never reaches
 // the Claude Runner.
-const HelpText = "DuckFlock Telegram assistant — available commands:\n\n" +
+const HelpText = "Flock Telegram assistant — available commands:\n\n" +
 	"/help — show this message\n" +
 	"/new — start a fresh session (forget the current conversation)\n" +
 	"/stop — stop the run currently in progress\n\n" +
@@ -51,4 +51,4 @@ const HelpText = "DuckFlock Telegram assistant — available commands:\n\n" +
 // user immediately sees what the bot does and how to use it. Like HelpText it is
 // an engineering artifact (plain English, no duck flavor) and never reaches the
 // Claude Runner — the duck greeting comes from the model on a real message.
-const WelcomeText = "Hi! I'm the DuckFlock assistant.\n\n" + HelpText
+const WelcomeText = "Hi! I'm the Flock assistant.\n\n" + HelpText

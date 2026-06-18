@@ -1,4 +1,4 @@
-# Self-contained image for the DuckFlock AI dev-team Telegram bot (Go rewrite).
+# Self-contained image for the Flock AI dev-team Telegram bot (Go rewrite).
 # A multi-stage build: compile the static Go binary, then assemble a slim runtime
 # with Node + the `claude` CLI and the tools the team shells out to.
 # Behaviour is toggled at RUNTIME via env (see .env.example).

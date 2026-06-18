@@ -1,45 +1,35 @@
-# DuckFlock
+<p align="center">
+  <b>English</b> ·
+  <a href="README.ru.md">Русский</a> ·
+  <a href="README.zh.md">中文</a> ·
+  <a href="README.es.md">Español</a> ·
+  <a href="README.de.md">Deutsch</a> ·
+  <a href="README.fr.md">Français</a> ·
+  <a href="README.pt-BR.md">Português (BR)</a> ·
+  <a href="README.ja.md">日本語</a>
+</p>
 
-Run a **Claude Code AI dev team** and drive it from **Telegram** — with an **isolated
-workspace per chat**. Describe a feature in a chat; the team plans it, implements it on a
-branch, tests it, reviews it (line-anchored inline comments), and opens a PR. It runs on your
-Claude **subscription** (no per-token billing) or an Anthropic API key.
+# Flock
 
-A native Go service that drives the Claude Code CLI as a dev team and exposes it through a
-Telegram adapter — per-chat isolation, parallel chats, PR poller, voice, … — all shipped as one
-prebuilt image.
+**Run a Claude Code AI dev team on your server and drive it from chat.** Describe a feature in Telegram or VK; the team plans it, builds it on a branch, tests it, reviews it, and opens a PR — each chat in its own isolated workspace.
 
-> **Repo layout (monorepo).** The platform-agnostic dev-team brain — subagents + orchestration —
-> lives in [`core/`](core/); the Telegram bot is one **adapter** under
-> [`adapters/telegram/`](adapters/telegram/) (its image, compose, and Ansible deploy).
-> Future chat platforms get their own `adapters/<name>/` and share `core/`.
+[![CI](https://github.com/duckbugio/flock/actions/workflows/ci.yml/badge.svg)](https://github.com/duckbugio/flock/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8.svg)](go.mod)
+[![image: ghcr.io](https://img.shields.io/badge/image-ghcr.io-2496ED.svg)](https://github.com/orgs/duckbugio/packages)
 
-## What you get
+It runs on your Claude **Pro/Max subscription** (no per-token billing) or an Anthropic API key, ships as **prebuilt Docker images** (no build step), and keeps every chat in its own sandboxed workspace.
 
-- A Telegram bot that is a full **Claude Code** agent on your server (read/edit/bash, git).
-- A 5-role **dev team** (subagents): **planner → coder → tester → reviewer → arbiter**, with
-  a real pipeline — spec + acceptance criteria → build → lint/regression gates → PR →
-  adversarial review with **inline comments in the PR's language** → arbiter.
-- **Per-chat isolation** — every chat (1:1 or group) gets its own `/workspace/chat_<id>`;
-  different chats can't see each other's files. **Different chats are answered in parallel.**
-- **PR reactions without inbound webhooks** — the bot *polls* your git host for new review
-  comments and addresses them, routed back to the chat that opened the PR.
-- **Voice messages** (optional) — transcribed (Mistral Voxtral / OpenAI Whisper / local) and
-  run as commands.
-- Auth via Claude **Pro/Max subscription** (`claude setup-token`) or an Anthropic API key.
-- The agent's shell is **sandboxed inside the container**, not on your host.
-
-## Quick start (Docker — recommended)
+## Quick start (Docker)
 
 ```bash
 git clone https://github.com/duckbugio/flock
 cd flock/adapters/telegram
-cp .env.example .env        # fill in the REQUIRED block (5 lines)
+cp .env.example .env        # fill in the REQUIRED block (4 values)
 docker compose up -d
 ```
 
-That pulls the prebuilt image `ghcr.io/duckbugio/flock-telegram` — no build, no Ansible. Then
-message your bot. The minimum `.env`:
+That pulls the prebuilt image `ghcr.io/duckbugio/flock-telegram` — no build, no Ansible — then message your bot. The minimum `.env`:
 
 | Variable | What |
 |---|---|
@@ -48,11 +38,25 @@ message your bot. The minimum `.env`:
 | `ALLOWED_USERS` | comma-separated Telegram user IDs allowed to use the bot |
 | `CLAUDE_CODE_OAUTH_TOKEN` | `claude setup-token` (subscription) — *or* set `ANTHROPIC_API_KEY` |
 
-Everything else in [`.env.example`](adapters/telegram/.env.example) has sensible defaults. Update the image
-later with `docker compose pull && docker compose up -d`.
+Everything else in [`.env.example`](adapters/telegram/.env.example) has sensible defaults. Update later with `docker compose pull && docker compose up -d`.
 
-> **Region:** host in an **Anthropic-supported region** (Anthropic geo-blocks some countries,
-> e.g. RU/CN) — otherwise Claude calls fail.
+> **Region:** host in an **Anthropic-supported region** (some countries, e.g. RU/CN, are geo-blocked) — otherwise Claude calls fail.
+
+**VK** is the same pattern under [`adapters/vk/`](adapters/vk/), built on the same core and published as `ghcr.io/duckbugio/flock-vk`. It ships only an env template (no compose file): `cp .env.example .env`, then `docker run --env-file .env ghcr.io/duckbugio/flock-vk`. Claude auth and core settings match Telegram; only the three transport vars change:
+
+| Variable | What |
+|---|---|
+| `VK_BOT_TOKEN` | community access token (VK community → Manage → API usage → access token) |
+| `VK_GROUP_ID` | your community's numeric id (long-poll server + mention parse) |
+| `VK_ALLOWED_USERS` | comma-separated VK user IDs allowed to use the bot |
+
+## Highlights
+
+- **The conversation is the task source** — describe what you want in chat and review the PR that comes back; the agent's shell and editor are sandboxed inside the container.
+- **A real dev-team pipeline, not a single prompt** — spec-first acceptance criteria, build/regression gates, and an arbiter that breaks loops.
+- **Multi-transport** — **Telegram** and **VK** today, both on the same core; a new platform is a thin adapter, not a fork.
+- **PR reactions without inbound webhooks** — the bot *polls* your git host for new review comments and routes each back to the chat that opened the PR.
+- **Subscription-friendly** — authenticate with a Claude Pro/Max token (no per-token cost) or an Anthropic API key.
 
 ## How it works
 
@@ -64,9 +68,20 @@ You (in a chat): "implement X across the api + web services"
                                                                                         └ ESCALATE → asks you
 ```
 
-The **arbiter** is the loop-breaker (risk-aware, cycle-limited) so agents never loop forever.
-A plain question is just answered; a build request triggers the team. Branches are named
-`duck/<chatid>/<slug>` so PR-webhook/poll events route back to the right chat.
+The five subagents — **planner → coder → tester → reviewer → arbiter** — run as native Claude Code subagents in [`core/agents/`](core/agents/). A plain question is just answered; a build request triggers the team. The **arbiter** is the risk-aware, cycle-limited loop-breaker so agents never spin forever. Branches are named `duck/<chatid>/<slug>` so PR-webhook/poll events route back to the right chat.
+
+The team is built for a **microservices** workspace: a feature can span several services, and it coordinates branches and one cross-linked PR per repo. The full pipeline, guardrails, and role table live in [`core/README.md`](core/README.md).
+
+## Repo layout (monorepo)
+
+The platform-agnostic dev-team brain lives in [`core/`](core/); each platform is a thin adapter under `adapters/<name>/` that shares it.
+
+| Adapter | Path | Prebuilt image |
+|---|---|---|
+| Telegram | [`adapters/telegram/`](adapters/telegram/) | `ghcr.io/duckbugio/flock-telegram` |
+| VK | [`adapters/vk/`](adapters/vk/) | `ghcr.io/duckbugio/flock-vk` |
+
+Future platforms reuse the same core — see [`docs/multi-transport-plan.md`](docs/multi-transport-plan.md).
 
 ## Connect a git host (optional but core)
 
@@ -83,90 +98,34 @@ GITEA_API_URL=https://git.example.com/api/v1
 GITEA_POLL_INTERVAL=90
 ```
 
-The **poller** is the recommended way to react to review comments — it works even when your
-git host can't reach the bot (e.g. cross-border network filtering), because the bot reaches
-*out*. Inbound webhooks + a Caddy TLS proxy are an optional alternative (`--profile caddy`,
-see `.env.example`).
+For **github.com**, also set `GH_TOKEN` (= your `GIT_TOKEN`) so the `gh` CLI can open PRs.
 
-## GitHub star nudge (optional, GitHub-only)
+The **poller** is the recommended way to react to review comments — it reaches *out*, so it works even when your host can't reach the bot. It's active when `ENABLE_PR_REVIEW=true` and `GITEA_API_URL` is set. An inbound-webhook + Caddy TLS proxy alternative is available only through the Ansible deploy (set `webhook_domain`).
 
-When the bot is wired to a GitHub account (`GIT_HOST=github.com` + `GIT_TOKEN`) that has not
-yet starred the project, it sends a short message after each successful run inviting you to
-star it, with an inline button. Pressing the button stars the repo from the deployment's own
-account and the nudge then stops for good. It is GitHub-only and **auto-off** everywhere else
-(the gate is the off switch — no separate flag); it runs entirely off the hot path, so it
-never delays or breaks a run.
+## Other options
 
-```ini
-STAR_NUDGE_REPO=duckbugio/flock   # owner/repo to nudge for / star
-# STAR_NUDGE_STORE_PATH=          # default <APPROVED_DIRECTORY>/star_nudge.json
-```
-
-The button needs a token with **star-write scope**: a classic PAT with `public_repo`, or a
-fine-grained token with the "Starring" account permission. Without it the star simply fails
-softly (the run is unaffected).
-
-## Voice messages (optional)
-
-```ini
-VOICE_PROVIDER=mistral        # mistral | openai | local
-MISTRAL_API_KEY=...           # console.mistral.ai  (or OPENAI_API_KEY for whisper)
-```
-
-## Optional sidecars
-
-```bash
-docker compose --profile dind up -d     # dockerized linters/tests for the team (set DOCKER_HOST=tcp://dind:2375)
-docker compose --profile caddy up -d    # inbound-webhook TLS proxy (needs a public WEBHOOK_DOMAIN)
-```
-
-## Per-chat isolation
-
-Each chat gets `/workspace/chat_<id>`: 1:1 → your private workspace; group → one shared
-workspace for that group's members; different chats are fully isolated and run **in parallel**
-(capped by `MAX_CONCURRENT_CHAT_RUNS` for memory). The user-ID whitelist gates who may use the
-bot. In groups the bot only responds when **@mentioned** or replied to.
-
-## Advanced: deploy to a server with Ansible
-
-For a one-command provision of a fresh VPS (installs Docker + swap, renders `.env`, pulls the
-image, starts it):
-
-```bash
-cd adapters/telegram/deploy
-cp -r inventories/example inventories/my-bot          # one dir per bot instance
-$EDITOR inventories/my-bot/inventory.ini              # your server IP + SSH key
-$EDITOR inventories/my-bot/group_vars/all/vars.yml    # non-secret config
-$EDITOR inventories/my-bot/group_vars/all/vault.yml   # secrets (tokens)
-ansible-vault encrypt inventories/my-bot/group_vars/all/vault.yml   # optional
-ansible-playbook -i inventories/my-bot/inventory.ini playbook.yml
-```
-
-Each bot instance is its own `inventories/<name>/` (e.g. the maintained `gitea-lo-duck`); only
-`inventories/example/` is committed — real instances are gitignored. The role pulls the prebuilt
-image — set `bot_image` to pin a tag. (Build your own with `docker build -f
-adapters/telegram/Dockerfile .` from the repo root if you've forked the repo.)
-
-## The dev team
-
-Roles live in [`core/agents/`](core/agents/) as native Claude Code subagents. The pipeline,
-the orchestrator prompt, the guardrails, and the patterns borrowed from
-[ruflo](https://github.com/ruvnet/ruflo) (SPARC spec-gates, multi-repo coordination, diff
-risk-scoring) are in [core/README.md](core/README.md). The orchestration rules ship in the
-image and are rendered into each workspace as `CLAUDE.md`.
+- **Voice messages:** `ENABLE_VOICE_MESSAGES=true`, `VOICE_PROVIDER=mistral|openai|local`, plus `MISTRAL_API_KEY` (or `OPENAI_API_KEY`). Transcribed and run as commands.
+- **dind sidecar:** `docker compose --profile dind up -d` gives the team dockerized linters/tests (set `DOCKER_HOST=tcp://dind:2375`).
+- **Per-chat isolation:** each chat gets `/workspace/chat_<id>` (1:1 → private; group → one shared workspace); chats are fully isolated and run in parallel, capped by `MAX_CONCURRENT_CHAT_RUNS`. In groups, set `REQUIRE_GROUP_MENTION=true` to respond only when @mentioned or replied to.
+- **Ansible deploy** (Telegram): one-command VPS provision from `adapters/telegram/deploy` — copy `inventories/example` to your own `inventories/<name>/` (gitignored), fill inventory/vars/vault, then `ansible-playbook -i inventories/<name>/inventory.ini playbook.yml`. The role pulls the prebuilt image; set `bot_image` to pin a tag.
 
 ## Security
 
-- **Whitelist:** only `ALLOWED_USERS` may use the bot — never leave it empty; the bot grants
-  shell/edit access to your server.
-- **Per-chat isolation:** different chats get separate workspaces. The git token is shared
-  across a deployment — scope it accordingly.
-- **Secrets:** keep them in `.env` (gitignored) or, for Ansible, in a real instance's
-  `inventories/<name>/group_vars/all/vault.yml` (gitignored; `ansible-vault` encryptable).
-  Never commit real tokens — only `inventories/example/` is tracked.
-- **Isolation:** the agent runs as a non-root user inside the container; its Bash/Edit are
-  confined to the container, not your host.
+- **Whitelist:** only `ALLOWED_USERS` (Telegram) / `VK_ALLOWED_USERS` (VK) may use the bot — never leave it empty; it grants shell/edit access to your server.
+- **Per-chat isolation:** different chats get separate workspaces. The git token is shared across a deployment — scope it accordingly.
+- **Secrets:** keep them in `.env` (gitignored) or, for Ansible, in a real instance's `vault.yml` (gitignored, `ansible-vault` encryptable). Only `inventories/example/` is tracked.
+- **Sandbox:** the agent runs as a non-root user; its Bash/Edit are confined to the container, not your host.
+
+## Build, lint, test
+
+The repo uses [Task](https://taskfile.dev) as its CI runner — the same entrypoint [CI](.github/workflows/ci.yml) uses:
+
+```bash
+task lint      # format + vet + linters (in the dev-tools image)
+task tests     # Go test suite
+task build     # compile the binaries
+```
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE) © DuckBug.
