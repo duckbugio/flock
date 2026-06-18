@@ -7,5 +7,6 @@ package vk
 const HelpText = "Flock VK assistant — available commands:\n\n" +
 	"/help — show this message\n" +
 	"/new — start a fresh session (forget the current conversation)\n" +
-	"/stop — stop the run currently in progress\n\n" +
+	"/stop — stop the run currently in progress\n" +
+	"/schedule — manage scheduled jobs (when enabled)\n\n" +
 	"Send any other message to run it through the assistant."
