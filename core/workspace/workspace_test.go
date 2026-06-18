@@ -219,7 +219,12 @@ func TestRenderedClaudeMDHasOutboxSection(t *testing.T) {
 	got := string(body)
 	for _, want := range []string{
 		"## Sending files to the user", "outbox/", "outbox/sent/",
+		// A fragment of the outbox-delivery sentence: a file dropped in outbox/ is
+		// sent to the user as a Telegram document.
+		"sent to the user as a Telegram document",
 		"## Taking webpage screenshots", "shot <url> <out.png>", "--full",
+		// The auth'd-page limitation must be documented (initData).
+		"initData",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("rendered CLAUDE.md missing %q; got:\n%s", want, got)
