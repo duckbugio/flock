@@ -127,7 +127,7 @@ func (c *botChat) Send(ctx context.Context, chatID chat.ChatID, text, stopRunID 
 		msg, err = c.b.SendMessage(ctx, params)
 	}
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to send message: %w. Check your Telegram bot token.", err)
 	}
 	return strconv.Itoa(msg.ID), nil
 }
