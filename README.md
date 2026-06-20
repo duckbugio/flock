@@ -129,3 +129,17 @@ task build     # compile the binaries
 ## License
 
 [MIT](LICENSE) © DuckBug.
+
+## Contributing
+
+We welcome contributions to the Flock project! If you would like to contribute, please follow these guidelines:
+
+1. **Fork the repository**: Create your own fork of the repository on GitHub.
+2. **Create a new branch**: Make a new branch for your feature or bugfix.
+3. **Make your changes**: Implement your feature or fix the bug.
+4. **Write tests**: Ensure that your changes are covered by tests.
+5. **Submit a pull request**: Push your changes to your fork and submit a pull request to the main repository.
+
+## Code of Conduct
+
+We expect all contributors to adhere to our Code of Conduct. Please be respectful and considerate in your interactions with others. Harassment and discrimination of any kind will not be tolerated.
