@@ -560,19 +560,77 @@ func TestRateLimitEnabled(t *testing.T) {
 	}
 }
 
+func TestUsingSubscription(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		oauth  string
+		apiKey string
+		want   bool
+	}{
+		{name: "oauth only", oauth: "tok", want: true},
+		{name: "both set", oauth: "tok", apiKey: "sk-ant", want: false},
+		{name: "api key only", apiKey: "sk-ant", want: false},
+		{name: "neither", want: false},
+		{name: "whitespace-only oauth", oauth: "   ", want: false},
+		{name: "oauth + whitespace-only key", oauth: "tok", apiKey: "  ", want: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := Config{ClaudeCodeOAuthToken: tt.oauth, AnthropicAPIKey: tt.apiKey}
+			if got := c.UsingSubscription(); got != tt.want {
+				t.Errorf("UsingSubscription(oauth=%q,apiKey=%q) = %v, want %v", tt.oauth, tt.apiKey, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCostCapEnabled(t *testing.T) {
 	for _, tt := range []struct {
-		cap  float64
-		want bool
+		name   string
+		cap    float64
+		oauth  string
+		apiKey string
+		want   bool
 	}{
-		{1000.0, true},
-		{0, false},
-		{-1, false},
+		// Pure cap behaviour (no auth tokens set: conservative, cap enforced).
+		{name: "positive cap", cap: 1000.0, want: true},
+		{name: "zero cap", cap: 0, want: false},
+		{name: "negative cap", cap: -1, want: false},
+		// Subscription (OAuth-only): cap always disabled, even with a positive cap.
+		{name: "subscription positive cap", cap: 1000.0, oauth: "tok", want: false},
+		{name: "subscription zero cap", cap: 0, oauth: "tok", want: false},
+		// API key set (real spend): cap follows the configured value.
+		{name: "api key positive cap", cap: 1000.0, apiKey: "sk-ant", want: true},
+		{name: "api key zero cap", cap: 0, apiKey: "sk-ant", want: false},
+		// Both tokens: API key wins/bills, so NOT subscription — cap stays enforced.
+		{name: "both tokens positive cap", cap: 1000.0, oauth: "tok", apiKey: "sk-ant", want: true},
+		// Neither token: conservative, cap enforced.
+		{name: "neither token positive cap", cap: 1000.0, want: true},
 	} {
-		c := Config{ClaudeMaxCostPerUser: tt.cap}
-		if got := c.CostCapEnabled(); got != tt.want {
-			t.Errorf("CostCapEnabled(%v) = %v, want %v", tt.cap, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			c := Config{ClaudeMaxCostPerUser: tt.cap, ClaudeCodeOAuthToken: tt.oauth, AnthropicAPIKey: tt.apiKey}
+			if got := c.CostCapEnabled(); got != tt.want {
+				t.Errorf("CostCapEnabled(cap=%v,oauth=%q,apiKey=%q) = %v, want %v", tt.cap, tt.oauth, tt.apiKey, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEffectiveCostCapUSD(t *testing.T) {
+	// On a subscription the effective cap is 0 (disabled) regardless of the
+	// configured value.
+	sub := Config{ClaudeMaxCostPerUser: 1000.0, ClaudeCodeOAuthToken: "tok"}
+	if got := sub.EffectiveCostCapUSD(); got != 0 {
+		t.Errorf("EffectiveCostCapUSD() on subscription = %v, want 0", got)
+	}
+	// On an API key the effective cap equals ClaudeMaxCostPerUser.
+	apiKey := Config{ClaudeMaxCostPerUser: 1000.0, AnthropicAPIKey: "sk-ant"}
+	if got := apiKey.EffectiveCostCapUSD(); got != 1000.0 {
+		t.Errorf("EffectiveCostCapUSD() on api key = %v, want 1000", got)
+	}
+	// A non-positive configured cap is 0 (disabled) even off a subscription.
+	off := Config{ClaudeMaxCostPerUser: 0, AnthropicAPIKey: "sk-ant"}
+	if got := off.EffectiveCostCapUSD(); got != 0 {
+		t.Errorf("EffectiveCostCapUSD() with zero cap = %v, want 0", got)
 	}
 }
 

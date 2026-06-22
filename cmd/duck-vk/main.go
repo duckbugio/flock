@@ -205,7 +205,7 @@ func run() int {
 		Logger:     logger,
 	})
 
-	guards := chat.GuardConfig{CostCapUSD: cfg.ClaudeMaxCostPerUser}
+	guards := chat.GuardConfig{CostCapUSD: cfg.EffectiveCostCapUSD()}
 	receiver := vk.NewReceiver(vk.ReceiverConfig{
 		Service:        svc,
 		GroupID:        cfg.VKGroupID,

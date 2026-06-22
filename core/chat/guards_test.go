@@ -95,6 +95,37 @@ func TestCheckGuardsCostDenied(t *testing.T) {
 	}
 }
 
+// TestCheckGuardsSubscriptionCapDisabled proves the subscription path: an
+// effective cost cap of 0 (what config.EffectiveCostCapUSD returns on a Claude
+// subscription) allows a request even when the user's accumulated total is large,
+// while a positive cap still denies the same over-cap user (the API-key path,
+// unchanged). The accumulation itself keeps running for observability; only
+// enforcement is gated by the cap value.
+func TestCheckGuardsSubscriptionCapDisabled(t *testing.T) {
+	rl := ratelimit.New(100, time.Minute)
+	costs := newCostStore(t)
+	const user int64 = 11
+	// Accumulate a large total, far above any plausible cap.
+	if err := costs.Add(user, 5000); err != nil {
+		t.Fatalf("seed cost: %v", err)
+	}
+
+	// Subscription path: effective cap 0 -> always allowed, no cost denial.
+	allow, reason := CheckGuards(rl, costs, GuardConfig{CostCapUSD: 0, Now: fixedNow(time.Unix(5000, 0))}, user)
+	if !allow || reason != "" {
+		t.Fatalf("cap=0 should allow regardless of total, got allow=%v reason=%q", allow, reason)
+	}
+
+	// API-key path: a positive cap still denies the over-cap user.
+	allow, reason = CheckGuards(rl, costs, GuardConfig{CostCapUSD: 1000, Now: fixedNow(time.Unix(5000, 0))}, user)
+	if allow {
+		t.Fatal("positive cap should deny a user whose total is over the cap")
+	}
+	if reason != costCapDenial {
+		t.Fatalf("reason = %q, want cost-cap denial", reason)
+	}
+}
+
 // TestCheckGuardsDisabled confirms nil limiter and nil store (both disabled) let
 // everything through.
 func TestCheckGuardsDisabled(t *testing.T) {

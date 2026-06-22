@@ -189,7 +189,7 @@ func run() int {
 	var vt *telegram.VoiceTranscriber
 	var up *telegram.Uploader
 
-	guards := chat.GuardConfig{CostCapUSD: cfg.ClaudeMaxCostPerUser}
+	guards := chat.GuardConfig{CostCapUSD: cfg.EffectiveCostCapUSD()}
 
 	opts2 := []bot.Option{
 		bot.WithDefaultHandler(textHandler(cfg, &svc, &vt, &up, limiter, costs, guards)),
