@@ -136,7 +136,7 @@ func run() int {
 		"rate_limit_requests", cfg.RateLimitRequests,
 		"rate_limit_window", cfg.RateLimitWindow(),
 		"cost_cap_enabled", cfg.CostCapEnabled() && costs != nil,
-		"cost_cap_usd", cfg.ClaudeMaxCostPerUser,
+		"cost_cap_usd", cfg.EffectiveCostCapUSD(),
 	)
 
 	disp := dispatch.New(cfg.MaxConcurrentChatRuns)
