@@ -2,6 +2,7 @@ package schedule
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -37,9 +38,11 @@ type Manager struct {
 }
 
 // NewManager builds a Manager. store is the durable job store; fire injects a
-// fired job's prompt into its chat (chat.Service.Inject); now supplies the current
-// time (time.Now in production, a stub in tests); a nil log defaults to
-// slog.Default().
+// fired job's prompt into its chat (chat.Service.Inject). fire MUST NOT block the
+// caller: TickOnce runs on the single scheduler goroutine, so a blocking fire
+// would stall every other chat's jobs — the production wiring runs Inject on its
+// own goroutine (see buildScheduler). now supplies the current time (time.Now in
+// production, a stub in tests); a nil log defaults to slog.Default().
 func NewManager(store *Store, fire func(chatID, prompt string), now func() time.Time, log *slog.Logger) *Manager {
 	if now == nil {
 		now = time.Now
@@ -190,6 +193,9 @@ func (m *Manager) dispatchAdd(chatID string, userID int64, args string, rest []s
 		CreatedAt: m.now().Unix(),
 	})
 	if err != nil {
+		if errors.Is(err, ErrTooManyJobs) {
+			return fmt.Sprintf("This chat already has the maximum of %d scheduled jobs. Remove one before adding another.", MaxJobsPerChat)
+		}
 		m.log.Error("schedule: add job failed", "chat", chatID, "error", err)
 		return "Failed to save the job. Please try again."
 	}

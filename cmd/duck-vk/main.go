@@ -304,7 +304,11 @@ func buildScheduler(ctx context.Context, cfg config.Config, svc *chat.Service, l
 		logger.Error("open schedule store; scheduler disabled", "path", cfg.ScheduleStoreFile(), "error", err)
 		return nil
 	}
-	mgr := schedule.NewManager(store, svc.Inject, time.Now, logger)
+	// Fire each due job on its own goroutine so a blocked Inject (full dispatch
+	// buffer behind a long Claude run) never stalls the single scheduler goroutine
+	// and starves other chats' jobs. Mirrors cmd/flock-telegram.
+	fire := func(chatID, prompt string) { go svc.Inject(chatID, prompt) }
+	mgr := schedule.NewManager(store, fire, time.Now, logger)
 	go func() {
 		if err := mgr.Run(ctx); err != nil && ctx.Err() == nil {
 			logger.Error("scheduler stopped", "error", err)

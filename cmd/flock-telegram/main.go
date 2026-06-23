@@ -999,7 +999,14 @@ func buildScheduler(ctx context.Context, cfg config.Config, svc *chat.Service, l
 		logger.Error("open schedule store; scheduler disabled", "path", cfg.ScheduleStoreFile(), "error", err)
 		return nil
 	}
-	mgr := schedule.NewManager(store, svc.Inject, time.Now, logger)
+	// Fire each due job on its own goroutine: Inject blocks when a chat's dispatch
+	// buffer is full (a long-running Claude run holds the lane), and the scheduler
+	// runs a single goroutine — firing inline would stall every OTHER chat's due
+	// jobs and could skip a matching minute. Detaching keeps the tick loop free;
+	// at-most-once-per-minute still holds because TickOnce records the minute key
+	// synchronously before this returns.
+	fire := func(chatID, prompt string) { go svc.Inject(chatID, prompt) }
+	mgr := schedule.NewManager(store, fire, time.Now, logger)
 	go func() {
 		if err := mgr.Run(ctx); err != nil && ctx.Err() == nil {
 			logger.Error("scheduler stopped", "error", err)

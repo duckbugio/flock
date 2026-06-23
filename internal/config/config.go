@@ -99,10 +99,12 @@ type Config struct {
 	SessionStorePath string `env:"SESSION_STORE_PATH"`
 
 	// EnableScheduler gates the /schedule command and its background cron
-	// scheduler. OFF by default: with the flag off no schedule store is opened, no
-	// scheduler goroutine runs, and /schedule replies with a "disabled" notice, so
-	// behavior is byte-identical to a deployment without the feature. Set
-	// ENABLE_SCHEDULER=true to enable durable per-chat cron jobs (see SchedulerEnabled).
+	// scheduler. OFF by default: with the flag off no schedule store is opened and
+	// no scheduler goroutine runs (the background side is a true no-op). /schedule
+	// itself stays a reserved, bot-owned command — it remains in the command menu
+	// and replies with a "disabled" notice rather than being forwarded to the model.
+	// Set ENABLE_SCHEDULER=true to enable durable per-chat cron jobs (see
+	// SchedulerEnabled).
 	EnableScheduler bool `env:"ENABLE_SCHEDULER" envDefault:"false"`
 
 	// ScheduleStorePath is the JSON file persisting chatID -> the chat's cron jobs,
@@ -340,8 +342,9 @@ func (c Config) ScheduleStoreFile() string {
 }
 
 // SchedulerEnabled reports whether the /schedule command and its background cron
-// scheduler are active (ENABLE_SCHEDULER=true). When false the feature is a true
-// no-op: no store, no goroutine, and /schedule replies with a disabled notice.
+// scheduler are active (ENABLE_SCHEDULER=true). When false the background side is
+// a no-op (no store, no goroutine); /schedule stays bot-owned and replies with a
+// disabled notice instead of running.
 func (c Config) SchedulerEnabled() bool {
 	return c.EnableScheduler
 }

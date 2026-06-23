@@ -39,6 +39,18 @@ import (
 // core/pending).
 const dirPerm os.FileMode = 0o750
 
+// MaxJobsPerChat caps how many scheduled jobs a single chat may hold. Each active
+// job is an UNATTENDED, recurring run (its prompt can drive commits/PRs) that
+// fires outside the live per-message rate/cost guards, so an unbounded count is a
+// cost/autonomy amplifier. The cap bounds that blast radius while staying well
+// above any realistic per-chat schedule.
+const MaxJobsPerChat = 25
+
+// ErrTooManyJobs is returned by Add when a chat is already at MaxJobsPerChat, so
+// the caller can surface a clear "remove one first" message instead of a generic
+// failure.
+var ErrTooManyJobs = errors.New("schedule: chat has reached the maximum number of jobs")
+
 // Job is one scheduled cron job. ID is a process-unique decimal string assigned
 // at Add. ChatID is the transport's opaque string chat id the job (and its fired
 // prompt) belongs to. Name is a human label; Cron is the five-field spec; Prompt
@@ -122,14 +134,19 @@ func (s *Store) load() error {
 
 // Add assigns a fresh process-unique ID to job, appends it to its chat's slice,
 // persists the change atomically, and returns the assigned ID. job is passed in
-// WITHOUT an ID; its ChatID must already be set. A nil store is a no-op that
-// returns "" so callers stay nil-safe when the store failed to open.
+// WITHOUT an ID; its ChatID must already be set. It returns ErrTooManyJobs
+// (without persisting) when the chat already holds MaxJobsPerChat jobs. A nil
+// store is a no-op that returns "" so callers stay nil-safe when the store failed
+// to open.
 func (s *Store) Add(job Job) (string, error) {
 	if s == nil {
 		return "", nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.jobs[job.ChatID]) >= MaxJobsPerChat {
+		return "", ErrTooManyJobs
+	}
 	id := strconv.FormatUint(s.nextID, 10)
 	s.nextID++
 	job.ID = id
