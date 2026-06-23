@@ -10,6 +10,7 @@ package telegram
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strconv"
@@ -127,7 +128,7 @@ func (c *botChat) Send(ctx context.Context, chatID chat.ChatID, text, stopRunID 
 		msg, err = c.b.SendMessage(ctx, params)
 	}
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("send telegram message: %w", err)
 	}
 	return strconv.Itoa(msg.ID), nil
 }
