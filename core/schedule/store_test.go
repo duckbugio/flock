@@ -1,6 +1,7 @@
 package schedule_test
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -143,6 +144,29 @@ func TestStoreMarkFiredDeDup(t *testing.T) {
 	jobs := s.ActiveJobs()
 	if len(jobs) != 1 || jobs[0].LastFired != key {
 		t.Fatalf("ActiveJobs after MarkFired = %+v, want LastFired=%q", jobs, key)
+	}
+}
+
+// TestStoreAddCapPerChat asserts Add enforces MaxJobsPerChat: filling a chat to
+// the cap succeeds, the next Add is rejected with ErrTooManyJobs and not
+// persisted, and a DIFFERENT chat is unaffected (the cap is per-chat).
+func TestStoreAddCapPerChat(t *testing.T) {
+	s, _ := newStore(t)
+	for i := 0; i < schedule.MaxJobsPerChat; i++ {
+		if _, err := s.Add(schedule.Job{ChatID: "100", Name: "j", Cron: "* * * * *", Prompt: "p", Active: true}); err != nil {
+			t.Fatalf("Add #%d within cap: %v", i, err)
+		}
+	}
+	_, err := s.Add(schedule.Job{ChatID: "100", Name: "over", Cron: "* * * * *", Prompt: "p", Active: true})
+	if !errors.Is(err, schedule.ErrTooManyJobs) {
+		t.Fatalf("Add past cap err = %v, want ErrTooManyJobs", err)
+	}
+	if got := len(s.List("100")); got != schedule.MaxJobsPerChat {
+		t.Errorf("chat 100 has %d jobs, want the cap %d (rejected add not persisted)", got, schedule.MaxJobsPerChat)
+	}
+	// The cap is per-chat: a different chat can still add.
+	if _, err := s.Add(schedule.Job{ChatID: "200", Name: "ok", Cron: "* * * * *", Prompt: "p", Active: true}); err != nil {
+		t.Errorf("Add to a different chat err = %v, want nil (cap is per-chat)", err)
 	}
 }
 

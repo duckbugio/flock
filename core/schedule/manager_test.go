@@ -191,6 +191,24 @@ func TestDispatchAddPreservesPromptSpacing(t *testing.T) {
 	}
 }
 
+// TestDispatchAddRejectsPastCap asserts that once a chat holds MaxJobsPerChat
+// jobs, `add` is refused with a clear message and nothing extra is persisted.
+func TestDispatchAddRejectsPastCap(t *testing.T) {
+	mgr, store := newDispatchManager(t)
+	for i := 0; i < schedule.MaxJobsPerChat; i++ {
+		if reply := mgr.Dispatch("100", 1, "add j 0 9 * * 1 do it"); !strings.Contains(reply, "Added job #") {
+			t.Fatalf("add within cap reply = %q, want 'Added job #...'", reply)
+		}
+	}
+	reply := mgr.Dispatch("100", 1, "add over 0 9 * * 1 do it")
+	if !strings.Contains(strings.ToLower(reply), "maximum") {
+		t.Errorf("past-cap reply = %q, want a 'maximum' rejection", reply)
+	}
+	if got := len(store.List("100")); got != schedule.MaxJobsPerChat {
+		t.Errorf("chat has %d jobs after the rejected add, want the cap %d", got, schedule.MaxJobsPerChat)
+	}
+}
+
 // --- Scheduler firing (deterministic, no real time) ---
 
 // TestSchedulerFiresOncePerMatchingMinute drives tickOnce across several
