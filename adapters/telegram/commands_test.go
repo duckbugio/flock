@@ -32,6 +32,10 @@ func TestCommandName(t *testing.T) {
 		{"command with args", botCmd("/new please", 4), "new"},
 		{"command with @botname and args", botCmd("/stop@duck_bot now", 14), "stop"},
 		{"different command not confused", botCmd("/news", 5), "news"},
+		{"uppercase command lowercased", botCmd("/Stop", 5), "stop"},
+		{"all-caps command lowercased", botCmd("/STOP", 5), "stop"},
+		{"mixed-case command lowercased", botCmd("/New please", 4), "new"},
+		{"uppercase command with @botname", botCmd("/STOP@duck_bot now", 14), "stop"},
 		{"plain text is not a command", &models.Message{Text: "hello there"}, ""},
 		{"mid-text slash is not a command", &models.Message{
 			Text:     "say /new",
@@ -76,6 +80,7 @@ func TestStripCommandMention(t *testing.T) {
 		{"empty mention not our bot", "/loop@ 5m", bot, "/loop@ 5m"},
 		{"tab-delimited args preserved", "/loop@duck_bot\t5m", bot, "/loop\t5m"},
 		{"newline-delimited args preserved", "/loop@duck_bot\nmore", bot, "/loop\nmore"},
+		{"carriage-return-delimited args preserved", "/loop@duck_bot\r5m", bot, "/loop\r5m"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

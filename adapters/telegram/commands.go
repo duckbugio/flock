@@ -6,12 +6,17 @@ import (
 	"github.com/go-telegram/bot/models"
 )
 
-// CommandName returns the slash command addressed at the start of msg, without
-// any @botname suffix, or "" when msg is not a bot command. Telegram inserts an
-// @botname suffix when a command is tapped in a group (e.g. /new@duck_bot), and
-// go-telegram/bot's MatchTypeCommand compares the FULL "new@duck_bot" token, so
-// it would miss the command in groups; stripping the suffix here makes /new and
-// /new@duck_bot equivalent. Only a bot_command entity at offset 0 counts, so a
+// CommandName returns the slash command addressed at the start of msg,
+// lowercased and without any @botname suffix, or "" when msg is not a bot
+// command. Telegram inserts an @botname suffix when a command is tapped in a
+// group (e.g. /new@duck_bot), and go-telegram/bot's MatchTypeCommand compares
+// the FULL "new@duck_bot" token, so it would miss the command in groups;
+// stripping the suffix here makes /new and /new@duck_bot equivalent. The token
+// is lowercased because Telegram preserves the case the user typed for the
+// command word (only the @botname suffix is lowercased by clients), so /Stop
+// arrives as "Stop"; lowercasing keeps reserved-command routing case-insensitive
+// (matching VK and chat.IsReservedCommand) instead of leaking /Stop, /New, … to
+// the model as free text. Only a bot_command entity at offset 0 counts, so a
 // "/new" appearing mid-message is not treated as a command.
 func CommandName(msg *models.Message) string {
 	if msg == nil {
@@ -31,7 +36,7 @@ func CommandName(msg *models.Message) string {
 		if i := strings.IndexByte(tok, '@'); i >= 0 {
 			tok = tok[:i]
 		}
-		return tok
+		return strings.ToLower(tok)
 	}
 	return ""
 }
@@ -62,7 +67,7 @@ func StripCommandMention(text, botUsername string) string {
 	// original whitespace) verbatim.
 	rest := ""
 	token := text
-	if i := strings.IndexAny(text, " \t\n"); i >= 0 {
+	if i := strings.IndexAny(text, " \t\n\r"); i >= 0 {
 		token = text[:i]
 		rest = text[i:]
 	}
