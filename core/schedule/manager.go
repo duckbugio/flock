@@ -22,10 +22,6 @@ const minuteKeyLayout = "2006-01-02T15:04"
 // de-dup guarantees at most one fire per matching minute regardless.
 const tickInterval = 30 * time.Second
 
-// addFields is the number of fixed leading tokens an `add` subcommand carries
-// before the prompt: name + the 5 cron fields.
-const addFields = 6
-
 // Manager runs the background scheduler and serves the transport-neutral
 // `/schedule` subcommands. It owns no transport state: a chat id is a plain
 // string and the fire callback (wired to chat.Service.Inject) is what couples a
@@ -69,19 +65,34 @@ func (m *Manager) Run(ctx context.Context) error {
 	}
 }
 
-// TickOnce performs one scheduling pass: for the current minute key, fire every
-// active job whose schedule matches now() and that has not already fired this
-// minute, then record the fire. Run calls it on every tick; it is exported so
-// tests can drive scheduling deterministically with a stepped now func instead of
-// waiting on real time. A spec that no longer parses is logged and skipped (never
-// fired).
+// TickOnce performs one scheduling pass: fire every active job whose schedule
+// matches the current wall-clock minute IN THAT CHAT'S TIMEZONE and that has not
+// already fired this minute, then record the fire. Run calls it on every tick; it
+// is exported so tests can drive scheduling deterministically with a stepped now
+// func instead of waiting on real time. A spec that no longer parses is logged and
+// skipped (never fired).
 func (m *Manager) TickOnce() {
 	if m.store == nil || m.fire == nil {
 		return
 	}
 	now := m.now()
-	minuteKey := now.Format(minuteKeyLayout)
+	locs := map[string]*time.Location{} // resolve each chat's zone once per tick
 	for _, job := range m.store.ActiveJobs() {
+		// Evaluate the job against the wall clock in its chat's timezone (a chat with
+		// no zone set falls back to process-local time). The de-dup minuteKey is in
+		// that same zone, so at-most-once-per-matching-minute holds per chat. A zone
+		// changed mid-fire is best-effort: the stored key was written in the old zone,
+		// so a job may fire once more under the new one — bounded and self-inflicted.
+		loc, ok := locs[job.ChatID]
+		if !ok {
+			loc = m.location(job.ChatID)
+			locs[job.ChatID] = loc
+		}
+		local := now
+		if loc != nil {
+			local = now.In(loc)
+		}
+		minuteKey := local.Format(minuteKeyLayout)
 		if job.LastFired == minuteKey {
 			continue
 		}
@@ -90,7 +101,7 @@ func (m *Manager) TickOnce() {
 			m.log.Warn("scheduler: skipping job with invalid cron", "id", job.ID, "chat", job.ChatID, "cron", job.Cron, "error", err)
 			continue
 		}
-		if !sched.Matches(now) {
+		if !sched.Matches(local) {
 			continue
 		}
 		m.fire(job.ChatID, job.Prompt)
@@ -101,15 +112,35 @@ func (m *Manager) TickOnce() {
 	}
 }
 
+// location resolves the IANA timezone a chat's jobs are evaluated in, or nil when
+// the chat has no zone set (or the stored name fails to load — logged once per
+// tick), in which case the caller uses the time as-is (the process-local default).
+func (m *Manager) location(chatID string) *time.Location {
+	name := m.store.Zone(chatID)
+	if name == "" {
+		return nil
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		m.log.Warn("scheduler: bad stored timezone; using process-local", "chat", chatID, "tz", name, "error", err)
+		return nil
+	}
+	return loc
+}
+
 // usageText is the concise reply for an empty or unknown `/schedule` subcommand.
 const usageText = "Usage:\n" +
 	"/schedule list — list this chat's jobs\n" +
+	"/schedule show <id> — show a job's full prompt\n" +
 	"/schedule add <name> <min> <hour> <dom> <mon> <dow> <prompt…> — add a cron job\n" +
 	"/schedule remove <id> — delete a job\n" +
 	"/schedule pause <id> — pause a job\n" +
-	"/schedule resume <id> — resume a paused job\n\n" +
+	"/schedule resume <id> — resume a paused job\n" +
+	"/schedule tz [IANA] — show or set this chat's timezone (e.g. Europe/Moscow)\n\n" +
 	"Cron fields: minute(0-59) hour(0-23) day-of-month(1-31) month(1-12) day-of-week(0-6, 0=Sun).\n" +
-	"Each field supports *, n, a-b, a,b lists and */n steps. Times are in the server's local zone.\n" +
+	"Each field supports *, n, a-b, a,b lists and */n steps.\n" +
+	"Quote a name with spaces: /schedule add \"daily report\" 0 9 * * 1 post the update\n" +
+	"Times use this chat's timezone (/schedule tz), else the server zone (UTC by default).\n" +
 	"Note: when both day-of-month and day-of-week are restricted a job fires only when BOTH match."
 
 // Dispatch is the transport-neutral `/schedule` subcommand handler shared by both
@@ -128,14 +159,18 @@ func (m *Manager) Dispatch(chatID string, userID int64, args string) string {
 	switch sub {
 	case "list":
 		return m.dispatchList(chatID)
+	case "show":
+		return m.dispatchShow(chatID, rest)
 	case "add":
-		return m.dispatchAdd(chatID, userID, args, rest)
+		return m.dispatchAdd(chatID, userID, args)
 	case "remove":
 		return m.dispatchSetState(chatID, rest, stateRemove)
 	case "pause":
 		return m.dispatchSetState(chatID, rest, statePause)
 	case "resume":
 		return m.dispatchSetState(chatID, rest, stateResume)
+	case "tz", "timezone":
+		return m.dispatchTz(chatID, rest)
 	default:
 		return usageText
 	}
@@ -149,38 +184,94 @@ func (m *Manager) dispatchList(chatID string) string {
 		return "No scheduled jobs in this chat."
 	}
 	sort.Slice(jobs, func(i, j int) bool { return idLess(jobs[i].ID, jobs[j].ID) })
-	lines := make([]string, 0, len(jobs)+1)
-	lines = append(lines, "Scheduled jobs:")
-	for _, j := range jobs {
-		state := "active"
-		if !j.Active {
-			state = "paused"
-		}
-		lines = append(lines, fmt.Sprintf("#%s %s — `%s` (%s)", j.ID, j.Name, j.Cron, state))
+	header := "Scheduled jobs:"
+	if z := m.store.Zone(chatID); z != "" {
+		header = fmt.Sprintf("Scheduled jobs (timezone %s):", z)
 	}
+	lines := make([]string, 0, len(jobs)+1)
+	lines = append(lines, header)
+	for _, j := range jobs {
+		preview := truncate(j.Prompt, promptPreviewRunes)
+		lines = append(lines, fmt.Sprintf("#%s %s — `%s` (%s) — %s", j.ID, j.Name, j.Cron, stateLabel(j.Active), preview))
+	}
+	lines = append(lines, "Use /schedule show <id> for a job's full prompt.")
 	return strings.Join(lines, "\n")
 }
 
-// dispatchAdd validates and persists a new job. The fixed leading tokens are the
-// name and the five cron fields; everything after them (preserving the original
-// spacing) is the prompt. An invalid cron, an empty name, or an empty prompt is
-// rejected WITHOUT persisting.
-func (m *Manager) dispatchAdd(chatID string, userID int64, args string, rest []string) string {
-	if len(rest) < addFields+1 {
-		return "Usage: /schedule add <name> <min> <hour> <dom> <mon> <dow> <prompt…>"
+// dispatchShow renders one job's full detail (including the complete prompt),
+// scoped to chatID. A foreign or unknown id is reported as "not found".
+func (m *Manager) dispatchShow(chatID string, rest []string) string {
+	if len(rest) < 1 {
+		return "Usage: /schedule show <id>"
+	}
+	id := rest[0]
+	for _, j := range m.store.List(chatID) {
+		if j.ID != id {
+			continue
+		}
+		zone := m.store.Zone(chatID)
+		if zone == "" {
+			zone = "server default"
+		}
+		return fmt.Sprintf(
+			"Job #%s — %s\nCron: `%s` (%s, timezone %s)\nPrompt:\n%s",
+			j.ID, j.Name, j.Cron, stateLabel(j.Active), zone, j.Prompt,
+		)
+	}
+	return notFound(id)
+}
+
+// dispatchTz shows or sets this chat's IANA timezone. With no argument it reports
+// the current zone; with one it validates the name (time.LoadLocation) and stores
+// it; "none"/"clear" reverts to the server default. The zone governs how every job
+// in this chat is matched against the wall clock.
+func (m *Manager) dispatchTz(chatID string, rest []string) string {
+	if len(rest) == 0 {
+		if z := m.store.Zone(chatID); z != "" {
+			return fmt.Sprintf("This chat's timezone is %s.", z)
+		}
+		return "This chat has no timezone set; schedules use the server zone (UTC by default).\n" +
+			"Set one with /schedule tz <IANA>, e.g. /schedule tz Europe/Moscow."
 	}
 	name := rest[0]
+	if strings.EqualFold(name, "none") || strings.EqualFold(name, "clear") {
+		if err := m.store.SetZone(chatID, ""); err != nil {
+			m.log.Error("schedule: clear timezone failed", "chat", chatID, "error", err)
+			return "Failed to update the timezone. Please try again."
+		}
+		return "Cleared this chat's timezone; schedules now use the server zone."
+	}
+	if _, err := time.LoadLocation(name); err != nil {
+		return fmt.Sprintf("Unknown timezone %q. Use an IANA name like Europe/Moscow or UTC.", name)
+	}
+	if err := m.store.SetZone(chatID, name); err != nil {
+		m.log.Error("schedule: set timezone failed", "chat", chatID, "error", err)
+		return "Failed to update the timezone. Please try again."
+	}
+	return fmt.Sprintf("Timezone set to %s. Existing and new jobs in this chat now use it.", name)
+}
+
+// addUsage is the one-line grammar reminder for a malformed `add`.
+const addUsage = "Usage: /schedule add <name> <min> <hour> <dom> <mon> <dow> <prompt…>\n" +
+	"Quote a name that contains spaces, e.g. /schedule add \"daily report\" 0 9 * * 1 post it."
+
+// dispatchAdd validates and persists a new job. The leading token is the name
+// (optionally a double-quoted multi-word string), the next five tokens are the
+// cron fields, and everything after them — internal spacing preserved — is the
+// prompt. An invalid cron, an empty name, or an empty prompt is rejected WITHOUT
+// persisting.
+func (m *Manager) dispatchAdd(chatID string, userID int64, args string) string {
+	name, cronSpec, prompt, err := parseAddArgs(afterFirstToken(args))
+	if err != nil {
+		return addUsage
+	}
 	if strings.TrimSpace(name) == "" {
 		return "The job name cannot be empty."
 	}
-	cronSpec := strings.Join(rest[1:addFields], " ")
-	if _, err := Parse(cronSpec); err != nil {
-		return fmt.Sprintf("Invalid cron spec: %s", err)
+	if _, perr := Parse(cronSpec); perr != nil {
+		return fmt.Sprintf("Invalid cron spec: %s", perr)
 	}
-	// The prompt is everything after the "add" token, the name, and the 5 cron
-	// fields (1 + addFields tokens); keep its original internal spacing verbatim.
-	prompt := strings.TrimSpace(dropTokens(args, 1+addFields))
-	if prompt == "" {
+	if strings.TrimSpace(prompt) == "" {
 		return "The prompt cannot be empty."
 	}
 	id, err := m.store.Add(Job{
@@ -220,7 +311,7 @@ func (m *Manager) dispatchSetState(chatID string, rest []string, state jobState)
 	}
 	id := rest[0]
 	if !m.chatOwnsJob(chatID, id) {
-		return fmt.Sprintf("Job #%s not found in this chat.", id)
+		return notFound(id)
 	}
 	var err error
 	var ok string
@@ -253,6 +344,19 @@ func (m *Manager) chatOwnsJob(chatID, id string) bool {
 	return false
 }
 
+// stateLabel renders a job's active/paused state for display.
+func stateLabel(active bool) string {
+	if active {
+		return "active"
+	}
+	return "paused"
+}
+
+// notFound is the reply for a job id that is unknown in (or foreign to) the chat.
+func notFound(id string) string {
+	return fmt.Sprintf("Job #%s not found in this chat.", id)
+}
+
 // stateVerb labels a jobState for a usage string.
 func stateVerb(state jobState) string {
 	switch state {
@@ -265,21 +369,89 @@ func stateVerb(state jobState) string {
 	}
 }
 
-// dropTokens returns s with its first n whitespace-delimited tokens (and the
-// whitespace separating them) removed, preserving the remainder verbatim
-// (including any internal spacing of the surviving text). It treats the same
-// Unicode whitespace as strings.Fields so the token boundaries match how rest was
-// split, while keeping the prompt's own internal spacing intact.
-func dropTokens(s string, n int) string {
-	for i := 0; i < n; i++ {
-		s = strings.TrimLeftFunc(s, unicode.IsSpace)
-		j := strings.IndexFunc(s, unicode.IsSpace)
-		if j < 0 {
-			return ""
-		}
-		s = s[j:]
+// promptPreviewRunes bounds the prompt preview shown in `/schedule list`; the full
+// prompt is available via `/schedule show <id>`.
+const promptPreviewRunes = 50
+
+// parseAddArgs parses the body of an `add` subcommand (everything after the "add"
+// token) into the job name, the five-field cron spec, and the prompt. The name is
+// either a single whitespace-delimited token or a double-quoted multi-word string
+// ("daily report"); the next five tokens are the cron fields; the remainder — with
+// its internal spacing preserved — is the prompt. It errors only when the name or
+// the five cron tokens are missing (an empty prompt is left for the caller to
+// reject with a clearer message).
+func parseAddArgs(body string) (name, cronSpec, prompt string, err error) {
+	name, rest, err := takeName(body)
+	if err != nil {
+		return "", "", "", err
 	}
-	return strings.TrimLeftFunc(s, unicode.IsSpace)
+	fields := make([]string, 0, cronFields)
+	for i := 0; i < cronFields; i++ {
+		var tok string
+		tok, rest = takeToken(rest)
+		if tok == "" {
+			return "", "", "", errors.New("missing cron fields")
+		}
+		fields = append(fields, tok)
+	}
+	cronSpec = strings.Join(fields, " ")
+	prompt = strings.TrimLeftFunc(rest, unicode.IsSpace)
+	return name, cronSpec, prompt, nil
+}
+
+// afterFirstToken returns s with its leading whitespace-delimited token (the
+// subcommand verb) removed, preserving the remainder.
+func afterFirstToken(s string) string {
+	_, rest := takeToken(s)
+	return rest
+}
+
+// takeToken splits off the first whitespace-delimited token of s (after trimming
+// leading whitespace) and returns it plus the remainder, which begins at the
+// whitespace before the next token (or "" when none remains).
+func takeToken(s string) (token, rest string) {
+	s = strings.TrimLeftFunc(s, unicode.IsSpace)
+	if s == "" {
+		return "", ""
+	}
+	if i := strings.IndexFunc(s, unicode.IsSpace); i >= 0 {
+		return s[:i], s[i:]
+	}
+	return s, ""
+}
+
+// takeName splits off the job name — a double-quoted "multi word" string or a
+// single whitespace-delimited token — and returns it plus the remainder. An empty
+// or unterminated-quote name is an error.
+func takeName(s string) (name, rest string, err error) {
+	s = strings.TrimLeftFunc(s, unicode.IsSpace)
+	if s == "" {
+		return "", "", errors.New("empty name")
+	}
+	if s[0] == '"' {
+		end := strings.IndexByte(s[1:], '"')
+		if end < 0 {
+			return "", "", errors.New("unterminated quoted name")
+		}
+		name = s[1 : 1+end]
+		if strings.TrimSpace(name) == "" {
+			return "", "", errors.New("empty name")
+		}
+		return name, s[1+end+1:], nil
+	}
+	name, rest = takeToken(s)
+	return name, rest, nil
+}
+
+// truncate collapses newlines and clips s to at most n runes (appending an
+// ellipsis when clipped), for a one-line job preview.
+func truncate(s string, n int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
 }
 
 // idLess orders two decimal job ids numerically (falling back to a string compare

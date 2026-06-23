@@ -170,6 +170,58 @@ func TestStoreAddCapPerChat(t *testing.T) {
 	}
 }
 
+// TestStoreZoneRoundTrip asserts a chat's timezone is persisted across a reopen,
+// is per-chat, and that an empty SetZone clears it.
+func TestStoreZoneRoundTrip(t *testing.T) {
+	s, path := newStore(t)
+	if err := s.SetZone("100", tzMoscow); err != nil {
+		t.Fatalf("SetZone: %v", err)
+	}
+	if got := s.Zone("100"); got != tzMoscow {
+		t.Errorf("Zone(100) = %q, want Europe/Moscow", got)
+	}
+	if got := s.Zone("200"); got != "" {
+		t.Errorf("Zone(200) = %q, want empty (per-chat)", got)
+	}
+
+	// Persisted across reopen.
+	s2, err := schedule.Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if got := s2.Zone("100"); got != tzMoscow {
+		t.Errorf("after reopen Zone(100) = %q, want Europe/Moscow", got)
+	}
+
+	// Clearing reverts to empty.
+	if err := s2.SetZone("100", ""); err != nil {
+		t.Fatalf("clear SetZone: %v", err)
+	}
+	if got := s2.Zone("100"); got != "" {
+		t.Errorf("after clear Zone(100) = %q, want empty", got)
+	}
+}
+
+// TestStoreZoneSurvivesAlongsideJobs asserts jobs and zones round-trip together
+// (the persisted format carries both).
+func TestStoreZoneSurvivesAlongsideJobs(t *testing.T) {
+	s, path := newStore(t)
+	addJob(t, s, "100", "a", "0 9 * * 1", "p")
+	if err := s.SetZone("100", "UTC"); err != nil {
+		t.Fatalf("SetZone: %v", err)
+	}
+	s2, err := schedule.Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if got := len(s2.List("100")); got != 1 {
+		t.Errorf("after reopen jobs = %d, want 1", got)
+	}
+	if got := s2.Zone("100"); got != "UTC" {
+		t.Errorf("after reopen zone = %q, want UTC", got)
+	}
+}
+
 // TestStoreNilSafe asserts a nil store's mutators are no-ops and its readers
 // return empty, matching the core/pending nil-safety contract.
 func TestStoreNilSafe(t *testing.T) {
@@ -185,6 +237,12 @@ func TestStoreNilSafe(t *testing.T) {
 	}
 	if err := s.MarkFired("1", "1", "k"); err != nil {
 		t.Errorf("nil MarkFired err = %v", err)
+	}
+	if err := s.SetZone("1", "UTC"); err != nil {
+		t.Errorf("nil SetZone err = %v", err)
+	}
+	if got := s.Zone("1"); got != "" {
+		t.Errorf("nil Zone = %q, want empty", got)
 	}
 	if got := s.List("1"); got != nil {
 		t.Errorf("nil List = %+v, want nil", got)

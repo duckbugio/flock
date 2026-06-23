@@ -19,6 +19,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // embed IANA tz database so /schedule per-chat timezones work without OS zoneinfo
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
