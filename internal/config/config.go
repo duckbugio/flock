@@ -330,11 +330,44 @@ func (c Config) RateLimitEnabled() bool {
 	return c.RateLimitRequests > 0 && c.RateLimitWindowSecs > 0
 }
 
-// CostCapEnabled reports whether the cumulative per-user cost cap is active: a
-// positive CLAUDE_MAX_COST_PER_USER. A non-positive cap disables the gate (every
-// request is allowed regardless of accumulated spend).
+// UsingSubscription reports whether the bot is authenticated with a Claude
+// subscription (OAuth) rather than a billed API key. It is true only when
+// CLAUDE_CODE_OAUTH_TOKEN is set AND ANTHROPIC_API_KEY is empty (both after
+// TrimSpace, matching every other token check here).
+//
+// This mirrors the documented auth precedence (see adapters/telegram/.env.example):
+// when BOTH tokens are set the API key takes precedence and bills, so that case is
+// NOT a subscription. On a subscription, total_cost_usd is a notional
+// token-dollar-equivalent rather than real spend, which is why the cost cap is
+// disabled in that mode (see CostCapEnabled).
+func (c Config) UsingSubscription() bool {
+	return strings.TrimSpace(c.ClaudeCodeOAuthToken) != "" && strings.TrimSpace(c.AnthropicAPIKey) == ""
+}
+
+// CostCapEnabled reports whether the cumulative per-user cost cap is active. It is
+// FALSE on a Claude subscription (UsingSubscription): there total_cost_usd is a
+// notional token-dollar-equivalent, not billed money, so capping it would deny
+// users over an amount that was never spent. Otherwise it follows the configured
+// cap: a positive CLAUDE_MAX_COST_PER_USER enables the gate, a non-positive value
+// disables it (every request is allowed regardless of accumulated spend).
 func (c Config) CostCapEnabled() bool {
+	if c.UsingSubscription() {
+		return false
+	}
 	return c.ClaudeMaxCostPerUser > 0
+}
+
+// EffectiveCostCapUSD is the cumulative per-user cap to feed into
+// chat.GuardConfig.CostCapUSD. It returns 0 when the cap is disabled (including the
+// subscription case, see CostCapEnabled) and otherwise the configured
+// CLAUDE_MAX_COST_PER_USER. The "cap <= 0 disables" contract in core/cost then does
+// the rest. This is the single source of truth so the startup log and the guard
+// wiring can never diverge.
+func (c Config) EffectiveCostCapUSD() float64 {
+	if !c.CostCapEnabled() {
+		return 0
+	}
+	return c.ClaudeMaxCostPerUser
 }
 
 // CostStoreFile returns the path to the JSON per-user cost store, defaulting to

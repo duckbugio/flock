@@ -157,7 +157,7 @@ func run() int {
 		"rate_limit_requests", cfg.RateLimitRequests,
 		"rate_limit_window", cfg.RateLimitWindow(),
 		"cost_cap_enabled", cfg.CostCapEnabled() && costs != nil,
-		"cost_cap_usd", cfg.ClaudeMaxCostPerUser,
+		"cost_cap_usd", cfg.EffectiveCostCapUSD(),
 	)
 
 	disp := dispatch.New(cfg.MaxConcurrentChatRuns)
@@ -189,7 +189,7 @@ func run() int {
 	var vt *telegram.VoiceTranscriber
 	var up *telegram.Uploader
 
-	guards := chat.GuardConfig{CostCapUSD: cfg.ClaudeMaxCostPerUser}
+	guards := chat.GuardConfig{CostCapUSD: cfg.EffectiveCostCapUSD()}
 
 	opts2 := []bot.Option{
 		bot.WithDefaultHandler(textHandler(cfg, &svc, &vt, &up, limiter, costs, guards)),
