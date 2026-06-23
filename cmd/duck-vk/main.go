@@ -22,6 +22,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // embed IANA tz database so /schedule per-chat timezones work without OS zoneinfo
 
 	"github.com/duckbugio/flock/adapters/vk"
 	"github.com/duckbugio/flock/core/chat"

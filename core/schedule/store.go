@@ -15,9 +15,9 @@
 // persisted id on load, so a new Add after a restart never collides with a
 // persisted job.
 //
-// Timezone: cron specs are evaluated in PROCESS-LOCAL time (the Manager passes
-// time.Now, which is local; the container defaults to UTC). A job's minute is
-// matched in whatever local zone the process runs in.
+// Timezone: each chat may set an IANA timezone (see SetZone / the /schedule tz
+// command) in which ITS jobs are evaluated. A chat with no zone set falls back to
+// the process-local zone (the container defaults to UTC).
 //
 // Day-of-month / day-of-week use AND-semantics (see cron.go): a job that
 // restricts BOTH day fields fires only when both match. Restrict at most one.
@@ -72,15 +72,23 @@ type Job struct {
 	LastFired string `json:"lastFired"`
 }
 
-// Store persists a per-chat slice of cron jobs durably and is safe for concurrent
-// use. The whole map is held in memory and the backing file is rewritten
-// atomically on every mutation.
+// Store persists a per-chat slice of cron jobs (and each chat's optional IANA
+// timezone) durably and is safe for concurrent use. The whole state is held in
+// memory and the backing file is rewritten atomically on every mutation.
 type Store struct {
 	path string
 
 	mu     sync.Mutex
 	jobs   map[string][]Job
-	nextID uint64 // monotonic ID counter, mutated only under mu
+	zones  map[string]string // chatID -> IANA timezone name (absent = process-local)
+	nextID uint64            // monotonic ID counter, mutated only under mu
+}
+
+// persisted is the on-disk JSON shape: the per-chat jobs plus each chat's optional
+// timezone, so a restart restores both.
+type persisted struct {
+	Jobs  map[string][]Job  `json:"jobs"`
+	Zones map[string]string `json:"zones,omitempty"`
 }
 
 // Open loads (or creates) a Store at path. A missing file yields an empty store;
@@ -94,7 +102,7 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), dirPerm); err != nil {
 		return nil, fmt.Errorf("schedule: create store dir: %w", err)
 	}
-	s := &Store{path: path, jobs: map[string][]Job{}, nextID: 1}
+	s := &Store{path: path, jobs: map[string][]Job{}, zones: map[string]string{}, nextID: 1}
 	if err := s.load(); err != nil {
 		return nil, err
 	}
@@ -115,18 +123,21 @@ func (s *Store) load() error {
 	if len(data) == 0 {
 		return nil
 	}
-	raw := map[string][]Job{}
+	var raw persisted
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return fmt.Errorf("schedule: parse store %s: %w", s.path, err)
 	}
 	var maxID uint64
-	for k, v := range raw {
+	for k, v := range raw.Jobs {
 		s.jobs[k] = v
 		for _, j := range v {
 			if n, perr := strconv.ParseUint(j.ID, 10, 64); perr == nil && n > maxID {
 				maxID = n
 			}
 		}
+	}
+	for k, v := range raw.Zones {
+		s.zones[k] = v
 	}
 	s.nextID = maxID + 1
 	return nil
@@ -254,6 +265,36 @@ func (s *Store) ActiveJobs() []Job {
 	return out
 }
 
+// SetZone records the IANA timezone name (e.g. "Europe/Moscow") that chatID's
+// jobs are evaluated in and persists the change. An empty name clears the chat's
+// zone, reverting it to the process-local default. The caller is responsible for
+// validating the name (the Manager does, via time.LoadLocation). A nil store is a
+// no-op.
+func (s *Store) SetZone(chatID, iana string) error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if iana == "" {
+		delete(s.zones, chatID)
+	} else {
+		s.zones[chatID] = iana
+	}
+	return s.persistLocked()
+}
+
+// Zone returns the IANA timezone name set for chatID, or "" when the chat has no
+// zone set (jobs then use the process-local zone). A nil store yields "".
+func (s *Store) Zone(chatID string) string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.zones[chatID]
+}
+
 // indexOf returns the index of the job with id in jobs, or -1.
 func indexOf(jobs []Job, id string) int {
 	for i := range jobs {
@@ -268,7 +309,7 @@ func indexOf(jobs []Job, id string) int {
 // renames it over the target, so a crash mid-write never leaves a half-written or
 // corrupt store. The caller must hold s.mu.
 func (s *Store) persistLocked() error {
-	data, err := json.Marshal(s.jobs)
+	data, err := json.Marshal(persisted{Jobs: s.jobs, Zones: s.zones})
 	if err != nil {
 		return fmt.Errorf("schedule: encode store: %w", err)
 	}

@@ -209,6 +209,113 @@ func TestDispatchAddRejectsPastCap(t *testing.T) {
 	}
 }
 
+// TestDispatchAddQuotedName asserts a double-quoted multi-word name is accepted
+// (and the cron/prompt after it still parse), while a bare single-word name keeps
+// working.
+func TestDispatchAddQuotedName(t *testing.T) {
+	mgr, store := newDispatchManager(t)
+	reply := mgr.Dispatch("100", 1, `add "daily report" 0 9 * * 1 post the summary`)
+	if !strings.Contains(reply, "Added job #") {
+		t.Fatalf("quoted-name add reply = %q, want 'Added job #...'", reply)
+	}
+	jobs := store.List("100")
+	if len(jobs) != 1 {
+		t.Fatalf("store has %d jobs, want 1", len(jobs))
+	}
+	j := jobs[0]
+	if j.Name != "daily report" || j.Cron != "0 9 * * 1" || j.Prompt != "post the summary" {
+		t.Errorf("job = %+v, want name='daily report' cron='0 9 * * 1' prompt='post the summary'", j)
+	}
+}
+
+// TestDispatchShow asserts `show` returns the full prompt for an own job and
+// "not found" for an unknown/foreign id.
+func TestDispatchShow(t *testing.T) {
+	mgr, _ := newDispatchManager(t)
+	mgr.Dispatch("100", 1, "add a 0 9 * * 1 do the whole long thing in detail")
+
+	got := mgr.Dispatch("100", 1, "show 1")
+	if !strings.Contains(got, "do the whole long thing in detail") || !strings.Contains(got, "#1") {
+		t.Errorf("show = %q, want the full prompt and id", got)
+	}
+	if got := mgr.Dispatch("100", 1, "show 99"); !strings.Contains(strings.ToLower(got), "not found") {
+		t.Errorf("show unknown = %q, want 'not found'", got)
+	}
+	// A foreign chat cannot see the job.
+	if got := mgr.Dispatch("200", 1, "show 1"); !strings.Contains(strings.ToLower(got), "not found") {
+		t.Errorf("foreign show = %q, want 'not found'", got)
+	}
+}
+
+// TestDispatchListShowsPromptPreview asserts `list` includes a (truncated) prompt
+// preview so a user can tell jobs apart without `show`.
+func TestDispatchListShowsPromptPreview(t *testing.T) {
+	mgr, _ := newDispatchManager(t)
+	mgr.Dispatch("100", 1, "add a 0 9 * * 1 water the plants")
+	got := mgr.Dispatch("100", 1, "list")
+	if !strings.Contains(got, "water the plants") {
+		t.Errorf("list = %q, want the prompt preview", got)
+	}
+}
+
+// tzMoscow is a stable IANA zone (UTC+3, no DST since 2014) used by the timezone
+// tests.
+const tzMoscow = "Europe/Moscow"
+
+// TestDispatchTzShowSetClear drives the tz subcommand: show-when-unset, set with
+// validation, reject an unknown zone, and clear.
+func TestDispatchTzShowSetClear(t *testing.T) {
+	mgr, store := newDispatchManager(t)
+
+	if got := mgr.Dispatch("100", 1, "tz"); !strings.Contains(strings.ToLower(got), "no timezone") {
+		t.Errorf("tz show unset = %q, want a 'no timezone' notice", got)
+	}
+	if got := mgr.Dispatch("100", 1, "tz "+tzMoscow); !strings.Contains(got, tzMoscow) {
+		t.Errorf("tz set = %q, want confirmation of %s", got, tzMoscow)
+	}
+	if store.Zone("100") != tzMoscow {
+		t.Errorf("stored zone = %q, want %s", store.Zone("100"), tzMoscow)
+	}
+	if got := mgr.Dispatch("100", 1, "tz Not/AZone"); !strings.Contains(strings.ToLower(got), "unknown timezone") {
+		t.Errorf("tz invalid = %q, want an 'unknown timezone' rejection", got)
+	}
+	if store.Zone("100") != tzMoscow {
+		t.Errorf("invalid zone overwrote the stored one: %q", store.Zone("100"))
+	}
+	if got := mgr.Dispatch("100", 1, "tz none"); !strings.Contains(strings.ToLower(got), "cleared") {
+		t.Errorf("tz clear = %q, want a 'cleared' notice", got)
+	}
+	if store.Zone("100") != "" {
+		t.Errorf("zone not cleared: %q", store.Zone("100"))
+	}
+}
+
+// TestSchedulerHonorsChatTimezone asserts a job is matched against the wall clock
+// in its chat's timezone: with Europe/Moscow (UTC+3) set, a "0 9 * * *" job fires
+// at 06:00 UTC (09:00 Moscow) and not at 09:00 UTC.
+func TestSchedulerHonorsChatTimezone(t *testing.T) {
+	mgr, store, rec, now := newManager(t)
+	if err := store.SetZone("100", tzMoscow); err != nil {
+		t.Fatalf("SetZone: %v", err)
+	}
+	if _, err := store.Add(schedule.Job{ChatID: "100", Name: "j", Cron: "0 9 * * *", Prompt: "go", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 09:00 UTC is 12:00 in Moscow — must NOT fire.
+	*now = time.Date(2026, 6, 18, 9, 0, 0, 0, time.UTC)
+	mgr.TickOnce()
+	if got := rec.seen(); len(got) != 0 {
+		t.Fatalf("fired %d at 09:00 UTC (12:00 MSK), want 0", len(got))
+	}
+	// 06:00 UTC is 09:00 in Moscow — must fire.
+	*now = time.Date(2026, 6, 18, 6, 0, 0, 0, time.UTC)
+	mgr.TickOnce()
+	if got := rec.seen(); len(got) != 1 {
+		t.Fatalf("fired %d at 06:00 UTC (09:00 MSK), want 1", len(got))
+	}
+}
+
 // --- Scheduler firing (deterministic, no real time) ---
 
 // TestSchedulerFiresOncePerMatchingMinute drives tickOnce across several
