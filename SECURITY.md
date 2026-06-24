@@ -15,12 +15,19 @@ images. Always run the latest image.
 **Please do not report security vulnerabilities through public GitHub issues,
 pull requests, or discussions.**
 
-Instead, use one of these private channels:
+Instead, please use **GitHub's private vulnerability reporting**: on this
+repository, go to the **Security** tab → **Report a vulnerability**. This opens a
+private advisory visible only to you and the maintainers, and is the channel we
+monitor.
 
-1. **Email**: <security@duckbug.io>.
-2. **GitHub private vulnerability reporting** (once enabled on this repository):
-   the **Security** tab → **Report a vulnerability** opens a private advisory
-   visible only to you and the maintainers.
+> If the **Report a vulnerability** button is not visible, the maintainers have
+> not enabled private reporting yet — please open a minimal public issue asking
+> them to enable it (without vulnerability details), or reach a maintainer
+> privately, rather than disclosing the issue publicly.
+
+An email address (`security@duckbug.io`) may also be available; if you use it and
+receive no acknowledgement within the window below, fall back to GitHub private
+reporting, as mailbox delivery is not guaranteed.
 
 Please include, as far as you can:
 
