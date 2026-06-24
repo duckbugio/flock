@@ -206,6 +206,116 @@ func TestEditRetriesWithoutKeyboardOn912(t *testing.T) {
 	}
 }
 
+func TestSendReplyRepliesToGlobalMessageID(t *testing.T) {
+	// SendReply must set reply_to to the target GLOBAL message id (the same neutral
+	// MessageID Send/Edit use), carry no keyboard, and return the new message id.
+	rs := newRecordingServer(t, map[string]string{"messages.send": `{"response": 88}`})
+	c := NewBotChat(rs.client("tok"), 100, 1)
+
+	id, err := c.SendReply(context.Background(), "200", "55", "✅ Done in 4m 12s", true)
+	if err != nil {
+		t.Fatalf("SendReply: %v", err)
+	}
+	if id != "88" {
+		t.Errorf("returned id = %q, want 88", id)
+	}
+	got := rs.last("messages.send")
+	if got.Get("reply_to") != "55" {
+		t.Errorf("reply_to = %q, want the target global message id 55", got.Get("reply_to"))
+	}
+	if got.Get("keyboard") != "" {
+		t.Errorf("keyboard = %q, want none (the notice carries no Stop button)", got.Get("keyboard"))
+	}
+	if got.Get("message") != "✅ Done in 4m 12s" {
+		t.Errorf("message = %q, want the notice text", got.Get("message"))
+	}
+	if rs.count("messages.send") != 1 {
+		t.Errorf("messages.send call count = %d, want 1 (no fallback needed)", rs.count("messages.send"))
+	}
+}
+
+func TestSendReplyFallsBackToPlainWhenReplyTargetGone(t *testing.T) {
+	// When the reply target was deleted VK rejects the reply_to send; SendReply must
+	// resend once WITHOUT reply_to so the notice still reaches the user.
+	var attempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, testBodyLimit)
+		_ = r.ParseForm()
+		attempts++
+		if r.Form.Get("reply_to") != "" {
+			// First attempt (with reply_to) fails as if the target is gone.
+			_, _ = io.WriteString(w, `{"error": {"error_code": 100, "error_msg": "message to reply not found"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"response": 91}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewBotChat(&Client{Token: "tok", BaseURL: srv.URL + "/", HTTPClient: srv.Client()}, 100, 1)
+
+	id, err := c.SendReply(context.Background(), "200", "55", "✅ Done in 1s", true)
+	if err != nil {
+		t.Fatalf("SendReply fallback = %v, want nil (plain resend should succeed)", err)
+	}
+	if id != "91" {
+		t.Errorf("returned id = %q, want 91 (the plain resend)", id)
+	}
+	if attempts != 2 {
+		t.Errorf("messages.send attempts = %d, want 2 (reply attempt + plain fallback)", attempts)
+	}
+}
+
+// TestSendReplyDoesNotFallBackOnFlood asserts a flood/rate-limit error (code 6) on
+// the reply attempt is RETURNED rather than degraded to a plain resend, so the
+// Service's RetryAfter back-off retries the reply intact instead of double-hitting
+// an already-throttled endpoint.
+func TestSendReplyDoesNotFallBackOnFlood(t *testing.T) {
+	var attempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, testBodyLimit)
+		_ = r.ParseForm()
+		attempts++
+		_, _ = io.WriteString(w, `{"error": {"error_code": 6, "error_msg": "too many requests per second"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewBotChat(&Client{Token: "tok", BaseURL: srv.URL + "/", HTTPClient: srv.Client()}, 100, 1)
+
+	if _, err := c.SendReply(context.Background(), "200", "55", "✅ Done in 1s", true); err == nil {
+		t.Fatal("SendReply on a flood error = nil, want the error returned so RetryAfter backs off")
+	}
+	if attempts != 1 {
+		t.Errorf("messages.send attempts = %d, want 1 (a flood must NOT trigger the plain fallback)", attempts)
+	}
+}
+
+// TestSendReplyFallbackReusesRandomID asserts the plain resend reuses the SAME
+// random_id as the failed reply attempt, so VK dedups a notice that actually landed
+// before its response was lost rather than posting the completion ping twice.
+func TestSendReplyFallbackReusesRandomID(t *testing.T) {
+	var randoms []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, testBodyLimit)
+		_ = r.ParseForm()
+		randoms = append(randoms, r.Form.Get("random_id"))
+		if r.Form.Get("reply_to") != "" {
+			_, _ = io.WriteString(w, `{"error": {"error_code": 100, "error_msg": "message to reply not found"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"response": 91}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewBotChat(&Client{Token: "tok", BaseURL: srv.URL + "/", HTTPClient: srv.Client()}, 100, 1)
+
+	if _, err := c.SendReply(context.Background(), "200", "55", "✅ Done in 1s", true); err != nil {
+		t.Fatalf("SendReply fallback = %v, want nil", err)
+	}
+	if len(randoms) != 2 {
+		t.Fatalf("messages.send attempts = %d, want 2 (reply + plain fallback)", len(randoms))
+	}
+	if randoms[0] != randoms[1] {
+		t.Errorf("random_id differs (reply=%q fallback=%q); want the SAME id so VK dedups a true double", randoms[0], randoms[1])
+	}
+}
+
 func TestSendDoesNotRetryNon912(t *testing.T) {
 	// A non-912 error from a keyboard'd send must propagate unchanged, with no
 	// second attempt.

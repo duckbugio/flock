@@ -115,6 +115,37 @@ func (c *botChat) Send(ctx context.Context, chatID chat.ChatID, text, stopRunID 
 		Text:        text,
 		ReplyMarkup: stopMarkup(stopRunID),
 	}
+	return c.sendParams(ctx, params, text, asMarkdown)
+}
+
+// SendReply posts text as a native reply to replyToID, carrying no Stop markup. It
+// reuses the legacy HTML/plain rendering path (the short completion notice does not
+// need the rich path, which has no reply parameter), so it shares the same
+// markdown→HTML render and parse-error plain-text fallback as Send via sendParams.
+// AllowSendingWithoutReply is set so a deleted/missing target still delivers the
+// notice as a plain message instead of erroring.
+func (c *botChat) SendReply(
+	ctx context.Context, chatID chat.ChatID, replyToID chat.MessageID, text string, asMarkdown bool,
+) (chat.MessageID, error) {
+	params := &bot.SendMessageParams{
+		ChatID: parseChatID(chatID),
+		Text:   text,
+		ReplyParameters: &models.ReplyParameters{
+			MessageID:                parseMessageID(replyToID),
+			AllowSendingWithoutReply: true,
+		},
+	}
+	return c.sendParams(ctx, params, text, asMarkdown)
+}
+
+// sendParams renders params.Text as HTML when asMarkdown is set and posts the
+// message, retrying once as plain text if Telegram rejects the HTML markup so a
+// formatting glitch never costs the user the message. text is the ORIGINAL
+// (unrendered) body used for that plain retry. It is the shared body-building tail
+// of Send and SendReply, which differ only in the markup/reply fields on params.
+func (c *botChat) sendParams(
+	ctx context.Context, params *bot.SendMessageParams, text string, asMarkdown bool,
+) (chat.MessageID, error) {
 	if asMarkdown {
 		params.Text = MarkdownToHTML(text)
 		params.ParseMode = models.ParseModeHTML
@@ -122,7 +153,7 @@ func (c *botChat) Send(ctx context.Context, chatID chat.ChatID, text, stopRunID 
 	msg, err := c.b.SendMessage(ctx, params)
 	if err != nil && asMarkdown && isParseError(err) {
 		// Telegram rejected our HTML markup: resend the ORIGINAL text as plain so a
-		// formatting glitch never costs the user the answer.
+		// formatting glitch never costs the user the message.
 		params.Text = text
 		params.ParseMode = ""
 		msg, err = c.b.SendMessage(ctx, params)

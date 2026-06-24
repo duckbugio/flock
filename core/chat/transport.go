@@ -31,6 +31,17 @@ type Transport interface {
 	// asMarkdown is true the text is rendered as the platform's rich format (with a
 	// plain-text fallback on a parse error); false sends it verbatim as plain text.
 	Send(ctx context.Context, chatID ChatID, text, stopRunID string, asMarkdown bool) (messageID MessageID, err error)
+	// SendReply posts a new message as a native reply to replyToID (so tapping it
+	// jumps to that message), carrying no Stop markup, and returns its id. It is a
+	// sibling of Send rather than an extra Send parameter so existing Send call
+	// sites and fakes stay untouched. asMarkdown behaves as for Send. If replyToID
+	// no longer exists the platform must still deliver the message without the reply
+	// (Telegram: allow_sending_without_reply); a platform that cannot reply to the
+	// id at all falls back to a plain send. Used for the completion notice, which
+	// replies to the run's own answer/anchor message.
+	SendReply(
+		ctx context.Context, chatID ChatID, replyToID MessageID, text string, asMarkdown bool,
+	) (messageID MessageID, err error)
 	// Edit updates an existing message's text (and Stop markup, when stopRunID is
 	// non-empty; empty clears the markup). asMarkdown behaves as for Send.
 	Edit(ctx context.Context, chatID ChatID, messageID MessageID, text, stopRunID string, asMarkdown bool) error

@@ -81,7 +81,7 @@ func TestMessagesSendParams(t *testing.T) {
 	})
 	c := rs.client("secret-token")
 
-	msgID, err := c.MessagesSend(context.Background(), 100, "hello", 777, `{"inline":true}`, "")
+	msgID, err := c.MessagesSend(context.Background(), 100, "hello", 777, `{"inline":true}`, "", 0)
 	if err != nil {
 		t.Fatalf("MessagesSend: %v", err)
 	}
@@ -91,6 +91,10 @@ func TestMessagesSendParams(t *testing.T) {
 	got := rs.last("messages.send")
 	if got.Get("peer_id") != "100" {
 		t.Errorf("peer_id = %q, want 100", got.Get("peer_id"))
+	}
+	// A zero replyToID must omit reply_to entirely (not send reply_to=0).
+	if got.Has("reply_to") {
+		t.Errorf("reply_to = %q, want unset for a non-reply send", got.Get("reply_to"))
 	}
 	if got.Get("message") != "hello" {
 		t.Errorf("message = %q, want hello", got.Get("message"))
@@ -142,7 +146,7 @@ func TestAPIErrorEnvelope(t *testing.T) {
 		"messages.send": `{"error": {"error_code": 9, "error_msg": "Flood control"}}`,
 	})
 	c := rs.client("tok")
-	_, err := c.MessagesSend(context.Background(), 1, "x", 1, "", "")
+	_, err := c.MessagesSend(context.Background(), 1, "x", 1, "", "", 0)
 	if err == nil {
 		t.Fatal("MessagesSend on error envelope = nil, want *apiError")
 	}

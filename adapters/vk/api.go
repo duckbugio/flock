@@ -107,6 +107,15 @@ func isBotFeatureDisabled(err error) bool {
 	return errors.As(err, &ae) && ae.Code == errBotFeatureDisabled
 }
 
+// isFloodError reports whether err is a VK flood/rate-limit error (code 6 or 9).
+// Such errors should be retried with back-off (see RetryAfter), so a caller must
+// NOT degrade a request on them (e.g. SendReply does not drop its reply_to on a
+// flood — it lets the Service's back-off retry the reply intact).
+func isFloodError(err error) bool {
+	var ae *apiError
+	return errors.As(err, &ae) && (ae.Code == errCodeTooManyRequests || ae.Code == errCodeFloodControl)
+}
+
 // call invokes a VK API method with the given params, decoding the "response"
 // field of the envelope into out (which may be nil to discard it). The access
 // token and version are added automatically. A VK error envelope is returned as
@@ -172,12 +181,16 @@ func decodeEnvelope(method string, body []byte, out any) error {
 // MessagesSend posts a message to peerID. randomID MUST be unique per logical
 // send within ~1h (VK silently dedupes a repeated random_id); keyboard is the
 // JSON inline keyboard (empty = none) and attachment is the optional attachment
-// spec (e.g. "doc{owner}_{id}"; empty = none). It returns the GLOBAL message id
-// VK assigns, which is what Edit/Delete address (using the global message_id is
-// the least error-prone path — VK's messages.edit accepts message_id directly,
-// avoiding the conversation_message_id round-trip).
+// spec (e.g. "doc{owner}_{id}"; empty = none). replyToID, when non-zero, sets the
+// reply_to parameter to make the message a native reply to that GLOBAL message id
+// (the same id this method returns) — VK's messages.send accepts a global
+// message_id in reply_to directly, so no conversation_message_id round-trip is
+// needed. It returns the GLOBAL message id VK assigns, which is what Edit/Delete
+// address (using the global message_id is the least error-prone path — VK's
+// messages.edit accepts message_id directly, avoiding the
+// conversation_message_id round-trip).
 func (c *Client) MessagesSend(
-	ctx context.Context, peerID int64, message string, randomID int64, keyboard, attachment string,
+	ctx context.Context, peerID int64, message string, randomID int64, keyboard, attachment string, replyToID int64,
 ) (int64, error) {
 	params := url.Values{}
 	params.Set("peer_id", strconv.FormatInt(peerID, 10))
@@ -188,6 +201,9 @@ func (c *Client) MessagesSend(
 	}
 	if attachment != "" {
 		params.Set("attachment", attachment)
+	}
+	if replyToID != 0 {
+		params.Set("reply_to", strconv.FormatInt(replyToID, 10))
 	}
 	// messages.send returns the bare message id as the "response" value.
 	var msgID int64
