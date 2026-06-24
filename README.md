@@ -111,6 +111,8 @@ The **poller** is the recommended way to react to review comments — it reaches
 
 ## Security
 
+Found a vulnerability? Please disclose it privately — see **[SECURITY.md](SECURITY.md)**. Hardening notes for operators:
+
 - **Whitelist:** only `ALLOWED_USERS` (Telegram) / `VK_ALLOWED_USERS` (VK) may use the bot — never leave it empty; it grants shell/edit access to your server.
 - **Per-chat isolation:** different chats get separate workspaces. The git token is shared across a deployment — scope it accordingly.
 - **Secrets:** keep them in `.env` (gitignored) or, for Ansible, in a real instance's `vault.yml` (gitignored, `ansible-vault` encryptable). Only `inventories/example/` is tracked.
@@ -132,7 +134,7 @@ task build     # compile the binaries
 
 ## Contributing
 
-We welcome contributions to the Flock project! If you would like to contribute, please follow these guidelines:
+We welcome contributions! See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the full guide — development setup, the `task` lint/test/build workflow, and conventions. In short:
 
 1. **Fork the repository**: Create your own fork of the repository on GitHub.
 2. **Create a new branch**: Make a new branch for your feature or bugfix.
@@ -142,4 +144,4 @@ We welcome contributions to the Flock project! If you would like to contribute, 
 
 ## Code of Conduct
 
-We expect all contributors to adhere to our Code of Conduct. Please be respectful and considerate in your interactions with others. Harassment and discrimination of any kind will not be tolerated.
+This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). Please be respectful and considerate in your interactions with others; harassment and discrimination of any kind will not be tolerated. Report concerns to conduct@duckbug.io.

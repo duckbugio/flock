@@ -129,3 +129,7 @@ task build     # compile the binaries
 ## Licença
 
 [MIT](LICENSE) © DuckBug.
+
+## Contribuição e segurança
+
+Guias para contribuir e para relatar vulnerabilidades: [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), [SECURITY.md](SECURITY.md).
