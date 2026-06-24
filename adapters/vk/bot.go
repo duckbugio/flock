@@ -3,7 +3,6 @@ package vk
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"strconv"
@@ -93,14 +92,45 @@ func (c *botChat) Send(
 ) (chat.MessageID, error) {
 	peerID := parsePeerID(chatID)
 	keyboard := stopKeyboard(stopRunID)
-	msgID, err := c.api.MessagesSend(ctx, peerID, text, c.nextRandomID(), keyboard, "")
+	msgID, err := c.api.MessagesSend(ctx, peerID, text, c.nextRandomID(), keyboard, "", 0)
 	// VK error 912: the community has "Bot abilities" OFF, so a keyboard'd send is
 	// rejected while the same send WITHOUT a keyboard succeeds. Retry once without
 	// the keyboard (Stop then falls back to the /stop text command); the message
 	// must still be delivered. Only retry when a keyboard was actually attached.
 	if err != nil && keyboard != "" && isBotFeatureDisabled(err) {
 		c.warnKeyboardsDisabled()
-		msgID, err = c.api.MessagesSend(ctx, peerID, text, c.nextRandomID(), "", "")
+		msgID, err = c.api.MessagesSend(ctx, peerID, text, c.nextRandomID(), "", "", 0)
+	}
+	if err != nil {
+		return "", err
+	}
+	return strconv.FormatInt(msgID, 10), nil
+}
+
+// SendReply posts text as a native reply to replyToID. VK's messages.send accepts
+// the GLOBAL message id (what Send/Edit already use as the neutral MessageID) in
+// its reply_to parameter, so the reply is reliable and needs no
+// conversation_message_id round-trip. The notice carries no keyboard, so error 912
+// (bot keyboards disabled) cannot occur here. asMarkdown is IGNORED — VK has no
+// parse mode, matching Send. If the reply target was deleted VK rejects the send;
+// rather than drop the notice we fall back once to a plain send (no reply), so the
+// user still gets the completion ping. It returns the new GLOBAL message id.
+func (c *botChat) SendReply(
+	ctx context.Context, chatID chat.ChatID, replyToID chat.MessageID, text string, _ bool,
+) (chat.MessageID, error) {
+	peerID := parsePeerID(chatID)
+	replyTo := parseMessageID(replyToID)
+	// One random_id for BOTH attempts: if the reply send actually landed but its
+	// response was lost, VK dedups the plain resend against the same id rather than
+	// posting the notice twice.
+	randomID := c.nextRandomID()
+	msgID, err := c.api.MessagesSend(ctx, peerID, text, randomID, "", "", replyTo)
+	if err != nil && replyTo != 0 && !isFloodError(err) {
+		// The reply target is likely gone (deleted answer); resend without reply_to so
+		// the completion notice still reaches the user rather than being lost. A flood
+		// error is NOT degraded here — it is returned so the Service's RetryAfter
+		// back-off retries the reply intact instead of hammering a throttled endpoint.
+		msgID, err = c.api.MessagesSend(ctx, peerID, text, randomID, "", "", 0)
 	}
 	if err != nil {
 		return "", err
@@ -153,7 +183,7 @@ func (c *botChat) SendDocument(ctx context.Context, chatID chat.ChatID, name str
 	if err != nil {
 		return err
 	}
-	_, err = c.api.MessagesSend(ctx, peerID, "", c.nextRandomID(), "", attachment)
+	_, err = c.api.MessagesSend(ctx, peerID, "", c.nextRandomID(), "", attachment, 0)
 	return err
 }
 
@@ -161,7 +191,7 @@ func (c *botChat) SendDocument(ctx context.Context, chatID chat.ChatID, name str
 // button (a callback keyboard whose payload triggers the star action), mirroring
 // the Telegram nudge's separate-seam shape. It returns the new global message id.
 func (c *botChat) SendStarNudge(ctx context.Context, chatID chat.ChatID, text string) (chat.MessageID, error) {
-	msgID, err := c.api.MessagesSend(ctx, parsePeerID(chatID), text, c.nextRandomID(), starKeyboard(), "")
+	msgID, err := c.api.MessagesSend(ctx, parsePeerID(chatID), text, c.nextRandomID(), starKeyboard(), "", 0)
 	if err != nil {
 		return "", err
 	}
@@ -174,8 +204,7 @@ func (c *botChat) SendStarNudge(ctx context.Context, chatID chat.ChatID, text st
 // the neutral run loop throttles its edit fallback and backs off terminal
 // delivery without importing VK's error types.
 func RetryAfter(err error) (time.Duration, bool) {
-	var ae *apiError
-	if errors.As(err, &ae) && (ae.Code == errCodeTooManyRequests || ae.Code == errCodeFloodControl) {
+	if isFloodError(err) {
 		return floodBackoff, true
 	}
 	return 0, false

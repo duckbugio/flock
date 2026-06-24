@@ -91,7 +91,7 @@ func NewNoticeSender(api *Client, seed int64, logger *slog.Logger) NoticeSender 
 func (n *clientNotice) Notify(ctx context.Context, peerID int64, text string) {
 	//nolint:gosec // G115: deliberate wrap into the signed random_id space; uniqueness, not range, matters.
 	randomID := n.seed + int64(n.seq.Add(1))
-	if _, err := n.api.MessagesSend(ctx, peerID, text, randomID, "", ""); err != nil {
+	if _, err := n.api.MessagesSend(ctx, peerID, text, randomID, "", "", 0); err != nil {
 		n.logger.Debug("vk: send notice", "peer_id", peerID, "error", err)
 	}
 }

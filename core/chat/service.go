@@ -746,6 +746,13 @@ func (s *Service) finish(
 	// renderable (balanced ``` per chunk) on both the rich and legacy paths.
 	chunks := ChunkFencedSize(text, s.maxRunes)
 
+	// Track the id of the message that ends up holding the first answer chunk, so the
+	// completion notice can be sent as a native reply to it (tapping the "done" ping
+	// jumps to the answer). It starts as the run's own anchor; the delete+resend
+	// fallback and the no-anchor path below update it to the actual answer message id,
+	// and it stays "" if every send failed (then the notice is sent plain).
+	answerMsgID := progressMsgID
+
 	// Replace the progress message with the first chunk (clearing Stop markup);
 	// send any further chunks as new messages.
 	//nolint:nestif // the edit-then-resend fallback is a single cohesive delivery path.
@@ -760,16 +767,27 @@ func (s *Service) finish(
 			if dErr := s.chat.Delete(deliverCtx, chatID, progressMsgID); dErr != nil {
 				s.log.Debug("delete progress", "error", dErr)
 			}
+			// The anchor is gone; the answer now lives in the resent message, so the
+			// notice must reply to THAT id (or none, if the resend also failed).
+			answerMsgID = ""
 			if sErr := s.deliverWithBackoff(deliverCtx, "send final", func() error {
-				_, e := s.chat.Send(deliverCtx, chatID, chunks[0], "", true)
+				id, e := s.chat.Send(deliverCtx, chatID, chunks[0], "", true)
+				if e == nil {
+					answerMsgID = id
+				}
 				return e
 			}); sErr != nil {
 				s.log.Error("send final chunk", "error", sErr)
 			}
 		}
 	} else {
+		// No anchor existed (the initial progress Send failed): the first chunk is a
+		// fresh Send, so the notice replies to its returned id.
 		if sErr := s.deliverWithBackoff(deliverCtx, "send final", func() error {
-			_, e := s.chat.Send(deliverCtx, chatID, chunks[0], "", true)
+			id, e := s.chat.Send(deliverCtx, chatID, chunks[0], "", true)
+			if e == nil {
+				answerMsgID = id
+			}
 			return e
 		}); sErr != nil {
 			s.log.Error("send final chunk", "error", sErr)
@@ -806,8 +824,16 @@ func (s *Service) finish(
 	// notice is the deliverable that must reach the user, so it uses the same
 	// rate-limit backoff as the answer rather than a bare Send that a transient 429
 	// would silently drop.
+	// Reply the notice to this run's own answer/anchor message so tapping the "done"
+	// ping jumps to the answer bubble. When no usable answer id exists (every send
+	// failed) fall back to a plain Send so the notice still reaches the user. Either
+	// way it fires once, through the same 429-aware backoff as the answer.
 	notice := completionNotice(res, runErr, ctxErr, total, genuinelyInterrupted)
 	if sErr := s.deliverWithBackoff(deliverCtx, "completion notice", func() error {
+		if answerMsgID != "" {
+			_, e := s.chat.SendReply(deliverCtx, chatID, answerMsgID, notice, true)
+			return e
+		}
 		_, e := s.chat.Send(deliverCtx, chatID, notice, "", true)
 		return e
 	}); sErr != nil {

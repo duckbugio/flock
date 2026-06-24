@@ -42,16 +42,27 @@ func openRealStore(path string) (*session.FileStore, error) {
 // the final state. It is safe for concurrent use because edits arrive from the
 // ticker goroutine and the run goroutine.
 type fakeChat struct {
-	mu      sync.Mutex
-	nextID  int
-	texts   map[MessageID]string // current text per message id
-	hasStop map[MessageID]bool   // whether the message currently shows a Stop button
-	deleted map[MessageID]bool
-	sent    []string // every Send'd text, in order
-	docs    []string // every SendDocument'd filename, in order
-	nudges  []string // every SendStarNudge'd text, in order
-	editErr error    // when set, Edit returns it (e.g. a 429 to exercise throttling)
-	edits   int      // count of Edit calls (progress + final), for the throttle test
+	mu        sync.Mutex
+	nextID    int
+	texts     map[MessageID]string // current text per message id
+	hasStop   map[MessageID]bool   // whether the message currently shows a Stop button
+	deleted   map[MessageID]bool
+	sent      []string    // every Send'd AND SendReply'd text, in order
+	replies   []sentReply // every SendReply call (target id + text), in order
+	docs      []string    // every SendDocument'd filename, in order
+	nudges    []string    // every SendStarNudge'd text, in order
+	editErr   error       // when set, Edit returns it (e.g. a 429 to exercise throttling)
+	sendErr   error       // returned by the first sendFailN Send calls (no-answer-id path)
+	sendFailN int         // how many leading Send calls fail with sendErr (then Send succeeds)
+	sendCalls int         // total Send calls (failed or not), to drive sendFailN
+	edits     int         // count of Edit calls (progress + final), for the throttle test
+}
+
+// sentReply records one SendReply call so a test can assert the completion notice
+// was delivered as a reply to the expected answer/anchor message id.
+type sentReply struct {
+	replyToID MessageID
+	text      string
 }
 
 func newFakeChat() *fakeChat {
@@ -71,12 +82,47 @@ func (f *fakeChat) Capabilities() Capabilities {
 func (f *fakeChat) Send(_ context.Context, _ ChatID, text, stopRunID string, _ bool) (MessageID, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.sendCalls++
+	if f.sendErr != nil && f.sendCalls <= f.sendFailN {
+		return "", f.sendErr
+	}
 	f.nextID++
 	id := strconv.Itoa(f.nextID)
 	f.texts[id] = text
 	f.hasStop[id] = stopRunID != ""
 	f.sent = append(f.sent, text)
 	return id, nil
+}
+
+// SendReply records the reply target and text, and (like Send) appends the text to
+// f.sent so the existing notice-text assertions keep working while new tests can
+// additionally inspect the reply target via f.replies.
+func (f *fakeChat) SendReply(_ context.Context, _ ChatID, replyToID MessageID, text string, _ bool) (MessageID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextID++
+	id := strconv.Itoa(f.nextID)
+	f.texts[id] = text
+	f.sent = append(f.sent, text)
+	f.replies = append(f.replies, sentReply{replyToID: replyToID, text: text})
+	return id, nil
+}
+
+// lastReply returns the most recent SendReply call and whether any was recorded.
+func (f *fakeChat) lastReply() (sentReply, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.replies) == 0 {
+		return sentReply{}, false
+	}
+	return f.replies[len(f.replies)-1], true
+}
+
+// replyCount reports how many SendReply calls the chat has received.
+func (f *fakeChat) replyCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.replies)
 }
 
 func (f *fakeChat) Edit(_ context.Context, _ ChatID, messageID MessageID, text, stopRunID string, _ bool) error {
@@ -801,6 +847,102 @@ func TestCompletionNoticeStatusWords(t *testing.T) {
 				t.Errorf("completionNotice = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCompletionNoticeRepliesToAnswer (AC1) asserts that on a normal run the
+// completion notice is delivered as a native reply whose target is the
+// answer/anchor message id (the progress bubble the bot edited into the answer).
+func TestCompletionNoticeRepliesToAnswer(t *testing.T) {
+	fc := newFakeChat()
+	fr := &fakeRunner{events: []claude.Event{
+		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer}},
+	}}
+	svc, d := newTestService(t, fr, fc)
+	defer d.Close()
+
+	svc.Handle(context.Background(), "100", 100, "1", "go")
+
+	// The notice is sent once as a reply.
+	waitUntil(t, func() bool { return fc.replyCount() == 1 })
+	r, ok := fc.lastReply()
+	if !ok {
+		t.Fatal("completion notice was not sent as a reply")
+	}
+	// It replies to the anchor (the message the answer was edited into), and carries
+	// the same Done notice text — only the delivery changed to a reply.
+	if r.replyToID != anchorMsgID {
+		t.Errorf("notice reply target = %q, want the answer/anchor id %q", r.replyToID, anchorMsgID)
+	}
+	if !strings.Contains(r.text, "✅ Done in") {
+		t.Errorf("notice text = %q, want the Done notice", r.text)
+	}
+}
+
+// TestCompletionNoticeRepliesToResentAnswer (AC2) drives the delete+resend
+// fallback (the final edit fails) and asserts the notice replies to the RESENT
+// answer message id, not the deleted anchor id.
+func TestCompletionNoticeRepliesToResentAnswer(t *testing.T) {
+	fc := newFakeChat()
+	fc.editErr = errors.New("edit boom") // every Edit fails → final edit triggers delete+resend
+	fr := &fakeRunner{events: []claude.Event{
+		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer}},
+	}}
+	svc, d := newTestService(t, fr, fc)
+	defer d.Close()
+
+	svc.Handle(context.Background(), "100", 100, "1", "go")
+
+	waitUntil(t, func() bool { return fc.replyCount() == 1 })
+	r, ok := fc.lastReply()
+	if !ok {
+		t.Fatal("completion notice was not sent as a reply")
+	}
+	// The anchor (id 1) was deleted and the answer resent as a new message (id 2);
+	// the notice must reply to the RESENT id, never the deleted anchor.
+	if r.replyToID == anchorMsgID {
+		t.Fatalf("notice replied to the DELETED anchor id %q; want the resent answer id", anchorMsgID)
+	}
+	fc.mu.Lock()
+	deleted := fc.deleted[anchorMsgID]
+	fc.mu.Unlock()
+	if !deleted {
+		t.Fatal("expected the anchor to be deleted on the resend fallback")
+	}
+	// The resent answer is the message after the deleted anchor (id 2).
+	if r.replyToID != "2" {
+		t.Errorf("notice reply target = %q, want the resent answer id %q", r.replyToID, "2")
+	}
+	if !strings.Contains(r.text, "✅ Done in") {
+		t.Errorf("notice text = %q, want the Done notice", r.text)
+	}
+}
+
+// TestCompletionNoticeSentPlainWhenNoAnswerID (AC3) drives the path where no usable
+// answer id exists (the anchor send and the final-chunk send both fail): the notice
+// must be sent as a PLAIN message (no reply), still exactly once, via backoff, and
+// the run must not panic.
+func TestCompletionNoticeSentPlainWhenNoAnswerID(t *testing.T) {
+	fc := newFakeChat()
+	// Fail the first two Send calls (the anchor and the resent/first answer chunk) so
+	// answerMsgID is never established; the third Send (the notice) succeeds.
+	fc.sendErr = errors.New("send boom")
+	fc.sendFailN = 2
+	fr := &fakeRunner{events: []claude.Event{
+		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer}},
+	}}
+	svc, d := newTestService(t, fr, fc)
+	defer d.Close()
+
+	svc.Handle(context.Background(), "100", 100, "1", "go")
+
+	// The notice lands as a plain Send (recorded in f.sent), and NO reply is ever made.
+	waitUntil(t, func() bool { return fc.noticeCount("✅ Done in") == 1 })
+	if n := fc.noticeCount("✅ Done in"); n != 1 {
+		t.Fatalf("plain notice sent %d times, want exactly 1", n)
+	}
+	if rc := fc.replyCount(); rc != 0 {
+		t.Fatalf("notice was sent as a reply %d times; want a PLAIN send when no answer id exists", rc)
 	}
 }
 
