@@ -793,6 +793,320 @@ func TestElidedIndicatorCountsBudgetDrops(t *testing.T) {
 	}
 }
 
+// taskEvent builds a Task ToolUse event carrying the given subagent_type, the way
+// the Lead's subagent launches surface in the stream (AC1/AC2).
+func taskEvent(subagentType string) claude.Event {
+	return claude.Event{
+		Type:      claude.ToolUse,
+		Tool:      "Task",
+		ToolInput: []byte(`{"subagent_type":"` + subagentType + `"}`),
+	}
+}
+
+// TestStageHeaderActiveSubagent (AC1) asserts a Task event with subagent_type
+// "coder" makes the stage header show the active-stage label "coder".
+func TestStageHeaderActiveSubagent(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5, "")
+	p.Observe(taskEvent("coder"))
+	frame := p.Frame()
+	if !strings.Contains(frame, stagePrefix) {
+		t.Fatalf("stage header missing its prefix: %q", frame)
+	}
+	// The active label is the subagent name wrapped in the active markers.
+	if !strings.Contains(frame, stageActiveLeft+"coder"+stageActiveRight) {
+		t.Fatalf("active stage label not marked: %q", frame)
+	}
+}
+
+// TestStageHeaderAbsentWithoutTask (AC1) asserts a chat with ZERO Task events shows
+// NO stage line, and the frame is byte-identical to one rendered before this feature
+// existed (header + ring only, no stage block).
+func TestStageHeaderAbsentWithoutTask(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5, "")
+	// A non-Task tool and a thought — ordinary activity, no pipeline.
+	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Read", ToolInput: []byte(`{"file_path":"a.go"}`)})
+	p.Observe(claude.Event{Type: claude.Text, Text: "thinking"})
+	frame := p.Frame()
+	if strings.Contains(frame, stagePrefix) {
+		t.Fatalf("stage header rendered with no Task events: %q", frame)
+	}
+	// Byte-identical to a frame assembled the old way: header, then each step,
+	// blank-line separated — no stage block between the header and the ring.
+	want := spinnerFrames[0] + " Working… (0s)" + "\n\n" +
+		"📖 Read · a.go" + "\n\n" + "💭 thinking"
+	if frame != want {
+		t.Fatalf("frame not byte-identical to the pre-feature layout:\n got %q\nwant %q", frame, want)
+	}
+}
+
+// TestStageHeaderEmptyRingNoTask guards the empty-ring fast path: with no events at
+// all the frame is exactly the bare "Working…" header (no stage block).
+func TestStageHeaderEmptyRingNoTask(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5, "")
+	if got, want := p.Frame(), spinnerFrames[0]+" Working… (0s)"; got != want {
+		t.Fatalf("empty frame not byte-identical: got %q, want %q", got, want)
+	}
+}
+
+// TestStageChangesOnlyOnTask (AC2) asserts the active stage flips ONLY on a
+// Tool=="Task" ToolUse: an inner, non-Task tool event (the kind a running subagent
+// emits, arriving flat at the top level) must NOT change the active stage.
+func TestStageChangesOnlyOnTask(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5, "")
+	p.Observe(taskEvent("planner"))
+	// An inner subagent tool call (flat at the top level) — must not flip the stage.
+	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash"})
+	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Read", ToolInput: []byte(`{"file_path":"x.go"}`)})
+	if p.activeStage != 0 || len(p.stages) != 1 || p.stages[0] != "planner" {
+		t.Fatalf("inner tool events changed the stage: active=%d stages=%v", p.activeStage, p.stages)
+	}
+	if !strings.Contains(p.Frame(), stageActiveLeft+"planner"+stageActiveRight) {
+		t.Fatalf("planner not the active stage after inner tools: %q", p.Frame())
+	}
+}
+
+// TestStageDistinctTrailFirstSeenOrder (AC2) asserts the trail lists each subagent
+// once in first-seen order, with the most recent (active) one marked — and that a
+// recurring subagent re-activates its EXISTING entry rather than appending a dupe.
+func TestStageDistinctTrailFirstSeenOrder(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5, "")
+	for _, sub := range []string{"planner", "coder", "tester", "coder"} {
+		p.Observe(taskEvent(sub))
+	}
+	// Distinct + first-seen order: planner, coder, tester (coder not duplicated).
+	if got, want := strings.Join(p.stages, ","), "planner,coder,tester"; got != want {
+		t.Fatalf("distinct-seen trail = %q, want %q", got, want)
+	}
+	// The last Task re-activated coder (index 1), not tester.
+	if p.activeStage != 1 {
+		t.Fatalf("active stage = %d, want coder at index 1", p.activeStage)
+	}
+	frame := p.Frame()
+	wantLine := stagePrefix + "planner" + stageSeparator +
+		stageActiveLeft + "coder" + stageActiveRight + stageSeparator + "tester"
+	if !strings.Contains(frame, wantLine) {
+		t.Fatalf("stage line %q not in frame %q", wantLine, frame)
+	}
+}
+
+// TestStageLabelFallbackChain (AC2) asserts the label fallback chain when
+// subagent_type is empty: subagent_type → description → "subagent". It never blanks
+// and never panics on malformed input.
+func TestStageLabelFallbackChain(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "subagent_type wins", input: `{"subagent_type":"reviewer","description":"d"}`, want: "reviewer"},
+		{name: "falls back to description", input: `{"description":"build the thing"}`, want: "build the thing"},
+		{name: "empty subagent_type falls to description", input: `{"subagent_type":"","description":"do it"}`, want: "do it"},
+		{name: "both empty falls to constant", input: `{"subagent_type":"","description":""}`, want: stageLabelFallbck},
+		{name: "missing fields fall to constant", input: `{"other":"x"}`, want: stageLabelFallbck},
+		{name: "malformed json falls to constant", input: `{not json`, want: stageLabelFallbck},
+		{name: "empty input falls to constant", input: ``, want: stageLabelFallbck},
+		{name: "non-string field falls to constant", input: `{"subagent_type":123}`, want: stageLabelFallbck},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := subagentLabel([]byte(tc.input)); got != tc.want {
+				t.Fatalf("subagentLabel(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStageLineCountedAgainstBudget asserts the stage header rides within
+// frameBudgetMax even alongside a full ring of maximal lines, so the stage line can
+// never push a frame past the Telegram cap.
+func TestStageLineCountedAgainstBudget(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5, "")
+	p.Observe(taskEvent("coder"))
+	for i := 0; i < 5; i++ {
+		p.Observe(claude.Event{Type: claude.Text, Text: strings.Repeat("x", recentSnippetMax+500)})
+	}
+	frame := p.Frame()
+	if n := utf8.RuneCountInString(frame); n > frameBudgetMax {
+		t.Fatalf("frame with stage line exceeded budget: %d runes (max %d)", n, frameBudgetMax)
+	}
+	if !strings.Contains(frame, stagePrefix) {
+		t.Fatalf("stage line dropped under budget pressure: %q", frame)
+	}
+}
+
+// TestStageLineBoundedByManyDistinctStages asserts the stage header is bounded BY
+// CONSTRUCTION: even when the stream produces MANY distinct Task subagent_types with
+// long labels — free, model-controlled text, not the 5 known agents — alongside a
+// full ring of maximal lines and a long elapsed, the assembled stage line stays
+// within stageLineMax and the whole frame within frameBudgetMax. This is the case the
+// single-stage TestStageLineCountedAgainstBudget does not exercise: there the header
+// is tiny and only the ring-drop path is stressed; here the header itself is the risk.
+func TestStageLineBoundedByManyDistinctStages(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5, "")
+
+	// A long elapsed (drives the widest "Working… (Nh Nm Ns)" header) plus 200 DISTINCT
+	// long-labelled Task launches — each label is itself near the per-label cap.
+	elapsed = 99*time.Hour + 59*time.Minute + 59*time.Second
+	const distinctStages = 200
+	for i := 0; i < distinctStages; i++ {
+		// The distinguishing index leads so the labels stay DISTINCT after the
+		// per-label stageLabelMax cap (advanceStage dedups by string equality); the
+		// trailing run of 's' makes each one long, near the per-label cap.
+		p.Observe(taskEvent(strconv.Itoa(i) + "-" + strings.Repeat("s", stageLabelMax)))
+	}
+	if len(p.stages) != distinctStages {
+		t.Fatalf("expected %d distinct stages, got %d", distinctStages, len(p.stages))
+	}
+	// A full ring of maximal lines on top, so header + ring are both at their worst.
+	for i := 0; i < 5; i++ {
+		p.Observe(claude.Event{Type: claude.Text, Text: strings.Repeat("x", recentSnippetMax+500)})
+	}
+
+	// The stage line alone must be within its construction cap.
+	stage := p.stageLine()
+	if n := utf8.RuneCountInString(stage); n > stageLineMax {
+		t.Fatalf("stage line exceeded stageLineMax: %d runes (max %d): %q", n, stageLineMax, stage)
+	}
+	// A trail this long must be elided (first … window), not listed in full.
+	if !strings.Contains(stage, stageElision) {
+		t.Fatalf("long stage trail not elided: %q", stage)
+	}
+	// The active (most recent) stage is the last launch and must still be marked.
+	if !strings.Contains(stage, stageActiveLeft) || !strings.Contains(stage, stageActiveRight) {
+		t.Fatalf("active stage not marked in elided trail: %q", stage)
+	}
+
+	// And the whole frame — header (with the bounded stage line) + full ring — stays
+	// within the budget, the spec's hard requirement.
+	frame := p.Frame()
+	if n := utf8.RuneCountInString(frame); n > frameBudgetMax {
+		t.Fatalf("frame with many-stage header exceeded budget: %d runes (max %d)", n, frameBudgetMax)
+	}
+}
+
+// longLabel builds a DISTINCT label of exactly stageLabelMax runes (an index prefix
+// plus an 's' run), mirroring the worst-case free-text labels the stream can produce.
+func longLabel(i int) string {
+	prefix := strconv.Itoa(i) + "-"
+	return prefix + strings.Repeat("s", stageLabelMax-utf8.RuneCountInString(prefix))
+}
+
+// TestStageLineActiveKeptWithLongLabels is the regression for the short-trail shear:
+// with a few stages whose labels sit at the per-label cap (stageLabelMax) the full
+// first-seen join exceeds stageLineMax, so the OLD head-keeping truncate sheared the
+// ACTIVE label (it sits at the tail) clean off. The unified atom-first assembly must
+// instead keep the active stage present AND fully marked at every n in {3,4,5}, while
+// the line stays within stageLineMax and emits no unbalanced markdown.
+func TestStageLineActiveKeptWithLongLabels(t *testing.T) {
+	for _, n := range []int{3, 4, 5} {
+		t.Run(strconv.Itoa(n), func(t *testing.T) {
+			var elapsed time.Duration
+			p := NewProgress(fakeClock(&elapsed), 5, "")
+			for i := 0; i < n; i++ {
+				p.Observe(taskEvent(longLabel(i)))
+			}
+			line := p.stageLine()
+
+			// The line is bounded by construction.
+			if got := utf8.RuneCountInString(line); got > stageLineMax {
+				t.Fatalf("n=%d: stage line %d runes exceeds stageLineMax %d: %q", n, got, stageLineMax, line)
+			}
+			// These labels are long enough that the full join cannot fit — so this case
+			// MUST exercise the elided assembly, not the whole-trail fast path.
+			if !strings.Contains(line, stageElision) {
+				t.Fatalf("n=%d: expected the long-label trail to be elided: %q", n, line)
+			}
+			// The invariant: the active stage is present AND marked as an atomic unit
+			// (the regression was it being sheared off entirely).
+			active := stageActiveLeft + sanitizeStageLabel(p.stages[p.activeStage]) + stageActiveRight
+			if !strings.Contains(line, active) {
+				t.Fatalf("n=%d: active stage not present-and-marked: want %q in %q", n, active, line)
+			}
+			// Markdown safety: the active markers are plain-text arrows and labels are
+			// stripped of metacharacters, so a rich-markdown emphasis run can never be
+			// left unbalanced. Assert no stray emphasis delimiters survive at all.
+			assertMarkdownSafe(t, line)
+		})
+	}
+}
+
+// TestStageLineMarkdownSafeLabelContent asserts a label whose FREE-TEXT content carries
+// markdown metacharacters (subagent_type/description are model-controlled) can never
+// inject inline markup into the stage line: the metacharacters are stripped, the active
+// stage stays marked with the plain-text arrows, and the line is markdown-balanced.
+func TestStageLineMarkdownSafeLabelContent(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5, "")
+	// A label peppered with every delimiter the rich path treats specially, around the
+	// readable word so sanitizing strips ONLY the metacharacters, not the content.
+	p.Observe(taskEvent("*_~`|=[]<>reviewer*_~`|=[]<>"))
+	line := p.stageLine()
+
+	assertMarkdownSafe(t, line)
+	// The sanitized label still renders and is marked as the active stage.
+	active := stageActiveLeft + sanitizeStageLabel(p.stages[p.activeStage]) + stageActiveRight
+	if !strings.Contains(line, active) {
+		t.Fatalf("sanitized active label not marked: want %q in %q", active, line)
+	}
+	// Sanitization strips every markdown metacharacter, leaving the readable content.
+	if got := sanitizeStageLabel(p.stages[0]); got != "reviewer" {
+		t.Fatalf("metacharacters not stripped from label: %q", got)
+	}
+	// A label that is ALL metacharacters degrades to the fallback, never an empty marker.
+	if got := sanitizeStageLabel("*_~`|=[]<>"); got != stageLabelFallbck {
+		t.Fatalf("all-metacharacter label should fall back to %q, got %q", stageLabelFallbck, got)
+	}
+}
+
+// TestStageLineActiveMarkedWhenRecurringInLongTrail covers a recurring active stage that
+// is NOT at the tail of a long trail (a subagent relaunched after later ones): the window
+// is anchored on the ACTIVE stage, so its marked unit is always shown even when it sits
+// far from the most-recent end and the trail is elided on both sides.
+func TestStageLineActiveMarkedWhenRecurringInLongTrail(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5, "")
+	const distinctStages = 50
+	for i := 0; i < distinctStages; i++ {
+		p.Observe(taskEvent(longLabel(i)))
+	}
+	// Re-launch the FIRST subagent: it becomes active again at index 0, far from the tail.
+	p.Observe(taskEvent(longLabel(0)))
+	if p.activeStage != 0 {
+		t.Fatalf("expected the recurring first stage to be active at index 0, got %d", p.activeStage)
+	}
+
+	line := p.stageLine()
+	if got := utf8.RuneCountInString(line); got > stageLineMax {
+		t.Fatalf("stage line %d runes exceeds stageLineMax %d: %q", got, stageLineMax, line)
+	}
+	active := stageActiveLeft + sanitizeStageLabel(p.stages[0]) + stageActiveRight
+	if !strings.Contains(line, active) {
+		t.Fatalf("recurring active (non-tail) stage not present-and-marked: want %q in %q", active, line)
+	}
+	assertMarkdownSafe(t, line)
+}
+
+// assertMarkdownSafe checks a rendered stage line carries no UNBALANCED inline-markup
+// delimiter. The active markers are plain-text arrows (not "*"-emphasis) and label
+// content is stripped of metacharacters, so every such delimiter count must be even
+// (zero is the expected case here, but an even count is the real invariant the rich
+// markdown parser needs to stay in sync).
+func assertMarkdownSafe(t *testing.T, line string) {
+	t.Helper()
+	for _, meta := range []string{"*", "_", "`", "~", "|"} {
+		if c := strings.Count(line, meta); c%2 != 0 {
+			t.Fatalf("unbalanced %q in stage line (%d occurrences): %q", meta, c, line)
+		}
+	}
+}
+
 func TestFinalSuccess(t *testing.T) {
 	out := Final(&claude.RunResult{Text: "  the answer is 42  ", IsError: false})
 	if out != "the answer is 42" {

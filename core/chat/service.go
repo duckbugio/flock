@@ -570,7 +570,7 @@ loop:
 	// case their NEXT request is denied (the crossing request still ran).
 	s.recordCost(userID, finalResult)
 
-	s.finish(ctx, chatID, progressMsgID, markerID, finalResult, finalErr, ctx.Err())
+	s.finish(ctx, chatID, progressMsgID, markerID, finalResult, finalErr, ctx.Err(), s.nowFunc().Sub(start))
 
 	// Self-heal a stale/poisoned resume id: when a run that USED a resume session
 	// id terminates with an is_error Result, drop the stored session for this chat
@@ -711,7 +711,7 @@ func (s *Service) clearLanePending(chatID ChatID) {
 // (chunked when the answer exceeds the platform's message size limit).
 func (s *Service) finish(
 	ctx context.Context, chatID ChatID, progressMsgID MessageID, markerID string,
-	res *claude.RunResult, runErr, ctxErr error,
+	res *claude.RunResult, runErr, ctxErr error, total time.Duration,
 ) {
 	// Use a background context for delivery: the run ctx may be cancelled by Stop
 	// or shutdown, but the final message should still reach the user.
@@ -795,6 +795,34 @@ func (s *Service) finish(
 	// reports true, so its behavior is unchanged.
 	if s.outbox != nil && s.caps.CanSendDocument {
 		s.outbox.Sweep(deliverCtx, chatID, s.chat)
+	}
+
+	// Send a SEPARATE completion message carrying the run's total elapsed time. The
+	// in-place edit above never notifies (Telegram is silent on edits), so this is a
+	// real second Send that pings the user the run is done — once per run, distinct
+	// from the answer and never attached to the live "Working…" edit. Its status word
+	// mirrors the same three terminal cases the answer switch covers above (normal
+	// Result, RunError, Stop/timeout).
+	notice := completionNotice(res, runErr, ctxErr, total)
+	if _, sErr := s.chat.Send(deliverCtx, chatID, notice, "", true); sErr != nil {
+		s.log.Error("send completion notice", "error", sErr)
+	}
+}
+
+// completionNotice renders the one-line "done" message sent as a separate bubble
+// after the answer, carrying the run's total elapsed time with a status word that
+// mirrors the three terminal cases finish handles: a user Stop / per-run timeout
+// (ctxErr set, no Result or error) reads "stopped", a RunError or an is_error
+// Result reads "failed", and a clean Result reads "done".
+func completionNotice(res *claude.RunResult, runErr, ctxErr error, total time.Duration) string {
+	elapsed := formatElapsed(int64(total / time.Second))
+	switch {
+	case ctxErr != nil && res == nil && runErr == nil:
+		return "⏹ Stopped after " + elapsed
+	case runErr != nil || (res != nil && res.IsError):
+		return "⚠️ Failed after " + elapsed
+	default:
+		return "✅ Done in " + elapsed
 	}
 }
 

@@ -118,6 +118,68 @@ func buildActivityPrefixes() []string {
 // the indicator reads as part of the ring instead of a bare stray line.
 const elidedFormat = "🕓 +%d earlier"
 
+// Stage-line markup. The header above the activity ring shows which dev-team
+// subagents (planner/coder/tester/…) the run has launched, in first-seen order,
+// with the currently active one wrapped in stageActiveLeft/stageActiveRight so the
+// user can tell which stage is running now. The whole line is prefixed with
+// stagePrefix to match the emoji-led style of every other frame line, and the
+// labels are joined by stageSeparator.
+//
+// The active markers are PLAIN-TEXT arrows, not markdown emphasis: the stage line
+// ships inside a frame sent with asMarkdown=true (the Telegram Rich Markdown path,
+// where a single "*" is italic), and the active marker must never depend on a pair
+// of "*" staying balanced. A markdown-neutral "▸ … ◂" can never desync the parser
+// no matter where the line is clamped, and — together with sanitizeStageLabel,
+// which strips markdown metacharacters from the free-text label CONTENT — guarantees
+// the rendered stage line is markdown-safe regardless of label content OR length.
+const (
+	stagePrefix       = "🎏 "
+	stageSeparator    = " → "
+	stageActiveLeft   = "▸ "
+	stageActiveRight  = " ◂"
+	stageLabelFallbck = "subagent"
+)
+
+// stageLabelMeta is the set of markdown metacharacters stripped from a subagent
+// label's free-text CONTENT (subagent_type/description are model-controlled) before
+// it is placed in the stage line. The rich path treats "*" "_" "~" "`" "|" "=" "["
+// "]" as inline-markup delimiters; an odd one left in a label would desync the
+// parser and break the whole frame. Stripping them (the label is purely cosmetic)
+// keeps the line markdown-safe by CONSTRUCTION, complementing the plain-text active
+// markers. "<" ">" are dropped too so a label can never look like an HTML tag on the
+// legacy MarkdownToHTML path either.
+const stageLabelMeta = "*_~`|=[]<>"
+
+// stageLabelMax bounds a single subagent label in the stage line so an unexpected
+// long subagent_type/description can't blow up the header; the whole stage line is
+// itself hard-capped at stageLineMax (see stageLine) so the always-kept header can
+// never push a frame past frameBudgetMax.
+const stageLabelMax = 40
+
+// stageLineMax hard-caps the WHOLE assembled stage line (prefix + elided trail) in
+// runes. subagent_type/description are model/stream-controlled free text and the
+// trail can in principle list arbitrarily many DISTINCT labels, so the line is
+// bounded BY CONSTRUCTION here — the line is assembled ATOM-FIRST around the ACTIVE
+// stage's marked unit (added first so it is guaranteed kept and fully marked), then
+// older/newer neighbours are added only while the line stays under stageLineMax (with
+// a leading "first … " when earlier stages were dropped) — so the final truncateRunes
+// is a pure no-op safety net that can never shear off the active marker. The header
+// the line rides in therefore stays bounded regardless of how many stages were
+// observed. It is sized to comfortably hold the active label plus a few neighbours at
+// stageLabelMax.
+const stageLineMax = 120
+
+// stageWindowMax is how many labels the elided trail aims to keep around the active
+// stage, subject to stageLineMax. When more labels fall outside that window the trail
+// is rendered with a leading "first … " so the user still sees where the run began and
+// where it is now without an unbounded list. The active stage's marked unit is always
+// the first label taken when assembling, so it is never the one dropped to make room.
+const stageWindowMax = 4
+
+// stageElision is the marker shown in place of the labels skipped between the first
+// stage and the most-recent window when the trail is too long to render in full.
+const stageElision = "…"
+
 // Units used by formatElapsed to humanize the elapsed counter.
 const (
 	secondsPerMinute = 60
@@ -147,6 +209,15 @@ type Progress struct {
 	// total counts every activity line ever pushed (not no-op/ignored events), so
 	// Frame can show how many lines have scrolled off above the visible window.
 	total int
+	// stages is the deterministic trail of DISTINCT subagent labels seen, in
+	// first-seen order — pure membership taken from the stream, not an inferred
+	// round count. activeStage indexes the currently running subagent within it
+	// (the most recent Task launch). Both stay empty for a plain chat with no Task
+	// events, so the stage line is omitted and the frame is byte-identical to a
+	// non-pipeline run. State changes ONLY on a Tool=="Task" ToolUse (see Observe);
+	// inner subagent tool events never flip the active stage.
+	stages      []string
+	activeStage int
 }
 
 // NewProgress returns a Progress whose header counter reads from elapsed, the
@@ -159,10 +230,11 @@ func NewProgress(elapsed func() time.Duration, ringSize int, baseDir string) *Pr
 		ringSize = defaultRingSize
 	}
 	return &Progress{
-		elapsed:  elapsed,
-		ringSize: ringSize,
-		baseDir:  baseDir,
-		ring:     make([]string, 0, ringSize),
+		elapsed:     elapsed,
+		ringSize:    ringSize,
+		baseDir:     baseDir,
+		ring:        make([]string, 0, ringSize),
+		activeStage: -1,
 	}
 }
 
@@ -171,12 +243,78 @@ func NewProgress(elapsed func() time.Duration, ringSize int, baseDir string) *Pr
 // Final / FinalError to render the terminal message. It reports whether the
 // activity ring changed, so callers can skip a redundant edit.
 func (p *Progress) Observe(e claude.Event) bool {
+	// A Task launch (the Lead spawning a dev-team subagent) advances the stage
+	// header. This is the ONLY event that changes the active stage: inner subagent
+	// tool events arrive flat at the top level (the decoder ignores
+	// parent_tool_use_id), so they are ordinary ToolUse events with a non-Task tool
+	// name and must not flip the active stage.
+	if e.Type == claude.ToolUse && strings.EqualFold(e.Tool, "task") {
+		p.advanceStage(subagentLabel(e.ToolInput))
+	}
 	line, ok := activityLine(e, p.baseDir)
 	if !ok {
 		return false
 	}
 	p.push(line)
 	return true
+}
+
+// advanceStage records label as the currently active subagent, appending it to the
+// distinct-seen trail the first time it appears (preserving first-seen order) and
+// re-selecting it as active when it recurs. Membership only: it never counts rounds.
+func (p *Progress) advanceStage(label string) {
+	for i, s := range p.stages {
+		if s == label {
+			p.activeStage = i
+			return
+		}
+	}
+	p.stages = append(p.stages, label)
+	p.activeStage = len(p.stages) - 1
+}
+
+// subagentLabel extracts the subagent label from a Task tool's JSON input, with the
+// fallback chain subagent_type → description → "subagent". It never returns blank
+// and never panics on malformed input (an unparseable body yields the fallback).
+func subagentLabel(input json.RawMessage) string {
+	var args map[string]any
+	if len(input) > 0 {
+		_ = json.Unmarshal(input, &args)
+	}
+	strField := func(k string) string {
+		if v, ok := args[k].(string); ok {
+			return collapseWhitespace(v)
+		}
+		return ""
+	}
+	if v := strField("subagent_type"); v != "" {
+		return truncateRunes(v, stageLabelMax)
+	}
+	if v := strField("description"); v != "" {
+		return truncateRunes(v, stageLabelMax)
+	}
+	return stageLabelFallbck
+}
+
+// sanitizeStageLabel strips markdown metacharacters (stageLabelMeta) from a stage
+// label's free-text content so the cosmetic label can never inject inline markup
+// into the stage line, which rides in a frame sent on the rich (markdown) path. It
+// is applied at RENDER time (in stageLine), not at capture, so p.stages keeps the
+// raw label for membership/dedup and only the displayed copy is sanitized. A label
+// that becomes empty after stripping (all-metacharacter) falls back to the constant
+// so the active stage is never rendered blank.
+func sanitizeStageLabel(label string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if strings.ContainsRune(stageLabelMeta, r) {
+			return -1
+		}
+		return r
+	}, label)
+	cleaned = collapseWhitespace(cleaned)
+	if cleaned == "" {
+		return stageLabelFallbck
+	}
+	return cleaned
 }
 
 // activityLine renders the one-line activity summary for an event, or false if
@@ -444,6 +582,104 @@ func formatElapsed(secs int64) string {
 	}
 }
 
+// stageLine renders the compact subagent-trail header shown above the activity
+// ring: the distinct subagents launched so far, in first-seen order, joined by an
+// arrow with the currently active one marked. It returns "" when no Task event has
+// been observed, so a plain chat with zero Task events omits the line entirely (the
+// frame stays byte-identical to a non-pipeline run).
+//
+// Assembly is ATOM-FIRST so the active stage can NEVER be sheared off, no matter how
+// long the labels or how many distinct stages there were:
+//   - When the full first-seen trail fits stageLineMax it is shown whole (the common
+//     short case, byte-identical to listing every marked label joined by an arrow).
+//   - Otherwise the line is elided: the active stage's MARKED UNIT is placed first as
+//     an atomic unit (so it is always present and fully marked), neighbours are added
+//     around it in first-seen order only while the line stays under stageLineMax, and a
+//     leading "first … " / trailing " … " elision marks the gaps to the unshown ends.
+//
+// Because the line is already <= stageLineMax after assembly, the final truncateRunes
+// is a pure no-op safety net that can never cut the active marker. Each label is itself
+// bounded at stageLabelMax (subagentLabel) and stripped of markdown metacharacters
+// (sanitizeStageLabel), and the active markers are plain-text arrows, so the header is
+// markdown-safe and within frameBudgetMax regardless of input.
+func (p *Progress) stageLine() string {
+	if len(p.stages) == 0 {
+		return ""
+	}
+	n := len(p.stages)
+	mark := func(i int) string {
+		label := sanitizeStageLabel(p.stages[i])
+		if i == p.activeStage {
+			return stageActiveLeft + label + stageActiveRight
+		}
+		return label
+	}
+
+	// Fast path: the WHOLE trail (every label, first-seen order) fits — show it in full.
+	// This keeps the common short-trail case identical to a plain marked join.
+	full := make([]string, n)
+	for i := range p.stages {
+		full[i] = mark(i)
+	}
+	whole := stagePrefix + strings.Join(full, stageSeparator)
+	if utf8.RuneCountInString(whole) <= stageLineMax {
+		return whole
+	}
+
+	// Elide. Grow a contiguous window [lo, hi] OUTWARD from the active stage, whose
+	// marked unit is placed first and is therefore the one element never dropped to make
+	// room. Recent context (toward the tail) is preferred, then older context, taking a
+	// neighbour only while the rendered line — including the leading/trailing elision for
+	// any unshown ends — stays within stageLineMax.
+	lo, hi := p.activeStage, p.activeStage
+	render := func(lo, hi int) string {
+		parts := make([]string, 0, n)
+		// Lead with the first stage when it is not already inside the window, plus an
+		// elision only when there is a genuine gap (>1 index) between it and the window.
+		if lo > 0 {
+			parts = append(parts, mark(0))
+			if lo > 1 {
+				parts = append(parts, stageElision)
+			}
+		}
+		for i := lo; i <= hi; i++ {
+			parts = append(parts, mark(i))
+		}
+		if hi < n-1 {
+			parts = append(parts, stageElision)
+		}
+		return stagePrefix + strings.Join(parts, stageSeparator)
+	}
+	fits := func(lo, hi int) bool {
+		return utf8.RuneCountInString(render(lo, hi)) <= stageLineMax
+	}
+	// Defensive: the active marked unit alone (no neighbours, no elision) must fit; if a
+	// pathologically long active label blows the cap even by itself, surface it alone and
+	// let truncateRunes clamp it — the active stage is the single most important element.
+	if !fits(lo, hi) {
+		return truncateRunes(stagePrefix+mark(p.activeStage), stageLineMax)
+	}
+	// Expand the window, alternating tail-side then head-side, while it still fits and
+	// while it has not reached the stageWindowMax span budget on either side.
+	for hi-lo+1 < stageWindowMax {
+		grewTail := hi < n-1 && fits(lo, hi+1)
+		if grewTail {
+			hi++
+			if hi-lo+1 >= stageWindowMax {
+				break
+			}
+		}
+		grewHead := lo > 0 && fits(lo-1, hi)
+		if grewHead {
+			lo--
+		}
+		if !grewTail && !grewHead {
+			break
+		}
+	}
+	return truncateRunes(render(lo, hi), stageLineMax)
+}
+
 // Frame renders the current progress message: a header line driven by the
 // injected clock followed by the recent activity ring.
 func (p *Progress) Frame() string {
@@ -453,6 +689,12 @@ func (p *Progress) Frame() string {
 	}
 	spin := spinnerFrames[secs%int64(len(spinnerFrames))]
 	header := fmt.Sprintf("%s Working… (%s)", spin, formatElapsed(secs))
+	// The optional stage header rides directly under "Working…", separated by a
+	// blank line like every other block. It is empty (and so contributes nothing,
+	// keeping a no-Task chat byte-identical) when no Task event has been observed.
+	if stage := p.stageLine(); stage != "" {
+		header += "\n\n" + stage
+	}
 	if len(p.ring) == 0 {
 		return header
 	}
