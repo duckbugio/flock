@@ -24,29 +24,40 @@ const tickInterval = 30 * time.Second
 
 // Manager runs the background scheduler and serves the transport-neutral
 // `/schedule` subcommands. It owns no transport state: a chat id is a plain
-// string and the fire callback (wired to chat.Service.Inject) is what couples a
-// due job to the dispatch lane.
+// string and the fire callback (wired to chat.Service.InjectScheduled) is what
+// couples a due job to the dispatch lane.
 type Manager struct {
-	store *Store
-	fire  func(chatID, prompt string)
-	now   func() time.Time
-	log   *slog.Logger
+	store   *Store
+	fire    func(chatID, prompt string, userID int64) bool
+	allowed func(userID int64) bool
+	now     func() time.Time
+	log     *slog.Logger
 }
 
 // NewManager builds a Manager. store is the durable job store; fire injects a
-// fired job's prompt into its chat (chat.Service.Inject). fire MUST NOT block the
-// caller: TickOnce runs on the single scheduler goroutine, so a blocking fire
-// would stall every other chat's jobs — the production wiring runs Inject on its
-// own goroutine (see buildScheduler). now supplies the current time (time.Now in
-// production, a stub in tests); a nil log defaults to slog.Default().
-func NewManager(store *Store, fire func(chatID, prompt string), now func() time.Time, log *slog.Logger) *Manager {
+// fired job's prompt into its chat (chat.Service.InjectScheduled), returning
+// whether the run was submitted. fire is NON-BLOCKING and BEST-EFFORT: it may drop
+// a fire (returning false) when the chat's lane is busy or the creator is over the
+// cost cap, and TickOnce records the matching minute regardless (at-most-one-fire-
+// attempt per matching minute). allowed re-validates a job's creator against the
+// live allow-list at fire time, so a de-listed user's stored jobs stop running and
+// are pruned; a nil allowed allows every creator (no fire-time check). now supplies
+// the current time (time.Now in production, a stub in tests); a nil log defaults to
+// slog.Default().
+func NewManager(
+	store *Store,
+	fire func(chatID, prompt string, userID int64) bool,
+	allowed func(userID int64) bool,
+	now func() time.Time,
+	log *slog.Logger,
+) *Manager {
 	if now == nil {
 		now = time.Now
 	}
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Manager{store: store, fire: fire, now: now, log: log}
+	return &Manager{store: store, fire: fire, allowed: allowed, now: now, log: log}
 }
 
 // Run drives the scheduler until ctx is cancelled: every tick it reads the LIVE
@@ -78,6 +89,19 @@ func (m *Manager) TickOnce() {
 	now := m.now()
 	locs := map[string]*time.Location{} // resolve each chat's zone once per tick
 	for _, job := range m.store.ActiveJobs() {
+		// Re-validate the creator against the LIVE allow-list at fire time: a stored
+		// job whose creator was de-listed must stop running unattended, so prune it
+		// (drop it from the store) instead of firing. This is checked before the
+		// minute match so a de-listed user's job is removed on the next tick that sees
+		// it, regardless of whether this minute matches.
+		if m.allowed != nil && !m.allowed(job.CreatedBy) {
+			if err := m.store.Remove(job.ChatID, job.ID); err != nil {
+				m.log.Warn("scheduler: prune de-listed job failed", "id", job.ID, "chat", job.ChatID, "error", err)
+			}
+			m.log.Warn("scheduler: pruning job; creator no longer allowed",
+				"id", job.ID, "chat", job.ChatID, "createdBy", job.CreatedBy)
+			continue
+		}
 		// Evaluate the job against the wall clock in its chat's timezone (a chat with
 		// no zone set falls back to process-local time). The de-dup minuteKey is in
 		// that same zone, so at-most-once-per-matching-minute holds per chat. A zone
@@ -104,7 +128,15 @@ func (m *Manager) TickOnce() {
 		if !sched.Matches(local) {
 			continue
 		}
-		m.fire(job.ChatID, job.Prompt)
+		// fire is synchronous but non-blocking: it submits the run on the chat's
+		// dispatch lane and returns whether it was accepted. A false means the lane
+		// was busy or the creator is over the cost cap — the fire is dropped (best
+		// effort). We MarkFired regardless so a dropped fire is not retried for the
+		// rest of this minute (at-most-one-attempt per matching minute).
+		submitted := m.fire(job.ChatID, job.Prompt, job.CreatedBy)
+		if !submitted {
+			m.log.Info("scheduler: fire skipped (chat busy or over cost cap)", "id", job.ID, "chat", job.ChatID)
+		}
 		if err := m.store.MarkFired(job.ChatID, job.ID, minuteKey); err != nil {
 			m.log.Warn("scheduler: mark fired failed", "id", job.ID, "chat", job.ChatID, "error", err)
 		}

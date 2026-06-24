@@ -199,6 +199,7 @@ func run() int {
 		Workspace:  ws,
 		Sessions:   sessions,
 		Costs:      costs,
+		CostCapUSD: cfg.EffectiveCostCapUSD(),
 		Outbox:     outbox,
 		StarNudge:  starNudge,
 		Opts:       opts,
@@ -209,9 +210,10 @@ func run() int {
 
 	// Background cron scheduler (OFF by default). When enabled, open the durable
 	// per-chat job store and start the scheduler loop, firing each due job into the
-	// same dispatch lane a user message uses (svc.Inject, sentinel user 0). A
-	// store-open failure is non-fatal: log and continue WITHOUT the scheduler (mgr
-	// stays nil). With the flag off no store is opened and no goroutine runs.
+	// same dispatch lane a user message uses (svc.InjectScheduled, non-blocking +
+	// ephemeral, attributed to the job's creator). A store-open failure is non-fatal:
+	// log and continue WITHOUT the scheduler (mgr stays nil). With the flag off no
+	// store is opened and no goroutine runs.
 	mgr := buildScheduler(ctx, cfg, svc, logger)
 
 	guards := chat.GuardConfig{CostCapUSD: cfg.EffectiveCostCapUSD()}
@@ -294,8 +296,9 @@ type vkTranscriber interface {
 // command dispatches to. It returns nil when the feature is disabled OR when the
 // store cannot be opened (non-fatal: log and run without the scheduler), so
 // /schedule replies with the disabled notice rather than crashing. The scheduler
-// fires each due job via svc.Inject — the same serialized per-chat lane a normal
-// message uses. Mirrors cmd/flock-telegram.
+// fires each due job via svc.InjectScheduled — the same serialized per-chat lane a
+// normal message uses, but non-blocking, ephemeral, and re-validated against the VK
+// allow-list at fire time. Mirrors cmd/flock-telegram.
 func buildScheduler(ctx context.Context, cfg config.Config, svc *chat.Service, logger *slog.Logger) *schedule.Manager {
 	if !cfg.SchedulerEnabled() {
 		return nil
@@ -305,11 +308,13 @@ func buildScheduler(ctx context.Context, cfg config.Config, svc *chat.Service, l
 		logger.Error("open schedule store; scheduler disabled", "path", cfg.ScheduleStoreFile(), "error", err)
 		return nil
 	}
-	// Fire each due job on its own goroutine so a blocked Inject (full dispatch
-	// buffer behind a long Claude run) never stalls the single scheduler goroutine
-	// and starves other chats' jobs. Mirrors cmd/flock-telegram.
-	fire := func(chatID, prompt string) { go svc.Inject(chatID, prompt) }
-	mgr := schedule.NewManager(store, fire, time.Now, logger)
+	// Fire each due job directly via InjectScheduled: it is non-blocking (drops the
+	// fire when the chat's lane is full) and ephemeral (no auto-resume marker), so
+	// the single scheduler goroutine is never stalled and a frequent cron cannot
+	// accumulate detached goroutines or durable markers. The creator is re-validated
+	// against the live VK allow-list at fire time (cfg.IsVKAllowed) so a de-listed
+	// user's stored jobs stop running and are pruned. Mirrors cmd/flock-telegram.
+	mgr := schedule.NewManager(store, svc.InjectScheduled, cfg.IsVKAllowed, time.Now, logger)
 	go func() {
 		if err := mgr.Run(ctx); err != nil && ctx.Err() == nil {
 			logger.Error("scheduler stopped", "error", err)

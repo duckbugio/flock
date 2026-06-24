@@ -271,6 +271,7 @@ func run() int {
 		Sessions:   sessions,
 		Pending:    pendings,
 		Costs:      costs,
+		CostCapUSD: cfg.EffectiveCostCapUSD(),
 		Outbox:     outbox,
 		StarNudge:  starNudge,
 		Opts:       opts,
@@ -281,10 +282,11 @@ func run() int {
 
 	// Background cron scheduler (OFF by default). When enabled, open the durable
 	// per-chat job store and start the scheduler loop, firing each due job into the
-	// same dispatch lane a user message uses (svc.Inject, sentinel user 0). A
-	// store-open failure is non-fatal: log and continue WITHOUT the scheduler (mgr
-	// stays nil), like the rest of the best-effort startup wiring. With the flag off
-	// no store is opened and no goroutine runs — the path is a true no-op.
+	// same dispatch lane a user message uses (svc.InjectScheduled, non-blocking +
+	// ephemeral, attributed to the job's creator). A store-open failure is non-fatal:
+	// log and continue WITHOUT the scheduler (mgr stays nil), like the rest of the
+	// best-effort startup wiring. With the flag off no store is opened and no
+	// goroutine runs — the path is a true no-op.
 	mgr := buildScheduler(ctx, cfg, svc, logger)
 
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, telegram.CallbackMatch(), bot.MatchTypePrefix, stopHandler(cfg, svc))
@@ -989,8 +991,9 @@ func commandArgs(text string) string {
 // handler dispatches to. It returns nil when the feature is disabled OR when the
 // store cannot be opened (non-fatal: log and run without the scheduler), so the
 // handler replies with the disabled notice rather than crashing. The scheduler
-// fires each due job via svc.Inject — the same serialized per-chat lane a normal
-// message uses.
+// fires each due job via svc.InjectScheduled — the same serialized per-chat lane a
+// normal message uses, but non-blocking, ephemeral, and re-validated against the
+// allow-list at fire time.
 func buildScheduler(ctx context.Context, cfg config.Config, svc *chat.Service, logger *slog.Logger) *schedule.Manager {
 	if !cfg.SchedulerEnabled() {
 		return nil
@@ -1000,14 +1003,13 @@ func buildScheduler(ctx context.Context, cfg config.Config, svc *chat.Service, l
 		logger.Error("open schedule store; scheduler disabled", "path", cfg.ScheduleStoreFile(), "error", err)
 		return nil
 	}
-	// Fire each due job on its own goroutine: Inject blocks when a chat's dispatch
-	// buffer is full (a long-running Claude run holds the lane), and the scheduler
-	// runs a single goroutine — firing inline would stall every OTHER chat's due
-	// jobs and could skip a matching minute. Detaching keeps the tick loop free;
-	// at-most-once-per-minute still holds because TickOnce records the minute key
-	// synchronously before this returns.
-	fire := func(chatID, prompt string) { go svc.Inject(chatID, prompt) }
-	mgr := schedule.NewManager(store, fire, time.Now, logger)
+	// Fire each due job directly via InjectScheduled: it is non-blocking (drops the
+	// fire when the chat's lane is full) and ephemeral (no auto-resume marker), so
+	// the single scheduler goroutine is never stalled by a busy lane and a frequent
+	// cron cannot accumulate detached goroutines or durable markers. The creator is
+	// re-validated against the live allow-list at fire time (cfg.IsAllowed) so a
+	// de-listed user's stored jobs stop running and are pruned.
+	mgr := schedule.NewManager(store, svc.InjectScheduled, cfg.IsAllowed, time.Now, logger)
 	go func() {
 		if err := mgr.Run(ctx); err != nil && ctx.Err() == nil {
 			logger.Error("scheduler stopped", "error", err)

@@ -23,6 +23,13 @@ func (d *fakeDispatcher) Submit(chatID ChatID, _ func(ctx context.Context)) {
 	d.submitted = append(d.submitted, chatID)
 }
 
+func (d *fakeDispatcher) TrySubmit(chatID ChatID, _ func(ctx context.Context)) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.submitted = append(d.submitted, chatID)
+	return true
+}
+
 func (d *fakeDispatcher) Cancel(chatID ChatID) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
