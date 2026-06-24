@@ -19,6 +19,7 @@ type fakeService struct {
 	mediaCalls  []handleCall
 	stopRunIDs  []string
 	stopChats   []string
+	newSessions []string
 	starPresses int
 }
 
@@ -54,6 +55,13 @@ func (f *fakeService) StopChat(chatID chat.ChatID) bool {
 	defer f.mu.Unlock()
 	f.stopChats = append(f.stopChats, chatID)
 	return true
+}
+
+func (f *fakeService) NewSession(chatID chat.ChatID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.newSessions = append(f.newSessions, chatID)
+	return nil
 }
 
 func (f *fakeService) StarPress() (string, bool) {
@@ -187,6 +195,117 @@ func TestReceiverStartTextCommand(t *testing.T) {
 	}
 	if len(notices.texts) != 1 || notices.texts[0] != welcomeText {
 		t.Errorf("notice texts = %v, want one welcome notice", notices.texts)
+	}
+}
+
+// TestCommandName asserts the VK leading-command parser: "/name args" -> "name"
+// (lowercased), non-commands and a lone slash -> "", and "/news" -> "news" (so it
+// is NOT confused with the reserved "/new"). VK carries no @botname suffix.
+func TestCommandName(t *testing.T) {
+	tests := []struct {
+		text string
+		want string
+	}{
+		{"/stop", "stop"},
+		{"/STOP", "stop"},
+		{"  /new  ", "new"},
+		{"/new please", "new"},
+		{"/loop 5m /foo", "loop"},
+		{"/news", "news"},
+		{"hello", ""},
+		{"", ""},
+		{"/", ""},
+		{"not /new", ""},
+		{"/help\nmore", "help"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.text, func(t *testing.T) {
+			if got := commandName(tc.text); got != tc.want {
+				t.Fatalf("commandName(%q) = %q, want %q", tc.text, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestReceiverHelpTextCommand: a bare "/help" replies with the static HelpText
+// notice and does NOT start a run.
+func TestReceiverHelpTextCommand(t *testing.T) {
+	svc := &fakeService{}
+	notices := &fakeNotice{}
+	r := newTestReceiver(svc, notices, false, nil)
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 200, Text: "/help"}))
+
+	if len(svc.handleCalls) != 0 {
+		t.Errorf("/help should not start a run, got %d Handle calls", len(svc.handleCalls))
+	}
+	if len(notices.texts) != 1 || notices.texts[0] != HelpText {
+		t.Errorf("notice texts = %v, want one HelpText notice", notices.texts)
+	}
+}
+
+// TestReceiverNewSessionCommand: a bare "/new" resets the chat's session
+// (NewSession) and confirms with a notice, without starting a run.
+func TestReceiverNewSessionCommand(t *testing.T) {
+	svc := &fakeService{}
+	notices := &fakeNotice{}
+	r := newTestReceiver(svc, notices, false, nil)
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 200, Text: "/new"}))
+
+	if len(svc.newSessions) != 1 || svc.newSessions[0] != "200" {
+		t.Errorf("NewSession calls = %v, want ['200']", svc.newSessions)
+	}
+	if len(svc.handleCalls) != 0 {
+		t.Errorf("/new should not start a run, got %d Handle calls", len(svc.handleCalls))
+	}
+	if len(notices.texts) != 1 || notices.texts[0] != newSessionText {
+		t.Errorf("notice texts = %v, want one fresh-session notice", notices.texts)
+	}
+}
+
+// TestReceiverNativeCommandPassesThrough: a non-reserved slash command (e.g.
+// "/loop 5m /foo") is NOT intercepted — it reaches svc.Handle with its FULL
+// original text so Claude Code's own slash-command system runs it. This is the
+// core of Part A: only the reserved set is intercepted; everything else flows
+// through verbatim.
+func TestReceiverNativeCommandPassesThrough(t *testing.T) {
+	svc := &fakeService{}
+	notices := &fakeNotice{}
+	r := newTestReceiver(svc, notices, false, nil)
+
+	const prompt = "/loop 5m /foo"
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{
+		FromID: 42, PeerID: 200, Text: prompt, ConversationMessageID: 7,
+	}))
+
+	if len(svc.handleCalls) != 1 {
+		t.Fatalf("/loop should reach Handle, got %d Handle calls", len(svc.handleCalls))
+	}
+	if svc.handleCalls[0].prompt != prompt {
+		t.Errorf("Handle prompt = %q, want the full original %q", svc.handleCalls[0].prompt, prompt)
+	}
+	if len(notices.texts) != 0 {
+		t.Errorf("/loop should not send a command notice, got %v", notices.texts)
+	}
+}
+
+// TestReceiverNewsNotTreatedAsNew: "/news" must not be confused with the reserved
+// "/new" — exact-name matching means commandName("/news") = "news", which is not
+// reserved, so it passes through to Handle (and never resets the session).
+func TestReceiverNewsNotTreatedAsNew(t *testing.T) {
+	svc := &fakeService{}
+	r := newTestReceiver(svc, &fakeNotice{}, false, nil)
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{
+		FromID: 42, PeerID: 200, Text: "/news today", ConversationMessageID: 8,
+	}))
+
+	if len(svc.newSessions) != 0 {
+		t.Errorf("/news must NOT reset the session, got %v", svc.newSessions)
+	}
+	if len(svc.handleCalls) != 1 || svc.handleCalls[0].prompt != "/news today" {
+		t.Errorf("/news should pass through to Handle with full text, got %+v", svc.handleCalls)
 	}
 }
 

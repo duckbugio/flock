@@ -289,11 +289,21 @@ func run() int {
 	// addressed with @botname in groups, leaking them to the model. /news still
 	// does NOT match (different command name). Each command is gated by the same
 	// allow-list as text messages and is NOT mention-gated (a slash command is an
-	// explicit address).
-	b.RegisterHandlerMatchFunc(commandMatch("start"), startHandler(cfg))
-	b.RegisterHandlerMatchFunc(commandMatch("help"), helpHandler(cfg))
-	b.RegisterHandlerMatchFunc(commandMatch("new"), newHandler(cfg, svc))
-	b.RegisterHandlerMatchFunc(commandMatch("stop"), stopCommandHandler(cfg, svc))
+	// explicit address). The set of names handled here is asserted, by test, to equal
+	// the canonical chat.ReservedCommands so a new reserved command can never be
+	// published in the menu yet leak to the model for lack of a handler.
+	handlers := reservedHandlers(cfg, svc)
+	for name, h := range handlers {
+		b.RegisterHandlerMatchFunc(commandMatch(name), h)
+	}
+
+	// Publish the bot's own command menu from the canonical reserved set (the same
+	// source the handlers above route on). Native Claude commands (/loop, /goal, …)
+	// are intentionally NOT listed — they pass through as free text. Best-effort:
+	// a failure here only means an empty/stale menu, so log and continue.
+	if _, err := b.SetMyCommands(ctx, &bot.SetMyCommandsParams{Commands: reservedBotCommands()}); err != nil {
+		logger.Warn("set telegram command menu", "error", err)
+	}
 
 	// When PR review is enabled and Gitea polling is configured, poll the bot's
 	// unread Pull notifications and relay each new non-self comment on a
@@ -382,12 +392,31 @@ func textHandler(
 	}
 }
 
+// messageSubmitter is the narrow seam the inbound message path uses to hand a
+// prompt to the run Service: the four submit entry points (new/edit, text/media).
+// *chat.Service satisfies it. Depending on this interface rather than the concrete
+// Service lets the end-to-end message-path test (e.g. the native-command
+// pass-through) drive handleMessage with a recording fake, mirroring the VK
+// receiver's Service seam. The reserved-command handlers keep taking the concrete
+// *chat.Service (they use Stop/StopChat/NewSession), so this seam is scoped to the
+// pass-through path it tests.
+type messageSubmitter interface {
+	Handle(ctx context.Context, chatID chat.ChatID, userID int64, msgID chat.MessageID, prompt string)
+	HandleEdit(ctx context.Context, chatID chat.ChatID, userID int64, msgID chat.MessageID, prompt string)
+	HandleMedia(
+		ctx context.Context, chatID chat.ChatID, userID int64, msgID chat.MessageID, prompt string, images []claude.ImageInput,
+	)
+	HandleEditMedia(
+		ctx context.Context, chatID chat.ChatID, userID int64, msgID chat.MessageID, prompt string, images []claude.ImageInput,
+	)
+}
+
 // messageDeps bundles the long-lived dependencies a single message handler needs,
 // keeping the per-message entry points to a small, stable argument list. Edited
 // messages leave vt/up nil (voice and media uploads apply only to new messages).
 type messageDeps struct {
 	cfg     config.Config
-	service *chat.Service
+	service messageSubmitter
 	vt      *telegram.VoiceTranscriber
 	up      *telegram.Uploader
 	limiter *ratelimit.Limiter
@@ -463,6 +492,13 @@ func handleMessage(ctx context.Context, deps messageDeps, b *bot.Bot, msg *model
 
 	text := strings.TrimSpace(cleaned)
 
+	// Normalize the group form of a forwarded slash command so an unknown command
+	// reaches Claude as a bare command: "/loop@duck_bot 5m" -> "/loop 5m". Reserved
+	// commands (/start /help /new /stop) are routed to their own handlers and never
+	// reach here, so this only ever touches Claude pass-through commands; it is a
+	// no-op when there is no leading "/command@botname".
+	text = telegram.StripCommandMention(text, cfg.TelegramBotUsername)
+
 	// The chat/message passed the gate; for a voice note, transcribe now and use the
 	// transcript as the text. The download runs on this update's own goroutine
 	// (go-telegram dispatches each update concurrently), so the blocking call does
@@ -523,7 +559,7 @@ func msgIDStr(id int) string { return strconv.Itoa(id) }
 // this update's own goroutine, so the blocking call does not stall the poll loop.
 // Oversize/undownloadable yields one notice (never a silent drop).
 func handleDocument(
-	ctx context.Context, b *bot.Bot, up *telegram.Uploader, service *chat.Service, msg *models.Message, isEdit bool,
+	ctx context.Context, b *bot.Bot, up *telegram.Uploader, service messageSubmitter, msg *models.Message, isEdit bool,
 ) {
 	doc := msg.Document
 	// Reject an oversize file before downloading when Telegram reports its size.
@@ -546,7 +582,7 @@ func handleDocument(
 // is attached as a content block so Claude can see it. The photo is ALWAYS saved
 // to uploads too, giving a no-commit-safe on-disk copy even in vision mode.
 func handlePhoto(
-	ctx context.Context, b *bot.Bot, up *telegram.Uploader, service *chat.Service, msg *models.Message, isEdit bool,
+	ctx context.Context, b *bot.Bot, up *telegram.Uploader, service messageSubmitter, msg *models.Message, isEdit bool,
 ) {
 	photo := largestPhoto(msg.Photo)
 	if photo == nil {
@@ -581,7 +617,7 @@ func handlePhoto(
 // submitMedia routes a media-derived run through the Service, mirroring the
 // new-vs-edit split of the text path. Images are non-nil only for a vision run.
 func submitMedia(
-	ctx context.Context, service *chat.Service, msg *models.Message, prompt string, images []claude.ImageInput, isEdit bool,
+	ctx context.Context, service messageSubmitter, msg *models.Message, prompt string, images []claude.ImageInput, isEdit bool,
 ) {
 	if isEdit {
 		service.HandleEditMedia(ctx, chatIDStr(msg.Chat.ID), msg.From.ID, msgIDStr(msg.ID), prompt, images)
@@ -781,6 +817,34 @@ func starHandler(cfg config.Config, svc *chat.Service) bot.HandlerFunc {
 				slog.Debug("edit star nudge message", "error", err)
 			}
 		}
+	}
+}
+
+// reservedBotCommands maps the canonical reserved set (core/chat) to the Telegram
+// command-menu model published via SetMyCommands. It is the single place the menu
+// is built, so the menu can never drift from the commands the handlers route on.
+func reservedBotCommands() []models.BotCommand {
+	cmds := make([]models.BotCommand, 0, len(chat.ReservedCommands))
+	for _, c := range chat.ReservedCommands {
+		cmds = append(cmds, models.BotCommand{Command: c.Name, Description: c.Description})
+	}
+	return cmds
+}
+
+// reservedHandlers maps each reserved command name to the handler that serves it.
+// It is the single source the registration loop drives, keyed by the same bare
+// command words as chat.ReservedCommands. Keying both the menu (reservedBotCommands)
+// and the handlers off the canonical set means a new reserved command cannot be
+// published in the menu yet leak to the model for lack of a handler — a guard test
+// asserts this map's key set equals chat.ReservedCommands. Adding a reserved command
+// is therefore a two-line change here (plus the canonical entry); forgetting the
+// handler fails the test rather than silently leaking the command to Claude.
+func reservedHandlers(cfg config.Config, svc *chat.Service) map[string]bot.HandlerFunc {
+	return map[string]bot.HandlerFunc{
+		"start": startHandler(cfg),
+		"help":  helpHandler(cfg),
+		"new":   newHandler(cfg, svc),
+		"stop":  stopCommandHandler(cfg, svc),
 	}
 }
 

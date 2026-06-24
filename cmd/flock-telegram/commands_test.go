@@ -1,12 +1,21 @@
 package main
 
 import (
+	"context"
+	"io"
+	"net/http"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
 	"github.com/duckbugio/flock/adapters/telegram"
+	"github.com/duckbugio/flock/core/chat"
+	"github.com/duckbugio/flock/core/claude"
+	"github.com/duckbugio/flock/core/dispatch"
 	"github.com/duckbugio/flock/internal/config"
 )
 
@@ -58,6 +67,25 @@ func TestCommandSenderAllowList(t *testing.T) {
 	}
 }
 
+// TestReservedBotCommandsFromCanonicalSet asserts the published Telegram command
+// menu is built one-for-one from core/chat.ReservedCommands (the single source of
+// truth) — same names, same order, same descriptions — so the menu can never
+// drift from the commands the handlers route on.
+func TestReservedBotCommandsFromCanonicalSet(t *testing.T) {
+	got := reservedBotCommands()
+	if len(got) != len(chat.ReservedCommands) {
+		t.Fatalf("reservedBotCommands has %d entries, want %d", len(got), len(chat.ReservedCommands))
+	}
+	for i, c := range chat.ReservedCommands {
+		if got[i].Command != c.Name {
+			t.Errorf("command[%d] = %q, want %q", i, got[i].Command, c.Name)
+		}
+		if got[i].Description != c.Description {
+			t.Errorf("command[%d] description = %q, want %q", i, got[i].Description, c.Description)
+		}
+	}
+}
+
 // botCommandUpdate builds an Update carrying a slash command, mirroring what
 // Telegram sends (a bot_command entity at offset 0 spanning "/name[@botname]").
 func botCommandUpdate(text string, cmdLen int) *models.Update {
@@ -102,6 +130,178 @@ func TestStartWelcomeText(t *testing.T) {
 	}
 	if !strings.Contains(telegram.WelcomeText, telegram.HelpText) {
 		t.Fatalf("WelcomeText should include the usage help (HelpText)")
+	}
+}
+
+// TestReservedHandlersMatchCanonicalSet is the drift guard for Finding 2: the set
+// of command names the bot registers reserved handlers for (reservedHandlers) MUST
+// equal the canonical chat.ReservedCommands. The menu is published from the
+// canonical set (reservedBotCommands); if a new reserved command were added there
+// but not given a handler here it would be advertised in the menu yet leak to
+// Claude as free text. Keying both off the same source and asserting equality makes
+// that impossible.
+func TestReservedHandlersMatchCanonicalSet(t *testing.T) {
+	// A nil *chat.Service is fine: we only inspect the map's key set, never invoke a
+	// handler closure.
+	handlers := reservedHandlers(config.Config{}, nil)
+
+	if len(handlers) != len(chat.ReservedCommands) {
+		t.Fatalf("reservedHandlers has %d entries, want %d (chat.ReservedCommands)",
+			len(handlers), len(chat.ReservedCommands))
+	}
+	for _, c := range chat.ReservedCommands {
+		h, ok := handlers[c.Name]
+		if !ok {
+			t.Errorf("no handler registered for reserved command %q", c.Name)
+			continue
+		}
+		if h == nil {
+			t.Errorf("handler for reserved command %q is nil", c.Name)
+		}
+	}
+	// And no EXTRA handler is registered for a name that is not reserved (which would
+	// silently intercept a command the user expects to pass through to Claude).
+	reserved := map[string]bool{}
+	for _, c := range chat.ReservedCommands {
+		reserved[c.Name] = true
+	}
+	for name := range handlers {
+		if !reserved[name] {
+			t.Errorf("handler registered for %q, which is not in chat.ReservedCommands", name)
+		}
+	}
+}
+
+// recordingSubmitter is a messageSubmitter that records every submit call, so a
+// test can assert exactly what reached the run Service via the message path. It
+// mirrors the VK receiver test's fakeService seam.
+type recordingSubmitter struct {
+	mu      sync.Mutex
+	prompts []string
+}
+
+func (r *recordingSubmitter) Handle(_ context.Context, _ chat.ChatID, _ int64, _ chat.MessageID, prompt string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.prompts = append(r.prompts, prompt)
+}
+
+func (r *recordingSubmitter) HandleEdit(_ context.Context, _ chat.ChatID, _ int64, _ chat.MessageID, prompt string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.prompts = append(r.prompts, prompt)
+}
+
+func (r *recordingSubmitter) HandleMedia(
+	_ context.Context, _ chat.ChatID, _ int64, _ chat.MessageID, prompt string, _ []claude.ImageInput,
+) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.prompts = append(r.prompts, prompt)
+}
+
+func (r *recordingSubmitter) HandleEditMedia(
+	_ context.Context, _ chat.ChatID, _ int64, _ chat.MessageID, prompt string, _ []claude.ImageInput,
+) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.prompts = append(r.prompts, prompt)
+}
+
+func (r *recordingSubmitter) seen() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.prompts...)
+}
+
+// stubHTTPClient is a bot HttpClient that answers every request locally with a
+// canned ok=true envelope, so a handler that posts a message (e.g. the /stop
+// confirmation) is a clean no-op with no network. It lets the test exercise the
+// REAL reserved handlers without hitting api.telegram.org.
+type stubHTTPClient struct{}
+
+func (stubHTTPClient) Do(_ *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"ok":true,"result":{}}`)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+// newCommandTestBot builds a bot that dispatches updates exactly as production does
+// — the reserved-command handlers match BEFORE the default text handler — but with
+// the run Service swapped for a recording fake on the pass-through path. It skips
+// getMe and stubs the HTTP client (no network) and runs handlers synchronously so a
+// single ProcessUpdate is fully handled before we assert. The token's numeric prefix
+// becomes the bot's own user id (used by the mention gate); the value is otherwise
+// irrelevant. reservedSvc backs the REAL reserved handlers (e.g. /stop's StopChat);
+// it is a no-op service over a real dispatcher so the handlers run without panicking.
+func newCommandTestBot(t *testing.T, cfg config.Config, svc messageSubmitter, reservedSvc *chat.Service) *bot.Bot {
+	t.Helper()
+	defaultHandler := func(ctx context.Context, b *bot.Bot, update *models.Update) {
+		if msg := update.Message; msg != nil {
+			deps := messageDeps{cfg: cfg, service: svc}
+			handleMessage(ctx, deps, b, msg, false)
+		}
+	}
+	b, err := bot.New("123456:test-token",
+		bot.WithSkipGetMe(),
+		bot.WithNotAsyncHandlers(),
+		bot.WithHTTPClient(time.Minute, stubHTTPClient{}),
+		bot.WithDefaultHandler(defaultHandler),
+	)
+	if err != nil {
+		t.Fatalf("build test bot: %v", err)
+	}
+	// Register the reserved-command handlers from the SAME canonical source main uses,
+	// so the routing (reserved handler vs default) is identical to production.
+	for name, h := range reservedHandlers(cfg, reservedSvc) {
+		b.RegisterHandlerMatchFunc(commandMatch(name), h)
+	}
+	return b
+}
+
+// privateCommandUpdate builds a PRIVATE-chat update carrying a slash command from
+// the given user, mirroring what Telegram sends (a bot_command entity at offset 0).
+func privateCommandUpdate(userID, chatID int64, text string, cmdLen int) *models.Update {
+	return &models.Update{Message: &models.Message{
+		ID:       1,
+		Text:     text,
+		From:     &models.User{ID: userID},
+		Chat:     models.Chat{ID: chatID, Type: models.ChatTypePrivate},
+		Entities: []models.MessageEntity{{Type: models.MessageEntityTypeBotCommand, Offset: 0, Length: cmdLen}},
+	}}
+}
+
+// TestNativeCommandPassesThroughTelegram is the Telegram parity for AC-A2 (the VK
+// analog is TestReceiverNativeCommandPassesThrough): a non-reserved slash command
+// in a private chat reaches the run Service via the message path with its FULL text
+// verbatim, while a reserved command (/stop) is routed to its own handler and never
+// reaches the Service this way.
+func TestNativeCommandPassesThroughTelegram(t *testing.T) {
+	const userID = 42
+	cfg := config.Config{AllowedUsers: []int64{userID}}
+	svc := &recordingSubmitter{}
+	// A no-op real Service backs the reserved handlers so /stop's StopChat runs
+	// without panicking; the pass-through path uses the recording fake (svc).
+	reservedSvc := chat.New(chat.Config{Dispatcher: dispatch.New(1)})
+	b := newCommandTestBot(t, cfg, svc, reservedSvc)
+
+	// A native (non-reserved) command falls through to the default handler and is
+	// submitted verbatim — "/loop 5m /foo", the whole text, not just "/loop".
+	const native = "/loop 5m /foo"
+	b.ProcessUpdate(context.Background(), privateCommandUpdate(userID, 200, native, len("/loop")))
+
+	if got := svc.seen(); len(got) != 1 || got[0] != native {
+		t.Fatalf("native command not passed through verbatim: Service saw %v, want [%q]", got, native)
+	}
+
+	// A reserved command is matched by its own handler BEFORE the default text
+	// handler, so it must NOT reach the Service via this path.
+	b.ProcessUpdate(context.Background(), privateCommandUpdate(userID, 200, "/stop", len("/stop")))
+
+	if got := svc.seen(); len(got) != 1 {
+		t.Fatalf("reserved /stop leaked to the run Service: Service saw %v, want only the native command", got)
 	}
 }
 

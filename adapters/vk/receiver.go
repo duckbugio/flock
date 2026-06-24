@@ -13,21 +13,14 @@ import (
 	"github.com/duckbugio/flock/core/claude"
 )
 
-// stopCommand is the universal text fallback for cancelling the in-flight run,
-// mapped in the receive loop alongside the inline Stop button.
-const stopCommand = "/stop"
+// welcomeText is the static reply to /start: a short greeting + the usage help,
+// mirroring the Telegram adapter's WelcomeText. It is an engineering artifact
+// (plain English, no duck flavor) and never reaches the Claude Runner.
+const welcomeText = "Hi! I'm the Flock assistant.\n\n" + HelpText
 
-// startCommand is the text command a new user sends first; it is answered with a
-// short welcome + usage notice and never starts a run (parity with Telegram's
-// /start handler).
-const startCommand = "/start"
-
-// welcomeText is the static reply to /start: a short greeting + usage, mirroring
-// the Telegram adapter's WelcomeText. It is an engineering artifact (plain
-// English, no duck flavor) and never reaches the Claude Runner.
-const welcomeText = "Hi! I'm the Flock assistant.\n\n" +
-	"Send any message to run it through the assistant.\n" +
-	"/stop — stop the run currently in progress."
+// newSessionText is the static reply to /new: confirms the session was reset so
+// the next message starts a brand-new conversation.
+const newSessionText = "Started a fresh session. Your next message begins a new conversation."
 
 // Service is the subset of *core/chat.Service the receiver drives. The real
 // Service satisfies it; tests use a fake to assert the mapped calls.
@@ -38,6 +31,7 @@ type Service interface {
 	)
 	Stop(runID string) bool
 	StopChat(chatID chat.ChatID) bool
+	NewSession(chatID chat.ChatID) error
 	StarPress() (toast string, ok bool)
 }
 
@@ -287,9 +281,10 @@ func (r *Receiver) dispatch(ctx context.Context, u update) {
 	}
 }
 
-// onMessageNew maps a message_new update onto the Service: allow-list, the /stop
-// text fallback, the community mention-gate, the guard check, then a text or
-// media run.
+// onMessageNew maps a message_new update onto the Service: allow-list, reserved
+// command dispatch (the canonical core/chat set), the community mention-gate, the
+// guard check, then a text or media run. A non-reserved slash command (/loop, …)
+// is NOT intercepted — it falls through with its full text so Claude Code runs it.
 func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 	// Ignore messages from communities (negative from_id) and our own echoes.
 	if msg.FromID <= 0 {
@@ -303,14 +298,12 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 	peerID := msg.PeerID
 	isGroup := isGroupPeer(peerID)
 
-	// Universal Stop fallback: a bare "/stop" cancels the chat's in-flight run.
-	switch strings.TrimSpace(msg.Text) {
-	case stopCommand:
-		r.svc.StopChat(chatIDStr(peerID))
-		return
-	case startCommand:
-		// /start is answered with the welcome/usage notice and never starts a run.
-		r.notify(ctx, peerID, welcomeText)
+	// Reserved commands the bot handles itself (the single source of truth in
+	// core/chat). A leading /start, /help, /new or /stop is dispatched here and
+	// never reaches Claude; every OTHER slash command (e.g. /loop) is left to fall
+	// through with its full text so Claude Code's own slash-command system runs it.
+	if name := commandName(msg.Text); chat.IsReservedCommand(name) {
+		r.dispatchReserved(ctx, name, peerID)
 		return
 	}
 
@@ -355,6 +348,50 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 		return
 	}
 	r.svc.Handle(ctx, chatIDStr(peerID), msg.FromID, msgIDStr(msg.ConversationMessageID), text)
+}
+
+// dispatchReserved acts on a reserved command (caller already confirmed name is
+// in the canonical set). /start and /help reply with the static notices; /new
+// resets the chat's session and confirms; /stop cancels the in-flight run. None
+// of these starts a Claude run. An unknown name (should not happen — the caller
+// gates on IsReservedCommand) is a no-op so the set stays the single authority.
+func (r *Receiver) dispatchReserved(ctx context.Context, name string, peerID int64) {
+	switch name {
+	case "start":
+		r.notify(ctx, peerID, welcomeText)
+	case "help":
+		r.notify(ctx, peerID, HelpText)
+	case "new":
+		if err := r.svc.NewSession(chatIDStr(peerID)); err != nil {
+			r.logger.Error("vk: reset session", "peer_id", peerID, "error", err)
+		}
+		r.notify(ctx, peerID, newSessionText)
+	case "stop":
+		r.svc.StopChat(chatIDStr(peerID))
+	}
+}
+
+// commandName parses the reserved-command name from a VK message: it trims the
+// text and, when it starts with "/", returns the first whitespace-delimited token
+// with the leading "/" dropped and lower-cased; otherwise it returns "". The
+// match is exact, so "/news" yields "news" (not reserved -> passes through) and
+// "/loop 5m" yields "loop". VK has no @botname suffix, so none is stripped.
+func commandName(text string) string {
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, "/") {
+		return ""
+	}
+	token := text[1:]
+	if i := strings.IndexFunc(token, isSpace); i >= 0 {
+		token = token[:i]
+	}
+	return strings.ToLower(token)
+}
+
+// isSpace reports whether r is one of the ASCII whitespace runes that delimit a
+// VK command token (space, tab, newline, carriage return).
+func isSpace(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\n' || r == '\r'
 }
 
 // handleVoice downloads + transcribes a voice attachment and submits the
