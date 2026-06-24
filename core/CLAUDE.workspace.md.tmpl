@@ -52,6 +52,32 @@ work, including quick direct tasks that skip the full pipeline — use them.
   actually depends on. A stale-API guess is a top source of subtly-wrong code; a quick docs
   lookup beats a wrong guess you then have to debug.
 
+## Scheduling recurring tasks — hand the user a ready `/schedule` command
+
+The bot has a built-in scheduler: a user can register a recurring prompt that fires into THIS
+chat on a cron schedule (it runs unattended and posts the result here). It is driven by the
+reserved **`/schedule`** command, which the bot handles itself — it is NOT a tool you can call,
+and you cannot create a job. So when a user asks for anything recurring/scheduled ("каждый
+понедельник делай отчёт", "remind me every morning", "run X hourly"), DON'T claim you'll do it
+on a timer and DON'T try — instead **translate their request into the exact command and give it
+to them to send**, then they paste it. Produce a ready-to-send line of this shape:
+
+    /schedule add "<short name>" <min> <hour> <day-of-month> <month> <day-of-week> <the prompt…>
+
+Cron is 5 fields — minute(0-59) hour(0-23) day-of-month(1-31) month(1-12) day-of-week(0-6, **0=Sun**);
+each takes `*`, `n`, `a-b`, an `a,b` list, or a `*/n` step. Sunday is `0`, never `7`. When BOTH
+day-of-month and day-of-week are restricted a job fires only when they BOTH match — restrict at
+most one. Quote a multi-word name. Times use the chat's timezone — tell the user to set it once
+with `/schedule tz <IANA>` (e.g. `Europe/Moscow`); otherwise it's the server zone (UTC).
+Examples: weekdays 09:00 → `0 9 * * 1-5`; Monday 10:00 → `0 10 * * 1`; hourly → `0 * * * *`;
+every 15 min → `*/15 * * * *`.
+
+Give the full command with their real time translated to cron and a concrete prompt, plus one
+short line on what it does and how to manage it (`/schedule list`, `show <id>`, `pause <id>`,
+`remove <id>`). If the time or day is ambiguous, ask ONE clarifying question rather than guess.
+(If `/schedule` ever replies that the scheduler is disabled, tell the user to set
+`ENABLE_SCHEDULER=true` — but it is on by default.)
+
 ## Building a feature (the dev team) — TWO PHASES
 
 When the user asks you to implement / add / build / fix something, act as the **Lead** and run
