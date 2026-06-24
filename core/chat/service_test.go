@@ -635,17 +635,172 @@ func TestRunChunksLongFinal(t *testing.T) {
 	defer d.Close()
 	svc.Handle(context.Background(), "100", 100, "1", "go")
 
-	// Wait until the tail chunk has been sent (2 sends: progress + tail).
+	// Wait until the run completed: the anchor send, the tail chunk send, and the
+	// separate completion notice (the final Send) have all landed.
 	waitUntil(t, func() bool {
 		fc.mu.Lock()
 		defer fc.mu.Unlock()
-		return len(fc.sent) == 2
+		return len(fc.sent) == 3
 	})
 
 	// First chunk replaces the progress message; the remainder is a new Send.
 	first, _ := fc.snapshot()
 	if utf8.RuneCountInString(first) > TelegramMaxMessage {
 		t.Fatalf("first chunk too big: %d", utf8.RuneCountInString(first))
+	}
+	// The chunk tail is a real Send (not the anchor, not the notice), so a long
+	// answer still spans multiple messages.
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if fc.sent[0] != anchorText {
+		t.Fatalf("first send was not the anchor: %q", fc.sent[0])
+	}
+}
+
+// noticeCount reports how many of the chat's Send'd texts contain sub (used to
+// assert the completion notice is a real Send that fires exactly once).
+func (f *fakeChat) noticeCount(sub string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, s := range f.sent {
+		if strings.Contains(s, sub) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestCompletionNoticeOnResult (AC3) asserts a normal Result delivers a SEPARATE
+// completion "Done" notice (a real Send, not only the in-place Edit) and that it
+// fires exactly once, distinct from the edited answer bubble.
+func TestCompletionNoticeOnResult(t *testing.T) {
+	fc := newFakeChat()
+	fr := &fakeRunner{events: []claude.Event{
+		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer}},
+	}}
+	svc, d := newTestService(t, fr, fc)
+	defer d.Close()
+
+	svc.Handle(context.Background(), "100", 100, "1", "go")
+
+	// The answer reaches the anchor via Edit.
+	waitUntil(t, func() bool {
+		text, _ := fc.snapshot()
+		return text == finalAnswer
+	})
+	// A separate "Done" notice is Send'd exactly once.
+	waitUntil(t, func() bool { return fc.noticeCount("✅ Done in") == 1 })
+	if n := fc.noticeCount("✅ Done in"); n != 1 {
+		t.Fatalf("completion notice sent %d times, want exactly 1", n)
+	}
+	// It is a genuine Send distinct from the edited answer (the anchor still holds the
+	// answer, not the notice).
+	text, _ := fc.snapshot()
+	if strings.Contains(text, "✅ Done in") {
+		t.Fatalf("notice was attached to the live edit, not a separate Send: %q", text)
+	}
+}
+
+// TestCompletionNoticeFormatsTotal (AC3) drives the run with a manual clock so the
+// total elapsed is deterministic, and asserts the notice carries the humanized
+// duration from formatElapsed.
+func TestCompletionNoticeFormatsTotal(t *testing.T) {
+	fc := newFakeChat()
+	gate := make(chan struct{})
+	fr := &fakeRunner{
+		events: []claude.Event{{Type: claude.ToolUse, Tool: "Bash"}},
+		gate:   gate,
+	}
+	svc, d := newTestService(t, fr, fc)
+	defer d.Close()
+
+	clk := newManualClock()
+	svc.nowFunc = clk.now
+	svc.Handle(context.Background(), "100", 100, "1", "go")
+
+	// Wait until the run is up (anchor with Stop posted), so start has been captured
+	// at clock 0; then advance the clock and release the run. The terminal funnel reads
+	// now - start = the advanced amount.
+	waitUntil(t, func() bool {
+		_, stop := fc.snapshot()
+		return stop
+	})
+	clk.advance(125 * time.Second) // 2m 05s
+	close(gate)
+
+	want := "✅ Done in " + formatElapsed(125)
+	waitUntil(t, func() bool { return fc.noticeCount(want) == 1 })
+	if n := fc.noticeCount(want); n != 1 {
+		t.Fatalf("notice with total %q sent %d times, want exactly 1; sent=%v", want, n, fc.sent)
+	}
+}
+
+// TestCompletionNoticeOnRunError (AC3) asserts a RunError terminal delivers a
+// "Failed" completion notice as a separate Send.
+func TestCompletionNoticeOnRunError(t *testing.T) {
+	fc := newFakeChat()
+	fr := &fakeRunner{events: []claude.Event{
+		{Type: claude.RunError, Err: errors.New("boom")},
+	}}
+	svc, d := newTestService(t, fr, fc)
+	defer d.Close()
+
+	svc.Handle(context.Background(), "100", 100, "1", "go")
+
+	waitUntil(t, func() bool { return fc.noticeCount("⚠️ Failed after") == 1 })
+	if n := fc.noticeCount("⚠️ Failed after"); n != 1 {
+		t.Fatalf("RunError notice sent %d times, want exactly 1", n)
+	}
+}
+
+// TestCompletionNoticeOnStop (AC3) asserts a user Stop (ctx cancelled, no Result)
+// delivers a "Stopped" completion notice as a separate Send, fired once.
+func TestCompletionNoticeOnStop(t *testing.T) {
+	fc := newFakeChat()
+	gate := make(chan struct{})
+	fr := &fakeRunner{
+		events: []claude.Event{{Type: claude.ToolUse, Tool: "Bash"}},
+		gate:   gate,
+	}
+	svc, d := newTestService(t, fr, fc)
+	defer d.Close()
+
+	svc.Handle(context.Background(), "100", 100, "1", "go")
+	waitUntil(t, func() bool { return svc.Stop("1") })
+
+	waitUntil(t, func() bool { return fc.noticeCount("⏹ Stopped after") == 1 })
+	if n := fc.noticeCount("⏹ Stopped after"); n != 1 {
+		t.Fatalf("Stop notice sent %d times, want exactly 1", n)
+	}
+	close(gate)
+}
+
+// TestCompletionNoticeStatusWords pins the status word + total for every terminal
+// case, including the deploy-shutdown "resuming" case that must read "paused …
+// will resume" (not "stopped"), since such a run keeps its marker and auto-resumes.
+func TestCompletionNoticeStatusWords(t *testing.T) {
+	const total = 4*time.Minute + 12*time.Second
+	tests := []struct {
+		name     string
+		res      *claude.RunResult
+		runErr   error
+		ctxErr   error
+		resuming bool
+		want     string
+	}{
+		{"clean result", &claude.RunResult{}, nil, nil, false, "✅ Done in 4m 12s"},
+		{"run error", nil, errors.New("boom"), nil, false, "⚠️ Failed after 4m 12s"},
+		{"is_error result", &claude.RunResult{IsError: true}, nil, nil, false, "⚠️ Failed after 4m 12s"},
+		{"user stop", nil, nil, context.Canceled, false, "⏹ Stopped after 4m 12s"},
+		{"deploy shutdown resumes", nil, nil, context.Canceled, true, "⏳ Paused after 4m 12s — will resume after restart"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := completionNotice(tc.res, tc.runErr, tc.ctxErr, total, tc.resuming); got != tc.want {
+				t.Errorf("completionNotice = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
