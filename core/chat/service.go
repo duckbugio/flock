@@ -800,23 +800,32 @@ func (s *Service) finish(
 	// Send a SEPARATE completion message carrying the run's total elapsed time. The
 	// in-place edit above never notifies (Telegram is silent on edits), so this is a
 	// real second Send that pings the user the run is done — once per run, distinct
-	// from the answer and never attached to the live "Working…" edit. Its status word
-	// mirrors the same three terminal cases the answer switch covers above (normal
-	// Result, RunError, Stop/timeout).
-	notice := completionNotice(res, runErr, ctxErr, total)
-	if _, sErr := s.chat.Send(deliverCtx, chatID, notice, "", true); sErr != nil {
+	// from the answer and never attached to the live "Working…" edit. A run cancelled
+	// by a deploy shutdown keeps its marker and auto-resumes on the next startup, so
+	// it is reported as paused (not stopped) to avoid a contradictory signal. The
+	// notice is the deliverable that must reach the user, so it uses the same
+	// rate-limit backoff as the answer rather than a bare Send that a transient 429
+	// would silently drop.
+	notice := completionNotice(res, runErr, ctxErr, total, genuinelyInterrupted)
+	if sErr := s.deliverWithBackoff(deliverCtx, "completion notice", func() error {
+		_, e := s.chat.Send(deliverCtx, chatID, notice, "", true)
+		return e
+	}); sErr != nil {
 		s.log.Error("send completion notice", "error", sErr)
 	}
 }
 
 // completionNotice renders the one-line "done" message sent as a separate bubble
 // after the answer, carrying the run's total elapsed time with a status word that
-// mirrors the three terminal cases finish handles: a user Stop / per-run timeout
-// (ctxErr set, no Result or error) reads "stopped", a RunError or an is_error
-// Result reads "failed", and a clean Result reads "done".
-func completionNotice(res *claude.RunResult, runErr, ctxErr error, total time.Duration) string {
+// mirrors the terminal cases finish handles: a run cancelled by a deploy shutdown
+// (resuming) keeps its marker and auto-resumes, so it reads "paused … will resume";
+// a user Stop / per-run timeout (ctxErr set, no Result or error) reads "stopped"; a
+// RunError or an is_error Result reads "failed"; and a clean Result reads "done".
+func completionNotice(res *claude.RunResult, runErr, ctxErr error, total time.Duration, resuming bool) string {
 	elapsed := formatElapsed(int64(total / time.Second))
 	switch {
+	case resuming:
+		return "⏳ Paused after " + elapsed + " — will resume after restart"
 	case ctxErr != nil && res == nil && runErr == nil:
 		return "⏹ Stopped after " + elapsed
 	case runErr != nil || (res != nil && res.IsError):

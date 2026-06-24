@@ -776,6 +776,34 @@ func TestCompletionNoticeOnStop(t *testing.T) {
 	close(gate)
 }
 
+// TestCompletionNoticeStatusWords pins the status word + total for every terminal
+// case, including the deploy-shutdown "resuming" case that must read "paused …
+// will resume" (not "stopped"), since such a run keeps its marker and auto-resumes.
+func TestCompletionNoticeStatusWords(t *testing.T) {
+	const total = 4*time.Minute + 12*time.Second
+	tests := []struct {
+		name     string
+		res      *claude.RunResult
+		runErr   error
+		ctxErr   error
+		resuming bool
+		want     string
+	}{
+		{"clean result", &claude.RunResult{}, nil, nil, false, "✅ Done in 4m 12s"},
+		{"run error", nil, errors.New("boom"), nil, false, "⚠️ Failed after 4m 12s"},
+		{"is_error result", &claude.RunResult{IsError: true}, nil, nil, false, "⚠️ Failed after 4m 12s"},
+		{"user stop", nil, nil, context.Canceled, false, "⏹ Stopped after 4m 12s"},
+		{"deploy shutdown resumes", nil, nil, context.Canceled, true, "⏳ Paused after 4m 12s — will resume after restart"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := completionNotice(tc.res, tc.runErr, tc.ctxErr, total, tc.resuming); got != tc.want {
+				t.Errorf("completionNotice = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRunErrorEvent(t *testing.T) {
 	fc := newFakeChat()
 	fr := &fakeRunner{events: []claude.Event{

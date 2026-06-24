@@ -133,7 +133,7 @@ const elidedFormat = "🕓 +%d earlier"
 // which strips markdown metacharacters from the free-text label CONTENT — guarantees
 // the rendered stage line is markdown-safe regardless of label content OR length.
 const (
-	stagePrefix       = "🎏 "
+	stagePrefix       = "🧭 "
 	stageSeparator    = " → "
 	stageActiveLeft   = "▸ "
 	stageActiveRight  = " ◂"
@@ -161,19 +161,20 @@ const stageLabelMax = 40
 // trail can in principle list arbitrarily many DISTINCT labels, so the line is
 // bounded BY CONSTRUCTION here — the line is assembled ATOM-FIRST around the ACTIVE
 // stage's marked unit (added first so it is guaranteed kept and fully marked), then
-// older/newer neighbours are added only while the line stays under stageLineMax (with
-// a leading "first … " when earlier stages were dropped) — so the final truncateRunes
-// is a pure no-op safety net that can never shear off the active marker. The header
-// the line rides in therefore stays bounded regardless of how many stages were
-// observed. It is sized to comfortably hold the active label plus a few neighbours at
-// stageLabelMax.
+// older/newer neighbours are added only while the line stays under stageLineMax (the
+// first stage's label followed by an ellipsis leads the trail when earlier stages were
+// dropped) — so the final truncateRunes is a pure no-op safety net that can never
+// shear off the active marker. The header the line rides in therefore stays bounded
+// regardless of how many stages were observed. It is sized to comfortably hold the
+// active label plus a few neighbours at stageLabelMax.
 const stageLineMax = 120
 
 // stageWindowMax is how many labels the elided trail aims to keep around the active
 // stage, subject to stageLineMax. When more labels fall outside that window the trail
-// is rendered with a leading "first … " so the user still sees where the run began and
-// where it is now without an unbounded list. The active stage's marked unit is always
-// the first label taken when assembling, so it is never the one dropped to make room.
+// leads with the first stage's label and an ellipsis so the user still sees where the
+// run began and where it is now without an unbounded list. The active stage's marked
+// unit is always the first label taken when assembling, so it is never the one dropped
+// to make room.
 const stageWindowMax = 4
 
 // stageElision is the marker shown in place of the labels skipped between the first
@@ -594,8 +595,9 @@ func formatElapsed(secs int64) string {
 //     short case, byte-identical to listing every marked label joined by an arrow).
 //   - Otherwise the line is elided: the active stage's MARKED UNIT is placed first as
 //     an atomic unit (so it is always present and fully marked), neighbours are added
-//     around it in first-seen order only while the line stays under stageLineMax, and a
-//     leading "first … " / trailing " … " elision marks the gaps to the unshown ends.
+//     around it in first-seen order only while the line stays under stageLineMax, and
+//     the first stage's label + an ellipsis (leading) / a trailing ellipsis mark the
+//     gaps to the unshown ends.
 //
 // Because the line is already <= stageLineMax after assembly, the final truncateRunes
 // is a pure no-op safety net that can never cut the active marker. Each label is itself
