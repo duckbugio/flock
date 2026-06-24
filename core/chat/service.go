@@ -57,6 +57,10 @@ type workspaceEnsurer interface {
 // capped) and cancels a chat's in-flight job. *dispatch.Dispatcher satisfies it.
 type dispatcher interface {
 	Submit(chatID ChatID, run func(ctx context.Context))
+	// TrySubmit is the non-blocking Submit: it returns false (instead of blocking)
+	// when the chat's lane is full or the dispatcher is closed, used by the
+	// best-effort scheduled-fire path that must never stall on a busy lane.
+	TrySubmit(chatID ChatID, run func(ctx context.Context)) bool
 	Cancel(chatID ChatID)
 }
 
@@ -114,6 +118,7 @@ type Service struct {
 	sessions   sessionStore
 	pending    pendingStore
 	costs      *cost.Store
+	costCapUSD float64
 	outbox     *Sweeper
 	nudge      *starNudge
 	opts       claude.Options
@@ -145,6 +150,11 @@ type Config struct {
 	// May be nil (cost tracking disabled: runs record nothing). A nil *cost.Store
 	// is itself a no-op, so either a nil interface value or a nil store is safe.
 	Costs *cost.Store
+	// CostCapUSD is the cumulative per-user USD cap applied to scheduled fires
+	// (InjectScheduled): a creator whose accrued cost is at/over this cap has their
+	// due jobs skipped. A non-positive value disables the gate (every scheduled fire
+	// is allowed). It does NOT affect the inbound message path, which gates earlier.
+	CostCapUSD float64
 	// Outbox, when non-nil, sweeps the per-chat outbox directory after each run
 	// and delivers any files a run produced as Telegram documents. Nil disables
 	// the feature: the text-only finish path stays byte-identical.
@@ -193,6 +203,7 @@ func New(cfg Config) *Service {
 		sessions:   cfg.Sessions,
 		pending:    cfg.Pending,
 		costs:      cfg.Costs,
+		costCapUSD: cfg.CostCapUSD,
 		outbox:     cfg.Outbox,
 		nudge:      newStarNudge(cfg.StarNudge, cfg.Transport, log),
 		opts:       cfg.Opts,
@@ -256,6 +267,31 @@ func (s *Service) Inject(chatID ChatID, prompt string) {
 	id := s.enqueuePending(chatID, prompt)
 	s.dispatch.Submit(chatID, func(ctx context.Context) {
 		s.run(ctx, chatID, 0, prompt, nil, id)
+	})
+}
+
+// InjectScheduled submits a scheduled (cron) job's prompt into chatID, attributing
+// the run to its creator (userID) so the cost accrues to them. It differs from
+// Inject (the poller path) on the two axes that matter for an UNATTENDED, recurring
+// fire:
+//
+//   - EPHEMERAL: it does NOT enqueue a pending marker, so a scheduled fire is never
+//     auto-resumed on restart. A missed fire is acceptable; a durable marker that
+//     replays a stale scheduled prompt after a deploy is the bug we are avoiding.
+//   - NON-BLOCKING + cost-gated: it gates on the creator's cumulative cost cap and
+//     submits via the non-blocking lane, so a frequent cron behind a long-held lane
+//     can neither accumulate detached goroutines nor stall the scheduler.
+//
+// It returns false (the fire is dropped, best-effort) when the creator is at/over
+// the cost cap or when the chat's lane is busy (full buffer / dispatcher closed),
+// and true when the run was enqueued. Inject, by contrast, runs as the sentinel
+// user 0, is durable (enqueues a marker), and blocks on a full buffer.
+func (s *Service) InjectScheduled(chatID ChatID, prompt string, userID int64) bool {
+	if s.costs != nil && !s.costs.Allowed(userID, s.costCapUSD) {
+		return false
+	}
+	return s.dispatch.TrySubmit(chatID, func(ctx context.Context) {
+		s.run(ctx, chatID, userID, prompt, nil, "")
 	})
 }
 

@@ -108,19 +108,10 @@ func New(maxConcurrent int) *Dispatcher {
 // initial fast-path check and the enqueue itself bail out on rootCtx.Done(), so
 // Submit can never send on a queue whose worker has gone away.
 func (d *Dispatcher) Submit(chatID string, run func(ctx context.Context)) {
-	d.mu.Lock()
-	if d.closed {
-		d.mu.Unlock()
+	q := d.queueFor(chatID)
+	if q == nil {
 		return
 	}
-	q := d.chats[chatID]
-	if q == nil {
-		q = &chatQueue{ch: make(chan job, d.bufSize)}
-		d.chats[chatID] = q
-		d.wg.Add(1)
-		go d.worker(q)
-	}
-	d.mu.Unlock()
 
 	// Derive each job's ctx from the dispatcher root so Shutdown can cancel
 	// everything; Cancel swaps in a fresh cancel just before the job runs.
@@ -133,6 +124,53 @@ func (d *Dispatcher) Submit(chatID string, run func(ctx context.Context)) {
 	case q.ch <- job{ctx: d.rootCtx, run: run}:
 	case <-d.rootCtx.Done():
 	}
+}
+
+// TrySubmit is the non-blocking variant of Submit: it enqueues run for chatID and
+// returns true, but returns false instead of blocking when the chat's per-chat
+// buffer is full (back-pressure surfaces as a dropped job, not a stalled caller)
+// or when the dispatcher is (or becomes) closed. Within-chat serialization and the
+// global cap are identical to Submit; only the full-buffer behavior differs. It is
+// the path for best-effort fires (e.g. the scheduler) that must never block on a
+// busy lane.
+func (d *Dispatcher) TrySubmit(chatID string, run func(ctx context.Context)) bool {
+	q := d.queueFor(chatID)
+	if q == nil {
+		return false
+	}
+
+	// Identical to Submit's send EXCEPT for the default arm: a full buffer (or a
+	// shutdown-cancelled rootCtx) makes the send fail fast and report false rather
+	// than blocking. The channel is never closed, so this select only enqueues,
+	// drops on shutdown, or drops on a full buffer.
+	select {
+	case q.ch <- job{ctx: d.rootCtx, run: run}:
+		return true
+	case <-d.rootCtx.Done():
+		return false
+	default:
+		return false
+	}
+}
+
+// queueFor returns chatID's queue, lazily creating it (and starting its worker) on
+// first use. It returns nil when the dispatcher is closed, so the caller drops the
+// job rather than sending on an abandoned queue. Shared by Submit and TrySubmit so
+// the get-or-create-and-start logic lives in exactly one place.
+func (d *Dispatcher) queueFor(chatID string) *chatQueue {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return nil
+	}
+	q := d.chats[chatID]
+	if q == nil {
+		q = &chatQueue{ch: make(chan job, d.bufSize)}
+		d.chats[chatID] = q
+		d.wg.Add(1)
+		go d.worker(q)
+	}
+	return q
 }
 
 // worker drains a single chat's queue, running one job at a time. Serial

@@ -125,6 +125,45 @@ func TestGlobalCap(t *testing.T) {
 	}
 }
 
+// TestTrySubmitDropsWhenFull asserts TrySubmit is non-blocking: it returns true
+// while the chat's lane has room, but false (a dropped job, not a blocked caller)
+// once the in-flight job plus the buffer are full. A single-slot dispatcher with a
+// blocked in-flight job lets us fill the buffer deterministically.
+func TestTrySubmitDropsWhenFull(t *testing.T) {
+	d := New(1)
+	defer d.Close()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	// Occupy the single global slot with a job that blocks until released, so nothing
+	// drains the buffer while we fill it.
+	if !d.TrySubmit("1", func(_ context.Context) {
+		close(started)
+		<-release
+	}) {
+		t.Fatal("first TrySubmit returned false on an empty lane")
+	}
+	recv(t, started, "the in-flight job did not start")
+
+	// Fill the per-chat buffer; every one of these must be accepted (queued).
+	for i := 0; i < queueBuffer; i++ {
+		if !d.TrySubmit("1", func(context.Context) {}) {
+			t.Fatalf("TrySubmit #%d returned false while the buffer still had room", i)
+		}
+	}
+	// The buffer is now full and the worker is busy on the blocked job: the next
+	// TrySubmit must drop (return false) instead of blocking.
+	if d.TrySubmit("1", func(context.Context) { t.Fatal("dropped job ran") }) {
+		t.Fatal("TrySubmit returned true on a full lane, want false (dropped)")
+	}
+	// A different chat (its own empty lane) is unaffected and still accepts.
+	if !d.TrySubmit("2", func(context.Context) {}) {
+		t.Fatal("TrySubmit on a separate idle chat returned false")
+	}
+
+	close(release)
+}
+
 // TestCancelStopsInFlight asserts Cancel(chatID) cancels the running job's ctx,
 // which the job observes via ctx.Done() (AC2d).
 func TestCancelStopsInFlight(t *testing.T) {

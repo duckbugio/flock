@@ -20,10 +20,11 @@ type recordingFire struct {
 
 type fireCall struct{ chatID, prompt string }
 
-func (r *recordingFire) fire(chatID, prompt string) {
+func (r *recordingFire) fire(chatID, prompt string, _ int64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, fireCall{chatID, prompt})
+	return true
 }
 
 func (r *recordingFire) seen() []fireCall {
@@ -44,7 +45,7 @@ func newManager(t *testing.T) (*schedule.Manager, *schedule.Store, *recordingFir
 	rec := &recordingFire{}
 	clock := time.Date(2026, 6, 18, 9, 0, 0, 0, time.UTC)
 	nowPtr := &clock
-	mgr := schedule.NewManager(store, rec.fire, func() time.Time { return *nowPtr }, nil)
+	mgr := schedule.NewManager(store, rec.fire, nil, func() time.Time { return *nowPtr }, nil)
 	return mgr, store, rec, nowPtr
 }
 
@@ -56,7 +57,7 @@ func newDispatchManager(t *testing.T) (*schedule.Manager, *schedule.Store) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	return schedule.NewManager(store, func(string, string) {}, nil, nil), store
+	return schedule.NewManager(store, func(string, string, int64) bool { return true }, nil, nil, nil), store
 }
 
 // --- Dispatch tests ---
@@ -409,6 +410,88 @@ func TestSchedulerInvalidCronSkipped(t *testing.T) {
 	mgr.TickOnce()
 	if got := rec.seen(); len(got) != 0 {
 		t.Fatalf("invalid-cron job fired %d times, want 0", len(got))
+	}
+}
+
+// openStore opens a fresh temp-file store for a test, failing on error.
+func openStore(t *testing.T) *schedule.Store {
+	t.Helper()
+	store, err := schedule.Open(filepath.Join(t.TempDir(), "schedules.json"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	return store
+}
+
+// TestSchedulerPrunesJobOfDelistedCreator asserts that when the live allow-list no
+// longer admits a job's creator, the scheduler PRUNES the job (removes it from the
+// store) on the next tick and never fires it — privilege does not persist past a
+// de-list.
+func TestSchedulerPrunesJobOfDelistedCreator(t *testing.T) {
+	store := openStore(t)
+	rec := &recordingFire{}
+	// allowed denies the creator (id 42) of the job below.
+	allowed := func(userID int64) bool { return userID != 42 }
+	clock := time.Date(2026, 6, 18, 9, 0, 0, 0, time.UTC)
+	mgr := schedule.NewManager(store, rec.fire, allowed, func() time.Time { return clock }, nil)
+
+	// A job whose schedule matches right now (every minute) but whose creator is
+	// de-listed.
+	if _, err := store.Add(schedule.Job{
+		ChatID: "100", Name: "j", Cron: "* * * * *", Prompt: "go", CreatedBy: 42, Active: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr.TickOnce()
+
+	if got := rec.seen(); len(got) != 0 {
+		t.Fatalf("a de-listed creator's job fired %d times, want 0", len(got))
+	}
+	if got := store.List("100"); got != nil {
+		t.Fatalf("de-listed creator's job was not pruned: %+v", got)
+	}
+}
+
+// TestSchedulerSkipsBusyFireButMarksMinute asserts that when fire reports the run
+// was dropped (chat busy / over cost cap) the minute is still de-duped: a second
+// tick in the same matching minute does not call fire again, and the job is NOT
+// pruned (it remains for a future minute).
+func TestSchedulerSkipsBusyFireButMarksMinute(t *testing.T) {
+	store := openStore(t)
+	var calls int
+	var mu sync.Mutex
+	// fire always reports "not submitted" (busy lane / over cap).
+	fire := func(string, string, int64) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		return false
+	}
+	clock := time.Date(2026, 6, 18, 9, 0, 0, 0, time.UTC)
+	now := clock
+	mgr := schedule.NewManager(store, fire, nil, func() time.Time { return now }, nil)
+
+	if _, err := store.Add(schedule.Job{
+		ChatID: "100", Name: "j", Cron: "0 * * * *", Prompt: "go", CreatedBy: 7, Active: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	now = time.Date(2026, 6, 18, 9, 0, 0, 0, time.UTC)
+	mgr.TickOnce()
+	now = time.Date(2026, 6, 18, 9, 0, 30, 0, time.UTC) // same matching minute
+	mgr.TickOnce()
+
+	mu.Lock()
+	got := calls
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("fire called %d times in one matching minute despite a dropped fire, want 1 (minute de-duped)", got)
+	}
+	// The job is best-effort dropped, not pruned: it must still be in the store.
+	if jobs := store.List("100"); len(jobs) != 1 {
+		t.Fatalf("job count = %d after a dropped fire, want 1 (not pruned)", len(jobs))
 	}
 }
 

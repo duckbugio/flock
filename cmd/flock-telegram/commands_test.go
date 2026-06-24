@@ -337,7 +337,7 @@ func TestScheduleCommandEnabledReachesDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	mgr := schedule.NewManager(store, func(string, string) {}, nil, nil)
+	mgr := schedule.NewManager(store, func(string, string, int64) bool { return true }, nil, nil, nil)
 
 	defaultHandler := func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		if msg := update.Message; msg != nil {

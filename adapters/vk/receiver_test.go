@@ -341,7 +341,7 @@ func TestReceiverScheduleEnabledReachesDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	mgr := schedule.NewManager(store, func(string, string) {}, nil, nil)
+	mgr := schedule.NewManager(store, func(string, string, int64) bool { return true }, nil, nil, nil)
 	r := NewReceiver(ReceiverConfig{
 		Service:   svc,
 		GroupID:   123,
