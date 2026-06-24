@@ -11,7 +11,12 @@ import (
 
 	"github.com/duckbugio/flock/core/chat"
 	"github.com/duckbugio/flock/core/claude"
+	"github.com/duckbugio/flock/core/schedule"
 )
+
+// scheduleDisabledText is the reply when /schedule is used but the scheduler is
+// turned off (the default). It mirrors the Telegram adapter's notice.
+const scheduleDisabledText = "Scheduler is disabled. Set ENABLE_SCHEDULER=true to enable it."
 
 // welcomeText is the static reply to /start: a short greeting + the usage help,
 // mirroring the Telegram adapter's WelcomeText. It is an engineering artifact
@@ -104,6 +109,7 @@ type Receiver struct {
 	uploads        uploader
 	notices        NoticeSender
 	eventAck       eventAckFunc
+	sched          *schedule.Manager
 	logger         *slog.Logger
 }
 
@@ -120,7 +126,10 @@ type ReceiverConfig struct {
 	// EventAck acks a callback button press (messages.sendMessageEventAnswer) so VK
 	// clears the button spinner. May be nil (the ack is then skipped).
 	EventAck eventAckFunc
-	Logger   *slog.Logger
+	// Scheduler serves the /schedule command. Nil when ENABLE_SCHEDULER is off, in
+	// which case /schedule replies with the disabled notice.
+	Scheduler *schedule.Manager
+	Logger    *slog.Logger
 }
 
 // NewReceiver builds a Receiver from cfg. A nil logger defaults to slog.Default();
@@ -145,6 +154,7 @@ func NewReceiver(cfg ReceiverConfig) *Receiver {
 		uploads:        cfg.Uploads,
 		notices:        cfg.Notices,
 		eventAck:       cfg.EventAck,
+		sched:          cfg.Scheduler,
 		logger:         log,
 	}
 }
@@ -299,11 +309,11 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 	isGroup := isGroupPeer(peerID)
 
 	// Reserved commands the bot handles itself (the single source of truth in
-	// core/chat). A leading /start, /help, /new or /stop is dispatched here and
+	// core/chat). A leading /start, /help, /new, /stop or /schedule is dispatched here and
 	// never reaches Claude; every OTHER slash command (e.g. /loop) is left to fall
 	// through with its full text so Claude Code's own slash-command system runs it.
 	if name := commandName(msg.Text); chat.IsReservedCommand(name) {
-		r.dispatchReserved(ctx, name, peerID)
+		r.dispatchReserved(ctx, name, msg)
 		return
 	}
 
@@ -350,12 +360,15 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 	r.svc.Handle(ctx, chatIDStr(peerID), msg.FromID, msgIDStr(msg.ConversationMessageID), text)
 }
 
-// dispatchReserved acts on a reserved command (caller already confirmed name is
-// in the canonical set). /start and /help reply with the static notices; /new
-// resets the chat's session and confirms; /stop cancels the in-flight run. None
-// of these starts a Claude run. An unknown name (should not happen — the caller
-// gates on IsReservedCommand) is a no-op so the set stays the single authority.
-func (r *Receiver) dispatchReserved(ctx context.Context, name string, peerID int64) {
+// dispatchReserved acts on a reserved command (caller already confirmed the name
+// is in the canonical set). /start and /help reply with the static notices; /new
+// resets the chat's session and confirms; /stop cancels the in-flight run;
+// /schedule manages cron jobs via the shared Manager (or replies with the disabled
+// notice when the scheduler is off). None of these starts a Claude run. An unknown
+// name (should not happen — the caller gates on IsReservedCommand) is a no-op so
+// the set stays the single authority.
+func (r *Receiver) dispatchReserved(ctx context.Context, name string, msg messageObject) {
+	peerID := msg.PeerID
 	switch name {
 	case "start":
 		r.notify(ctx, peerID, welcomeText)
@@ -368,7 +381,23 @@ func (r *Receiver) dispatchReserved(ctx context.Context, name string, peerID int
 		r.notify(ctx, peerID, newSessionText)
 	case "stop":
 		r.svc.StopChat(chatIDStr(peerID))
+	case "schedule":
+		r.dispatchSchedule(ctx, msg)
 	}
+}
+
+// dispatchSchedule serves /schedule: when the scheduler is disabled it replies
+// with the disabled notice; otherwise it strips the leading /schedule token and
+// hands the remaining args, the chat id, and the sender's user id to the
+// transport-neutral Manager.Dispatch, replying with its result.
+func (r *Receiver) dispatchSchedule(ctx context.Context, msg messageObject) {
+	if r.sched == nil {
+		r.notify(ctx, msg.PeerID, scheduleDisabledText)
+		return
+	}
+	args := commandArgs(msg.Text)
+	reply := r.sched.Dispatch(chatIDStr(msg.PeerID), msg.FromID, args)
+	r.notify(ctx, msg.PeerID, reply)
 }
 
 // commandName parses the reserved-command name from a VK message: it trims the
@@ -392,6 +421,19 @@ func commandName(text string) string {
 // VK command token (space, tab, newline, carriage return).
 func isSpace(r rune) bool {
 	return r == ' ' || r == '\t' || r == '\n' || r == '\r'
+}
+
+// commandArgs returns the text following the leading "/command" token of a
+// slash-command message, i.e. the arguments. It drops the first whitespace-
+// delimited token (the command itself) and trims the surrounding whitespace, so
+// "/schedule add x" yields "add x" and a bare "/schedule" yields "". VK has no
+// @botname suffix to strip.
+func commandArgs(text string) string {
+	text = strings.TrimSpace(text)
+	if i := strings.IndexFunc(text, isSpace); i >= 0 {
+		return strings.TrimSpace(text[i+1:])
+	}
+	return ""
 }
 
 // handleVoice downloads + transcribes a voice attachment and submits the
