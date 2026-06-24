@@ -99,6 +99,11 @@ func TestTeamConfigDefaults(t *testing.T) {
 	if cfg.TeamTemplatePath != "/opt/duck/CLAUDE.workspace.md.tmpl" || cfg.TeamAgentsDir != "/opt/duck/agents" {
 		t.Fatalf("team source defaults = %q/%q", cfg.TeamTemplatePath, cfg.TeamAgentsDir)
 	}
+	// The scheduler is ON by default (durable per-chat cron jobs work out of the
+	// box); ENABLE_SCHEDULER=false is the explicit off switch.
+	if !cfg.SchedulerEnabled() {
+		t.Fatal("SchedulerEnabled default = false, want true (scheduler on by default)")
+	}
 	// REQUIRE_GROUP_MENTION defaults to false to match the Python adapter's
 	// .env.example / mention_gate.py (answer every group message by default).
 	if cfg.RequireGroupMention {
