@@ -19,8 +19,8 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"github.com/duckbugio/flock/adapters/telegram"
+	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/chat"
-	"github.com/duckbugio/flock/core/claude"
 	"github.com/duckbugio/flock/core/dispatch"
 	"github.com/duckbugio/flock/internal/config"
 )
@@ -33,16 +33,16 @@ type recordingRunner struct {
 	images  []int
 }
 
-func (r *recordingRunner) Run(ctx context.Context, prompt string, o claude.Options) (<-chan claude.Event, error) {
+func (r *recordingRunner) Run(ctx context.Context, prompt string, o agent.Options) (<-chan agent.Event, error) {
 	r.mu.Lock()
 	r.prompts = append(r.prompts, prompt)
 	r.images = append(r.images, len(o.Images))
 	r.mu.Unlock()
-	out := make(chan claude.Event)
+	out := make(chan agent.Event)
 	go func() {
 		defer close(out)
 		select {
-		case out <- claude.Event{Type: claude.Result, Result: &claude.RunResult{Text: "done"}}:
+		case out <- agent.Event{Type: agent.Result, Result: &agent.RunResult{Text: "done"}}:
 		case <-ctx.Done():
 		}
 	}()

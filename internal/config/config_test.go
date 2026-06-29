@@ -4,6 +4,8 @@ package config
 import (
 	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -719,5 +721,198 @@ func TestStarNudgeEnabled(t *testing.T) {
 		if c.StarNudgeEnabled() {
 			t.Errorf("StarNudgeEnabled() = true for %q, want false", tt.name)
 		}
+	}
+}
+
+func TestAIBackendName(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		backend   string
+		want      string
+		wantKnown bool
+	}{
+		{name: "empty defaults claude", want: "claude", wantKnown: true},
+		{name: "claude", backend: "claude", want: "claude", wantKnown: true},
+		{name: "codex", backend: "codex", want: "codex", wantKnown: true},
+		{name: "openai-compatible", backend: "openai-compatible", want: "openai-compatible", wantKnown: true},
+		{name: "case and whitespace", backend: "  CoDeX  ", want: "codex", wantKnown: true},
+		{name: "unknown falls back", backend: "llama", want: "claude", wantKnown: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := Config{AIBackend: tt.backend}
+			got, known := c.AIBackendName()
+			if got != tt.want || known != tt.wantKnown {
+				t.Fatalf("AIBackendName(%q) = %q,%v; want %q,%v", tt.backend, got, known, tt.want, tt.wantKnown)
+			}
+		})
+	}
+}
+
+func TestCodexConfigDefaults(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "token")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if got, ok := cfg.AIBackendName(); got != "claude" || !ok {
+		t.Fatalf("AIBackendName default = %q,%v; want claude,true", got, ok)
+	}
+	if cfg.CodexBin != "codex" {
+		t.Errorf("CodexBin default = %q, want codex", cfg.CodexBin)
+	}
+	if cfg.CodexModel != "gpt-5.5" {
+		t.Errorf("CodexModel default = %q, want gpt-5.5", cfg.CodexModel)
+	}
+	if cfg.CodexHome != "/home/claude/.codex" {
+		t.Errorf("CodexHome default = %q, want /home/claude/.codex", cfg.CodexHome)
+	}
+	if cfg.CodexAuthMode != "subscription" {
+		t.Errorf("CodexAuthMode default = %q, want subscription", cfg.CodexAuthMode)
+	}
+	if !cfg.CodexRequireAuth {
+		t.Error("CodexRequireAuth default = false, want true")
+	}
+	if cfg.CodexSandbox != "workspace-write" {
+		t.Errorf("CodexSandbox default = %q, want workspace-write", cfg.CodexSandbox)
+	}
+	if cfg.CodexApprovalPolicy != "never" {
+		t.Errorf("CodexApprovalPolicy default = %q, want never", cfg.CodexApprovalPolicy)
+	}
+}
+
+func TestValidateCodexSubscriptionRejectsAPIKey(t *testing.T) {
+	c := Config{
+		AIBackend:        "codex",
+		CodexAuthMode:    "subscription",
+		CodexAPIKey:      "sk-test",
+		CodexRequireAuth: false,
+	}
+	if err := c.ValidateCodex(); !errors.Is(err, ErrCodexSubscriptionWithAPIKey) {
+		t.Fatalf("ValidateCodex() = %v, want ErrCodexSubscriptionWithAPIKey", err)
+	}
+}
+
+func TestValidateCodexBillingRequiresExplicitAck(t *testing.T) {
+	c := Config{
+		AIBackend:     "codex",
+		CodexAuthMode: "billing",
+		CodexAPIKey:   "sk-test",
+	}
+	if err := c.ValidateCodex(); !errors.Is(err, ErrCodexBillingAckRequired) {
+		t.Fatalf("ValidateCodex() = %v, want ErrCodexBillingAckRequired", err)
+	}
+
+	c.CodexBillingAck = true
+	if err := c.ValidateCodex(); err != nil {
+		t.Fatalf("ValidateCodex() with ack = %v, want nil", err)
+	}
+}
+
+func TestValidateCodexBillingRequiresAPIKey(t *testing.T) {
+	c := Config{
+		AIBackend:        "codex",
+		CodexAuthMode:    "billing",
+		CodexBillingAck:  true,
+		CodexRequireAuth: false,
+	}
+	if err := c.ValidateCodex(); !errors.Is(err, ErrCodexBillingAPIKeyRequired) {
+		t.Fatalf("ValidateCodex() = %v, want ErrCodexBillingAPIKeyRequired", err)
+	}
+}
+
+func TestValidateCodexSubscriptionAuthSources(t *testing.T) {
+	home := t.TempDir()
+	c := Config{
+		AIBackend:        "codex",
+		CodexAuthMode:    "subscription",
+		CodexHome:        home,
+		CodexRequireAuth: true,
+	}
+	if err := c.ValidateCodex(); !errors.Is(err, ErrCodexSubscriptionAuthRequired) {
+		t.Fatalf("ValidateCodex() without auth = %v, want ErrCodexSubscriptionAuthRequired", err)
+	}
+
+	c.CodexAccessToken = "access-token"
+	if err := c.ValidateCodex(); err != nil {
+		t.Fatalf("ValidateCodex() with access token = %v, want nil", err)
+	}
+
+	c.CodexAccessToken = ""
+	if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte(`{"ok":true}`), 0o600); err != nil {
+		t.Fatalf("write auth.json: %v", err)
+	}
+	if err := c.ValidateCodex(); err != nil {
+		t.Fatalf("ValidateCodex() with auth.json = %v, want nil", err)
+	}
+}
+
+func TestOpenAICompatConfigDefaults(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "token")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.OpenAICompatAuthMode != "api_key" {
+		t.Errorf("OpenAICompatAuthMode default = %q, want api_key", cfg.OpenAICompatAuthMode)
+	}
+	if cfg.OpenAICompatAPIKeyEnv != "OPENAI_COMPAT_API_KEY" {
+		t.Errorf("OpenAICompatAPIKeyEnv default = %q, want OPENAI_COMPAT_API_KEY", cfg.OpenAICompatAPIKeyEnv)
+	}
+	if cfg.OpenAICompatTimeoutSeconds != 300 {
+		t.Errorf("OpenAICompatTimeoutSeconds default = %d, want 300", cfg.OpenAICompatTimeoutSeconds)
+	}
+}
+
+func TestValidateOpenAICompatRequiresBaseURLAndModel(t *testing.T) {
+	c := Config{
+		AIBackend:                  "openai-compatible",
+		OpenAICompatAuthMode:       "api_key",
+		OpenAICompatAPIKey:         "sk-test",
+		OpenAICompatBillingAck:     true,
+		OpenAICompatTimeoutSeconds: 300,
+	}
+	if err := c.ValidateOpenAICompat(); !errors.Is(err, ErrOpenAICompatBaseURLRequired) {
+		t.Fatalf("ValidateOpenAICompat() = %v, want ErrOpenAICompatBaseURLRequired", err)
+	}
+	c.OpenAICompatBaseURL = "https://example.test/v1"
+	if err := c.ValidateOpenAICompat(); !errors.Is(err, ErrOpenAICompatModelRequired) {
+		t.Fatalf("ValidateOpenAICompat() = %v, want ErrOpenAICompatModelRequired", err)
+	}
+}
+
+func TestValidateOpenAICompatBillingRequiresAckAndKey(t *testing.T) {
+	c := Config{
+		AIBackend:            "openai-compatible",
+		OpenAICompatBaseURL:  "https://example.test/v1",
+		OpenAICompatModel:    "qwen-plus",
+		OpenAICompatAuthMode: "api_key",
+	}
+	if err := c.ValidateOpenAICompat(); !errors.Is(err, ErrOpenAICompatAPIKeyRequired) {
+		t.Fatalf("ValidateOpenAICompat() = %v, want ErrOpenAICompatAPIKeyRequired", err)
+	}
+
+	c.OpenAICompatAPIKey = "sk-test"
+	if err := c.ValidateOpenAICompat(); !errors.Is(err, ErrOpenAICompatBillingAckRequired) {
+		t.Fatalf("ValidateOpenAICompat() = %v, want ErrOpenAICompatBillingAckRequired", err)
+	}
+
+	c.OpenAICompatBillingAck = true
+	if err := c.ValidateOpenAICompat(); err != nil {
+		t.Fatalf("ValidateOpenAICompat() with ack = %v, want nil", err)
+	}
+}
+
+func TestValidateOpenAICompatAcceptsAPIKeyFromNamedEnv(t *testing.T) {
+	t.Setenv("DASHSCOPE_API_KEY", "dashscope-key")
+	c := Config{
+		AIBackend:              "openai-compatible",
+		OpenAICompatBaseURL:    "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+		OpenAICompatModel:      "qwen-plus",
+		OpenAICompatAuthMode:   "api_key",
+		OpenAICompatAPIKeyEnv:  "DASHSCOPE_API_KEY",
+		OpenAICompatBillingAck: true,
+	}
+	if err := c.ValidateOpenAICompat(); err != nil {
+		t.Fatalf("ValidateOpenAICompat() with env key = %v, want nil", err)
 	}
 }

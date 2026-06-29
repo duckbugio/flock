@@ -9,14 +9,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/duckbugio/flock/core/claude"
+	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/cost"
 	"github.com/duckbugio/flock/core/dispatch"
 )
 
 // newTestServiceWithCosts builds a Service wired to a real cost store so the
 // post-run cost-record hook can be exercised end to end.
-func newTestServiceWithCosts(t *testing.T, r claude.Runner, c Transport, costs *cost.Store) (*Service, *dispatch.Dispatcher) {
+func newTestServiceWithCosts(t *testing.T, r agent.Runner, c Transport, costs *cost.Store) (*Service, *dispatch.Dispatcher) {
 	t.Helper()
 	d := dispatch.New(4)
 	s := New(Config{
@@ -35,8 +35,8 @@ func newTestServiceWithCosts(t *testing.T, r claude.Runner, c Transport, costs *
 // its CostUSD against the sending user (the per-user cumulative cap input).
 func TestRunRecordsCostOnResult(t *testing.T) {
 	fc := newFakeChat()
-	fr := &fakeRunner{events: []claude.Event{
-		{Type: claude.Result, Result: &claude.RunResult{Text: "done", CostUSD: 0.5}},
+	fr := &fakeRunner{events: []agent.Event{
+		{Type: agent.Result, Result: &agent.RunResult{Text: "done", CostUSD: 0.5}},
 	}}
 	costs, err := cost.Open(t.TempDir() + "/costs.json")
 	if err != nil {
@@ -64,8 +64,8 @@ func TestRunRecordsCostOnResult(t *testing.T) {
 // (finalResult is nil), so a failed run never charges the user.
 func TestRunRecordsZeroCostOnError(t *testing.T) {
 	fc := newFakeChat()
-	fr := &fakeRunner{events: []claude.Event{
-		{Type: claude.RunError, Err: errors.New("boom")},
+	fr := &fakeRunner{events: []agent.Event{
+		{Type: agent.RunError, Err: errors.New("boom")},
 	}}
 	costs, err := cost.Open(t.TempDir() + "/costs.json")
 	if err != nil {
@@ -93,7 +93,7 @@ func TestRunRecordsZeroCostOnError(t *testing.T) {
 // InjectScheduled tests, which assert the cost gate and the ephemeral (no-marker)
 // behavior together.
 func newScheduledTestService(
-	t *testing.T, r claude.Runner, c Transport, costs *cost.Store, capUSD float64, p pendingStore,
+	t *testing.T, r agent.Runner, c Transport, costs *cost.Store, capUSD float64, p pendingStore,
 ) (*Service, *dispatch.Dispatcher) {
 	t.Helper()
 	d := dispatch.New(4)
@@ -116,8 +116,8 @@ func newScheduledTestService(
 // NO pending marker (it must never auto-resume on restart).
 func TestInjectScheduledUnderCapRunsEphemerally(t *testing.T) {
 	fc := newFakeChat()
-	fr := &fakeRunner{events: []claude.Event{
-		{Type: claude.Result, Result: &claude.RunResult{Text: "scheduled done", CostUSD: 0.1}},
+	fr := &fakeRunner{events: []agent.Event{
+		{Type: agent.Result, Result: &agent.RunResult{Text: "scheduled done", CostUSD: 0.1}},
 	}}
 	costs, err := cost.Open(t.TempDir() + "/costs.json")
 	if err != nil {
@@ -150,8 +150,8 @@ func TestInjectScheduledUnderCapRunsEphemerally(t *testing.T) {
 // over the cost cap is denied (returns false), runs nothing, and writes no marker.
 func TestInjectScheduledOverCapDropsRun(t *testing.T) {
 	fc := newFakeChat()
-	fr := &fakeRunner{events: []claude.Event{
-		{Type: claude.Result, Result: &claude.RunResult{Text: "must not run", CostUSD: 0.1}},
+	fr := &fakeRunner{events: []agent.Event{
+		{Type: agent.Result, Result: &agent.RunResult{Text: "must not run", CostUSD: 0.1}},
 	}}
 	costs, err := cost.Open(t.TempDir() + "/costs.json")
 	if err != nil {

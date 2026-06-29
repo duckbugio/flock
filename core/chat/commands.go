@@ -1,6 +1,6 @@
 package chat
 
-// NewSession resets the calling chat's stored Claude session so the next message
+// NewSession resets the calling chat's stored provider session so the next message
 // starts a brand-new conversation with no --resume. It delegates to the session
 // store's Delete, which treats an absent chat as a harmless no-op. A nil store
 // (continuity disabled) is also a no-op: there is nothing to reset, and the next

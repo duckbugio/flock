@@ -19,8 +19,9 @@ services:
 {% endif %}
     volumes:
       - claude_home:/home/claude/.claude   # sessions + auth state (named -> uid 1000)
+      - codex_home:/home/claude/.codex     # Codex sessions + auth state (named -> uid 1000)
       - bot_data:/app/data                 # sqlite db
-      - workspace:{{ approved_directory }} # where Claude reads/edits code (CLAUDE.md + agents baked into the image, rendered on start)
+      - workspace:{{ approved_directory }} # where the AI backend reads/edits code (CLAUDE.md + agents baked into the image, rendered on start)
     mem_limit: {{ container_mem_limit }}
     logging:
       driver: json-file
@@ -65,6 +66,9 @@ volumes:
   claude_home:
     external: true
     name: {{ legacy_volume_project }}_claude_home
+  codex_home:
+    # New with the Codex backend: managed by the current compose project even
+    # when older Claude/workspace volumes are reused from legacy_volume_project.
   bot_data:
     external: true
     name: {{ legacy_volume_project }}_bot_data
@@ -86,6 +90,7 @@ volumes:
 {% endif %}
 {% else %}
   claude_home:
+  codex_home:
   bot_data:
   workspace:
 {% if enable_dind %}

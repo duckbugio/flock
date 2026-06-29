@@ -10,8 +10,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/chat"
-	"github.com/duckbugio/flock/core/claude"
 	"github.com/duckbugio/flock/core/schedule"
 )
 
@@ -29,7 +29,7 @@ type fakeService struct {
 type handleCall struct {
 	chatID, msgID, prompt string
 	userID                int64
-	images                []claude.ImageInput
+	images                []agent.ImageInput
 }
 
 func (f *fakeService) Handle(_ context.Context, chatID chat.ChatID, userID int64, msgID chat.MessageID, prompt string) {
@@ -39,7 +39,7 @@ func (f *fakeService) Handle(_ context.Context, chatID chat.ChatID, userID int64
 }
 
 func (f *fakeService) HandleMedia(
-	_ context.Context, chatID chat.ChatID, userID int64, msgID chat.MessageID, prompt string, images []claude.ImageInput,
+	_ context.Context, chatID chat.ChatID, userID int64, msgID chat.MessageID, prompt string, images []agent.ImageInput,
 ) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

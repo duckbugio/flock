@@ -15,7 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/duckbugio/flock/core/claude"
+	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/dispatch"
 	"github.com/duckbugio/flock/core/pending"
 	"github.com/duckbugio/flock/core/session"
@@ -210,12 +210,12 @@ func (w *fakeWorkspace) Ensure(chatID ChatID) (string, error) {
 // When gate is non-nil it waits on it (or ctx.Done) before sending the terminal
 // event, letting a test cancel the context mid-run.
 type fakeRunner struct {
-	events []claude.Event
+	events []agent.Event
 	gate   chan struct{} // if non-nil, wait for close before the terminal event
 }
 
-func (r *fakeRunner) Run(ctx context.Context, _ string, _ claude.Options) (<-chan claude.Event, error) {
-	out := make(chan claude.Event)
+func (r *fakeRunner) Run(ctx context.Context, _ string, _ agent.Options) (<-chan agent.Event, error) {
+	out := make(chan agent.Event)
 	go func() {
 		defer close(out)
 		for _, e := range r.events {
@@ -410,7 +410,7 @@ func (f *fakePending) removes() []ChatID {
 // newTestServiceWithPending builds a Service wired to a pending store (and a fake
 // session store) over a real Dispatcher, for the interrupted-run marker tests.
 func newTestServiceWithPending(
-	t *testing.T, r claude.Runner, c Transport, p pendingStore,
+	t *testing.T, r agent.Runner, c Transport, p pendingStore,
 ) (*Service, *dispatch.Dispatcher) {
 	t.Helper()
 	d := dispatch.New(4)
@@ -427,7 +427,7 @@ func newTestServiceWithPending(
 }
 
 // newTestService builds a Service over a real Dispatcher and a fake workspace.
-func newTestService(t *testing.T, r claude.Runner, c Transport) (*Service, *dispatch.Dispatcher) {
+func newTestService(t *testing.T, r agent.Runner, c Transport) (*Service, *dispatch.Dispatcher) {
 	t.Helper()
 	d := dispatch.New(4)
 	s := New(Config{
@@ -444,7 +444,7 @@ func newTestService(t *testing.T, r claude.Runner, c Transport) (*Service, *disp
 // newTestServiceWithSessions builds a Service wired to a session store (and an
 // optional per-run timeout) for the Stage 5 continuity/timeout tests.
 func newTestServiceWithSessions(
-	t *testing.T, r claude.Runner, c Transport, sess sessionStore, timeout time.Duration,
+	t *testing.T, r agent.Runner, c Transport, sess sessionStore, timeout time.Duration,
 ) (*Service, *dispatch.Dispatcher) {
 	t.Helper()
 	d := dispatch.New(4)
@@ -473,15 +473,15 @@ type sessionRunner struct {
 	gate      chan struct{} // if non-nil, block after SystemInit until closed/cancelled
 }
 
-func (r *sessionRunner) Run(ctx context.Context, _ string, o claude.Options) (<-chan claude.Event, error) {
+func (r *sessionRunner) Run(ctx context.Context, _ string, o agent.Options) (<-chan agent.Event, error) {
 	r.mu.Lock()
 	r.gotIDs = append(r.gotIDs, o.SessionID)
 	r.mu.Unlock()
 
-	out := make(chan claude.Event)
+	out := make(chan agent.Event)
 	go func() {
 		defer close(out)
-		if !emit(ctx, out, claude.Event{Type: claude.SystemInit, SessionID: r.emitInit}) {
+		if !emit(ctx, out, agent.Event{Type: agent.SystemInit, SessionID: r.emitInit}) {
 			return
 		}
 		if r.gate != nil {
@@ -491,7 +491,7 @@ func (r *sessionRunner) Run(ctx context.Context, _ string, o claude.Options) (<-
 				return // cancelled/timed out after SystemInit, before Result
 			}
 		}
-		emit(ctx, out, claude.Event{Type: claude.Result, Result: &claude.RunResult{Text: "done", SessionID: r.emitFinal}})
+		emit(ctx, out, agent.Event{Type: agent.Result, Result: &agent.RunResult{Text: "done", SessionID: r.emitFinal}})
 	}()
 	return out, nil
 }
@@ -503,7 +503,7 @@ func (r *sessionRunner) ids() []string {
 }
 
 // emit mirrors the run loop's blocking-send-or-cancel for the fake runner.
-func emit(ctx context.Context, out chan<- claude.Event, e claude.Event) bool {
+func emit(ctx context.Context, out chan<- agent.Event, e agent.Event) bool {
 	select {
 	case out <- e:
 		return true
@@ -514,11 +514,11 @@ func emit(ctx context.Context, out chan<- claude.Event, e claude.Event) bool {
 
 func TestRunRendersProgressThenFinal(t *testing.T) {
 	fc := newFakeChat()
-	fr := &fakeRunner{events: []claude.Event{
-		{Type: claude.SystemInit, SessionID: "s1"},
-		{Type: claude.ToolUse, Tool: "Bash"},
-		{Type: claude.Text, Text: "all done"},
-		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer, SessionID: "s1"}},
+	fr := &fakeRunner{events: []agent.Event{
+		{Type: agent.SystemInit, SessionID: "s1"},
+		{Type: agent.ToolUse, Tool: "Bash"},
+		{Type: agent.Text, Text: "all done"},
+		{Type: agent.Result, Result: &agent.RunResult{Text: finalAnswer, SessionID: "s1"}},
 	}}
 	svc, d := newTestService(t, fr, fc)
 	defer d.Close()
@@ -539,10 +539,10 @@ func TestRunRendersProgressThenFinal(t *testing.T) {
 // shows a second "Working…" bubble beside the anchor.
 func TestRunDeliversSingleProgressBubble(t *testing.T) {
 	fc := newFakeChat()
-	fr := &fakeRunner{events: []claude.Event{
-		{Type: claude.SystemInit, SessionID: "s1"},
-		{Type: claude.ToolUse, Tool: "Bash"},
-		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer, SessionID: "s1"}},
+	fr := &fakeRunner{events: []agent.Event{
+		{Type: agent.SystemInit, SessionID: "s1"},
+		{Type: agent.ToolUse, Tool: "Bash"},
+		{Type: agent.Result, Result: &agent.RunResult{Text: finalAnswer, SessionID: "s1"}},
 	}}
 	svc, d := newTestService(t, fr, fc)
 	defer d.Close()
@@ -604,7 +604,7 @@ func TestProgressEditsRespectMinInterval(t *testing.T) {
 	fc := newFakeChat()
 	gate := make(chan struct{})
 	fr := &fakeRunner{
-		events: []claude.Event{{Type: claude.ToolUse, Tool: "Bash"}},
+		events: []agent.Event{{Type: agent.ToolUse, Tool: "Bash"}},
 		gate:   gate, // keep the run in flight while we drive ticks/clock
 	}
 	svc, d := newTestService(t, fr, fc)
@@ -674,8 +674,8 @@ func TestProgressEditsRespectMinInterval(t *testing.T) {
 func TestRunChunksLongFinal(t *testing.T) {
 	long := strings.Repeat("x", TelegramMaxMessage+500)
 	fc := newFakeChat()
-	fr := &fakeRunner{events: []claude.Event{
-		{Type: claude.Result, Result: &claude.RunResult{Text: long}},
+	fr := &fakeRunner{events: []agent.Event{
+		{Type: agent.Result, Result: &agent.RunResult{Text: long}},
 	}}
 	svc, d := newTestService(t, fr, fc)
 	defer d.Close()
@@ -722,8 +722,8 @@ func (f *fakeChat) noticeCount(sub string) int {
 // fires exactly once, distinct from the edited answer bubble.
 func TestCompletionNoticeOnResult(t *testing.T) {
 	fc := newFakeChat()
-	fr := &fakeRunner{events: []claude.Event{
-		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer}},
+	fr := &fakeRunner{events: []agent.Event{
+		{Type: agent.Result, Result: &agent.RunResult{Text: finalAnswer}},
 	}}
 	svc, d := newTestService(t, fr, fc)
 	defer d.Close()
@@ -755,7 +755,7 @@ func TestCompletionNoticeFormatsTotal(t *testing.T) {
 	fc := newFakeChat()
 	gate := make(chan struct{})
 	fr := &fakeRunner{
-		events: []claude.Event{{Type: claude.ToolUse, Tool: "Bash"}},
+		events: []agent.Event{{Type: agent.ToolUse, Tool: "Bash"}},
 		gate:   gate,
 	}
 	svc, d := newTestService(t, fr, fc)
@@ -786,8 +786,8 @@ func TestCompletionNoticeFormatsTotal(t *testing.T) {
 // "Failed" completion notice as a separate Send.
 func TestCompletionNoticeOnRunError(t *testing.T) {
 	fc := newFakeChat()
-	fr := &fakeRunner{events: []claude.Event{
-		{Type: claude.RunError, Err: errors.New("boom")},
+	fr := &fakeRunner{events: []agent.Event{
+		{Type: agent.RunError, Err: errors.New("boom")},
 	}}
 	svc, d := newTestService(t, fr, fc)
 	defer d.Close()
@@ -806,7 +806,7 @@ func TestCompletionNoticeOnStop(t *testing.T) {
 	fc := newFakeChat()
 	gate := make(chan struct{})
 	fr := &fakeRunner{
-		events: []claude.Event{{Type: claude.ToolUse, Tool: "Bash"}},
+		events: []agent.Event{{Type: agent.ToolUse, Tool: "Bash"}},
 		gate:   gate,
 	}
 	svc, d := newTestService(t, fr, fc)
@@ -829,15 +829,15 @@ func TestCompletionNoticeStatusWords(t *testing.T) {
 	const total = 4*time.Minute + 12*time.Second
 	tests := []struct {
 		name     string
-		res      *claude.RunResult
+		res      *agent.RunResult
 		runErr   error
 		ctxErr   error
 		resuming bool
 		want     string
 	}{
-		{"clean result", &claude.RunResult{}, nil, nil, false, "✅ Done in 4m 12s"},
+		{"clean result", &agent.RunResult{}, nil, nil, false, "✅ Done in 4m 12s"},
 		{"run error", nil, errors.New("boom"), nil, false, "⚠️ Failed after 4m 12s"},
-		{"is_error result", &claude.RunResult{IsError: true}, nil, nil, false, "⚠️ Failed after 4m 12s"},
+		{"is_error result", &agent.RunResult{IsError: true}, nil, nil, false, "⚠️ Failed after 4m 12s"},
 		{"user stop", nil, nil, context.Canceled, false, "⏹ Stopped after 4m 12s"},
 		{"deploy shutdown resumes", nil, nil, context.Canceled, true, "⏳ Paused after 4m 12s — will resume after restart"},
 	}
@@ -855,8 +855,8 @@ func TestCompletionNoticeStatusWords(t *testing.T) {
 // answer/anchor message id (the progress bubble the bot edited into the answer).
 func TestCompletionNoticeRepliesToAnswer(t *testing.T) {
 	fc := newFakeChat()
-	fr := &fakeRunner{events: []claude.Event{
-		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer}},
+	fr := &fakeRunner{events: []agent.Event{
+		{Type: agent.Result, Result: &agent.RunResult{Text: finalAnswer}},
 	}}
 	svc, d := newTestService(t, fr, fc)
 	defer d.Close()
@@ -885,8 +885,8 @@ func TestCompletionNoticeRepliesToAnswer(t *testing.T) {
 func TestCompletionNoticeRepliesToResentAnswer(t *testing.T) {
 	fc := newFakeChat()
 	fc.editErr = errors.New("edit boom") // every Edit fails → final edit triggers delete+resend
-	fr := &fakeRunner{events: []claude.Event{
-		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer}},
+	fr := &fakeRunner{events: []agent.Event{
+		{Type: agent.Result, Result: &agent.RunResult{Text: finalAnswer}},
 	}}
 	svc, d := newTestService(t, fr, fc)
 	defer d.Close()
@@ -928,8 +928,8 @@ func TestCompletionNoticeSentPlainWhenNoAnswerID(t *testing.T) {
 	// answerMsgID is never established; the third Send (the notice) succeeds.
 	fc.sendErr = errors.New("send boom")
 	fc.sendFailN = 2
-	fr := &fakeRunner{events: []claude.Event{
-		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer}},
+	fr := &fakeRunner{events: []agent.Event{
+		{Type: agent.Result, Result: &agent.RunResult{Text: finalAnswer}},
 	}}
 	svc, d := newTestService(t, fr, fc)
 	defer d.Close()
@@ -948,8 +948,8 @@ func TestCompletionNoticeSentPlainWhenNoAnswerID(t *testing.T) {
 
 func TestRunErrorEvent(t *testing.T) {
 	fc := newFakeChat()
-	fr := &fakeRunner{events: []claude.Event{
-		{Type: claude.RunError, Err: errors.New("boom")},
+	fr := &fakeRunner{events: []agent.Event{
+		{Type: agent.RunError, Err: errors.New("boom")},
 	}}
 	svc, d := newTestService(t, fr, fc)
 	defer d.Close()
@@ -965,7 +965,7 @@ func TestStopCancelsRun(t *testing.T) {
 	fc := newFakeChat()
 	gate := make(chan struct{})
 	fr := &fakeRunner{
-		events: []claude.Event{{Type: claude.ToolUse, Tool: "Bash"}},
+		events: []agent.Event{{Type: agent.ToolUse, Tool: "Bash"}},
 		gate:   gate, // run hangs after the tool_use until ctx is cancelled
 	}
 	svc, d := newTestService(t, fr, fc)
@@ -1048,11 +1048,11 @@ type recordingRunner struct {
 	gate    chan struct{} // closed by the test to let runs finish
 }
 
-func (r *recordingRunner) Run(ctx context.Context, prompt string, _ claude.Options) (<-chan claude.Event, error) {
+func (r *recordingRunner) Run(ctx context.Context, prompt string, _ agent.Options) (<-chan agent.Event, error) {
 	r.mu.Lock()
 	r.prompts = append(r.prompts, prompt)
 	r.mu.Unlock()
-	out := make(chan claude.Event)
+	out := make(chan agent.Event)
 	go func() {
 		defer close(out)
 		// Hang until released or cancelled (an edit supersede cancels the ctx).
@@ -1061,7 +1061,7 @@ func (r *recordingRunner) Run(ctx context.Context, prompt string, _ claude.Optio
 		case <-ctx.Done():
 			return
 		}
-		out <- claude.Event{Type: claude.Result, Result: &claude.RunResult{Text: "done: " + prompt}}
+		out <- agent.Event{Type: agent.Result, Result: &agent.RunResult{Text: "done: " + prompt}}
 	}()
 	return out, nil
 }
@@ -1348,9 +1348,9 @@ func TestPendingMarkerSetAtSubmit(t *testing.T) {
 func TestPendingMarkerClearedOnNormalFinish(t *testing.T) {
 	fc := newFakeChat()
 	pend := newFakePending()
-	fr := &fakeRunner{events: []claude.Event{
-		{Type: claude.SystemInit, SessionID: "s1"},
-		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer, SessionID: "s1"}},
+	fr := &fakeRunner{events: []agent.Event{
+		{Type: agent.SystemInit, SessionID: "s1"},
+		{Type: agent.Result, Result: &agent.RunResult{Text: finalAnswer, SessionID: "s1"}},
 	}}
 	svc, d := newTestServiceWithPending(t, fr, fc, pend)
 	defer d.Close()
@@ -1419,7 +1419,7 @@ func TestPendingMarkerSurvivesShutdown(t *testing.T) {
 // newTestServiceWithPending but injects a Timeout so a gated run hits the per-run
 // deadline (cause context.DeadlineExceeded, NOT dispatch.ErrShutdown).
 func newTestServiceWithPendingTimeout(
-	t *testing.T, r claude.Runner, c Transport, p pendingStore, timeout time.Duration,
+	t *testing.T, r agent.Runner, c Transport, p pendingStore, timeout time.Duration,
 ) (*Service, *dispatch.Dispatcher) {
 	t.Helper()
 	d := dispatch.New(4)
@@ -1481,7 +1481,7 @@ type spawnErrorRunner struct {
 	block chan struct{}
 }
 
-func (r *spawnErrorRunner) Run(ctx context.Context, _ string, _ claude.Options) (<-chan claude.Event, error) {
+func (r *spawnErrorRunner) Run(ctx context.Context, _ string, _ agent.Options) (<-chan agent.Event, error) {
 	if r.block != nil {
 		select {
 		case <-r.block:
@@ -1591,14 +1591,14 @@ type resultThenBlockRunner struct {
 	delivered chan struct{} // closed after the Result has been consumed
 }
 
-func (r *resultThenBlockRunner) Run(ctx context.Context, _ string, _ claude.Options) (<-chan claude.Event, error) {
-	out := make(chan claude.Event)
+func (r *resultThenBlockRunner) Run(ctx context.Context, _ string, _ agent.Options) (<-chan agent.Event, error) {
+	out := make(chan agent.Event)
 	go func() {
 		defer close(out)
-		if !emit(ctx, out, claude.Event{Type: claude.SystemInit, SessionID: "s1"}) {
+		if !emit(ctx, out, agent.Event{Type: agent.SystemInit, SessionID: "s1"}) {
 			return
 		}
-		if !emit(ctx, out, claude.Event{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer, SessionID: "s1"}}) {
+		if !emit(ctx, out, agent.Event{Type: agent.Result, Result: &agent.RunResult{Text: finalAnswer, SessionID: "s1"}}) {
 			return
 		}
 		// The Result is now in the event loop's hands (unbuffered send returned):
@@ -1705,9 +1705,9 @@ func TestPendingStopClearsLane(t *testing.T) {
 func TestResumePendingReusesIDNoDuplicate(t *testing.T) {
 	fc := newFakeChat()
 	pend := newFakePending()
-	fr := &fakeRunner{events: []claude.Event{
-		{Type: claude.SystemInit, SessionID: "s1"},
-		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer, SessionID: "s1"}},
+	fr := &fakeRunner{events: []agent.Event{
+		{Type: agent.SystemInit, SessionID: "s1"},
+		{Type: agent.Result, Result: &agent.RunResult{Text: finalAnswer, SessionID: "s1"}},
 	}}
 	svc, d := newTestServiceWithPending(t, fr, fc, pend)
 	defer d.Close()
@@ -1744,16 +1744,16 @@ type errorResultRunner struct {
 	isError bool
 }
 
-func (r *errorResultRunner) Run(ctx context.Context, _ string, _ claude.Options) (<-chan claude.Event, error) {
-	out := make(chan claude.Event)
+func (r *errorResultRunner) Run(ctx context.Context, _ string, _ agent.Options) (<-chan agent.Event, error) {
+	out := make(chan agent.Event)
 	go func() {
 		defer close(out)
 		if r.init != "" {
-			if !emit(ctx, out, claude.Event{Type: claude.SystemInit, SessionID: r.init}) {
+			if !emit(ctx, out, agent.Event{Type: agent.SystemInit, SessionID: r.init}) {
 				return
 			}
 		}
-		emit(ctx, out, claude.Event{Type: claude.Result, Result: &claude.RunResult{
+		emit(ctx, out, agent.Event{Type: agent.Result, Result: &agent.RunResult{
 			Text:      "done",
 			SessionID: r.init,
 			IsError:   r.isError,
@@ -1766,14 +1766,14 @@ func (r *errorResultRunner) Run(ctx context.Context, _ string, _ claude.Options)
 // a process/transport crash, distinct from an is_error Result.
 type runErrorRunner struct{ init string }
 
-func (r *runErrorRunner) Run(ctx context.Context, _ string, _ claude.Options) (<-chan claude.Event, error) {
-	out := make(chan claude.Event)
+func (r *runErrorRunner) Run(ctx context.Context, _ string, _ agent.Options) (<-chan agent.Event, error) {
+	out := make(chan agent.Event)
 	go func() {
 		defer close(out)
-		if !emit(ctx, out, claude.Event{Type: claude.SystemInit, SessionID: r.init}) {
+		if !emit(ctx, out, agent.Event{Type: agent.SystemInit, SessionID: r.init}) {
 			return
 		}
-		emit(ctx, out, claude.Event{Type: claude.RunError, Err: errors.New("transport crash")})
+		emit(ctx, out, agent.Event{Type: agent.RunError, Err: errors.New("transport crash")})
 	}()
 	return out, nil
 }
@@ -1899,7 +1899,7 @@ func (f fixedOutbox) OutboxDir(ChatID) (string, error) { return f.dir, nil }
 // newTestServiceWithOutbox builds a Service wired to a Sweeper over a fixed
 // outbox dir (and an optional per-run timeout) for the AC2 finish-path tests.
 func newTestServiceWithOutbox(
-	t *testing.T, r claude.Runner, c Transport, dir string, timeout time.Duration,
+	t *testing.T, r agent.Runner, c Transport, dir string, timeout time.Duration,
 ) (*Service, *dispatch.Dispatcher) {
 	t.Helper()
 	d := dispatch.New(4)
@@ -1924,8 +1924,8 @@ func TestOutboxSweptOnNormalResult(t *testing.T) {
 		t.Fatalf("seed outbox: %v", err)
 	}
 	fc := newFakeChat()
-	fr := &fakeRunner{events: []claude.Event{
-		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer}},
+	fr := &fakeRunner{events: []agent.Event{
+		{Type: agent.Result, Result: &agent.RunResult{Text: finalAnswer}},
 	}}
 	svc, d := newTestServiceWithOutbox(t, fr, fc, dir, 0)
 	defer d.Close()
@@ -1959,7 +1959,7 @@ func TestOutboxSweptOnStopCancel(t *testing.T) {
 	fc := newFakeChat()
 	gate := make(chan struct{})
 	fr := &fakeRunner{
-		events: []claude.Event{{Type: claude.ToolUse, Tool: "Bash"}},
+		events: []agent.Event{{Type: agent.ToolUse, Tool: "Bash"}},
 		gate:   gate, // run hangs until ctx is cancelled
 	}
 	svc, d := newTestServiceWithOutbox(t, fr, fc, dir, 0)

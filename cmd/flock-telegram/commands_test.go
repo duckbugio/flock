@@ -14,8 +14,8 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"github.com/duckbugio/flock/adapters/telegram"
+	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/chat"
-	"github.com/duckbugio/flock/core/claude"
 	"github.com/duckbugio/flock/core/dispatch"
 	"github.com/duckbugio/flock/core/schedule"
 	"github.com/duckbugio/flock/internal/config"
@@ -195,7 +195,7 @@ func (r *recordingSubmitter) HandleEdit(_ context.Context, _ chat.ChatID, _ int6
 }
 
 func (r *recordingSubmitter) HandleMedia(
-	_ context.Context, _ chat.ChatID, _ int64, _ chat.MessageID, prompt string, _ []claude.ImageInput,
+	_ context.Context, _ chat.ChatID, _ int64, _ chat.MessageID, prompt string, _ []agent.ImageInput,
 ) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -203,7 +203,7 @@ func (r *recordingSubmitter) HandleMedia(
 }
 
 func (r *recordingSubmitter) HandleEditMedia(
-	_ context.Context, _ chat.ChatID, _ int64, _ chat.MessageID, prompt string, _ []claude.ImageInput,
+	_ context.Context, _ chat.ChatID, _ int64, _ chat.MessageID, prompt string, _ []agent.ImageInput,
 ) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

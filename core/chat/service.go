@@ -1,6 +1,6 @@
 // Package chat is the transport-neutral conversation layer: it receives a text
 // message from an allowed user, resolves that chat's isolated workspace, runs
-// the message through the claude Runner, and renders the event stream into one
+// the message through the configured AI provider Runner, and renders the event stream into one
 // live "Working… (Ns)" progress message with a Stop button, replacing it with
 // the final answer on completion. Runs are parallel across chats (capped) and
 // serial within a chat (core/dispatch), each in its own per-chat workspace. It
@@ -17,7 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/duckbugio/flock/core/claude"
+	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/cost"
 	"github.com/duckbugio/flock/core/dispatch"
 	"github.com/duckbugio/flock/core/pending"
@@ -64,7 +64,7 @@ type dispatcher interface {
 	Cancel(chatID ChatID)
 }
 
-// sessionStore persists each chat's Claude session_id so the next message can
+// sessionStore persists each chat's provider session_id so the next message can
 // resume context via --resume. *session.FileStore satisfies it. A timeout/cancel
 // must NOT discard the stored id (plan §7.3), so the run path only ever Get/Set
 // on those paths. Delete has exactly two callers: the explicit /new reset
@@ -108,7 +108,7 @@ type retryAfterFunc func(err error) (time.Duration, bool)
 // submits each message to the Dispatcher, which enforces per-chat serialization
 // and the global concurrency cap, and resolves a per-chat workspace for each run.
 type Service struct {
-	runner     claude.Runner
+	runner     agent.Runner
 	chat       Transport
 	caps       Capabilities
 	retryAfter retryAfterFunc
@@ -121,7 +121,7 @@ type Service struct {
 	costCapUSD float64
 	outbox     *Sweeper
 	nudge      *starNudge
-	opts       claude.Options
+	opts       agent.Options
 	timeout    time.Duration
 	log        *slog.Logger
 	tick       time.Duration
@@ -135,7 +135,7 @@ type Service struct {
 
 // Config bundles the dependencies of a Service.
 type Config struct {
-	Runner     claude.Runner
+	Runner     agent.Runner
 	Transport  Transport
 	Dispatcher dispatcher
 	Workspace  workspaceEnsurer
@@ -162,7 +162,7 @@ type Config struct {
 	// StarNudge configures the post-task GitHub star nudge. When its Enabled flag
 	// is false (the default for non-GitHub deploys) the whole nudge path is inert.
 	StarNudge StarNudgeConfig
-	Opts      claude.Options // Model/MaxTurns/Env for every run; Workdir is set per chat
+	Opts      agent.Options // Model/MaxTurns/Env for every run; Workdir is set per chat
 	// Timeout bounds a single run's delivery; 0 means no deadline. On timeout the
 	// run is cancelled but the captured session_id is still stored (plan §7.3).
 	Timeout time.Duration
@@ -235,11 +235,11 @@ func (s *Service) Handle(_ context.Context, chatID ChatID, userID int64, msgID M
 
 // HandleMedia is Handle with optional image attachments: when images is
 // non-empty the run is delivered to the CLI as a stream-json user message
-// (text + image content blocks) enabling Claude vision; an empty images slice
+// (text + image content blocks) enabling provider vision; an empty images slice
 // behaves exactly like Handle (trailing-arg text path). Edit-tracking and
 // dispatch semantics are identical to Handle.
 func (s *Service) HandleMedia(
-	_ context.Context, chatID ChatID, userID int64, msgID MessageID, prompt string, images []claude.ImageInput,
+	_ context.Context, chatID ChatID, userID int64, msgID MessageID, prompt string, images []agent.ImageInput,
 ) {
 	s.mu.Lock()
 	s.lastMsg[chatID] = msgID
@@ -322,7 +322,7 @@ func (s *Service) HandleEdit(ctx context.Context, chatID ChatID, userID int64, m
 // HandleEditMedia is HandleEdit with optional image attachments (see
 // HandleMedia). An empty images slice behaves exactly like HandleEdit.
 func (s *Service) HandleEditMedia(
-	_ context.Context, chatID ChatID, userID int64, msgID MessageID, prompt string, images []claude.ImageInput,
+	_ context.Context, chatID ChatID, userID int64, msgID MessageID, prompt string, images []agent.ImageInput,
 ) {
 	s.mu.Lock()
 	last, ok := s.lastMsg[chatID]
@@ -384,7 +384,7 @@ func (s *Service) Stop(runID string) bool {
 //
 //nolint:gocyclo // orchestrates the single-run lifecycle with best-effort fallbacks.
 func (s *Service) run(
-	ctx context.Context, chatID ChatID, userID int64, prompt string, images []claude.ImageInput, markerID string,
+	ctx context.Context, chatID ChatID, userID int64, prompt string, images []agent.ImageInput, markerID string,
 ) {
 	runID := strconv.FormatUint(s.runSeq.Add(1), 10)
 	s.mu.Lock()
@@ -421,7 +421,7 @@ func (s *Service) run(
 	// once the anchor is sent below. A shutdown-caused terminal keeps the marker so
 	// the next startup auto-resumes it.
 
-	// Resume this chat's stored Claude session so the run continues its context
+	// Resume this chat's stored provider session so the run continues its context
 	// (empty = a fresh session). Continuity survives restarts because the store is
 	// durable and reloaded on startup. resuming records whether THIS run carried a
 	// non-empty resume id, so a terminal is_error Result can self-heal a stale/
@@ -486,7 +486,7 @@ func (s *Service) run(
 		// lastEditAt is the wall-clock time of the last SUCCESSFUL progress edit; its
 		// zero value lets the first edit fire promptly.
 		lastEditAt  time.Time
-		finalResult *claude.RunResult
+		finalResult *agent.RunResult
 		finalErr    error
 	)
 
@@ -539,19 +539,19 @@ loop:
 				break loop
 			}
 			switch ev.Type {
-			case claude.SystemInit:
+			case agent.SystemInit:
 				// Capture and persist the session_id as soon as it is known, BEFORE
 				// any later timeout/cancel can tear the run down. This is the §7.3 fix:
 				// even if the run never reaches its Result, the next message resumes.
 				s.storeSession(chatID, ev.SessionID)
-			case claude.Result:
+			case agent.Result:
 				finalResult = ev.Result
 				if ev.Result != nil {
 					// Reconcile with the terminal session_id (it should match the init
 					// one, but trust the result envelope as authoritative).
 					s.storeSession(chatID, ev.Result.SessionID)
 				}
-			case claude.RunError:
+			case agent.RunError:
 				finalErr = ev.Err
 			default:
 				// Fold the activity event into the renderer. Rendering is left to the
@@ -603,7 +603,7 @@ loop:
 // records nothing, and a nil store / non-positive cost is a no-op inside Add. A
 // store write failure is logged but never aborts the run — a lost accounting
 // write only weakens the cap slightly, it does not break delivery.
-func (s *Service) recordCost(userID int64, res *claude.RunResult) {
+func (s *Service) recordCost(userID int64, res *agent.RunResult) {
 	if s.costs == nil || res == nil {
 		return
 	}
@@ -711,7 +711,7 @@ func (s *Service) clearLanePending(chatID ChatID) {
 // (chunked when the answer exceeds the platform's message size limit).
 func (s *Service) finish(
 	ctx context.Context, chatID ChatID, progressMsgID MessageID, markerID string,
-	res *claude.RunResult, runErr, ctxErr error, total time.Duration,
+	res *agent.RunResult, runErr, ctxErr error, total time.Duration,
 ) {
 	// Use a background context for delivery: the run ctx may be cancelled by Stop
 	// or shutdown, but the final message should still reach the user.
@@ -847,7 +847,7 @@ func (s *Service) finish(
 // (resuming) keeps its marker and auto-resumes, so it reads "paused … will resume";
 // a user Stop / per-run timeout (ctxErr set, no Result or error) reads "stopped"; a
 // RunError or an is_error Result reads "failed"; and a clean Result reads "done".
-func completionNotice(res *claude.RunResult, runErr, ctxErr error, total time.Duration, resuming bool) string {
+func completionNotice(res *agent.RunResult, runErr, ctxErr error, total time.Duration, resuming bool) string {
 	elapsed := formatElapsed(int64(total / time.Second))
 	switch {
 	case resuming:

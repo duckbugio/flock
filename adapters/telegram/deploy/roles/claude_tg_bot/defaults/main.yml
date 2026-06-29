@@ -38,6 +38,10 @@ swap_size_gb: 2
 # Container memory ceiling (host has ~3.9 GB + swap)
 container_mem_limit: 3g
 
+# AI backend. "claude" preserves the existing path; "codex" runs Codex CLI with
+# the same bot/workspace/session layer.
+ai_backend: claude
+
 # Claude cost caps. With a subscription nothing is billed per token, so these are
 # generous (effectively no throttle). If you switch to api_key mode, LOWER them
 # (e.g. 10 / 5) to avoid surprise spend.
@@ -48,6 +52,29 @@ claude_max_turns: 250
 claude_timeout_seconds: 10800  # 3h — big multi-step team builds run long in one turn
 # Model for the team (subagents inherit it). Opus 4.8 = best; costly on api_key mode.
 claude_model: "claude-opus-4-8"
+
+# Codex backend defaults. subscription mode uses a persisted CODEX_HOME/auth.json
+# or CODEX_ACCESS_TOKEN. billing mode requires CODEX_API_KEY plus codex_billing_ack=true.
+codex_auth_mode: subscription
+codex_bin: codex
+codex_home: /home/claude/.codex
+codex_model: "gpt-5.5"
+codex_require_auth: true
+codex_billing_ack: false
+codex_sandbox: workspace-write
+codex_approval_policy: never
+codex_skip_git_repo_check: false
+codex_extra_args: ""
+
+# OpenAI-compatible answer-only provider. Works for Qwen via Alibaba
+# DashScope/Model Studio, DeepSeek, OpenRouter, LiteLLM, vLLM, LM Studio, etc.
+# It does not edit files or run shell tools in v1.
+openai_compat_base_url: ""
+openai_compat_model: ""
+openai_compat_api_key_env: OPENAI_COMPAT_API_KEY
+openai_compat_auth_mode: api_key
+openai_compat_billing_ack: false
+openai_compat_timeout_seconds: 300
 
 # Telegram rate limiting (per user)
 rate_limit_requests: 30
@@ -61,6 +88,10 @@ max_concurrent_chat_runs: 4
 # Dev-team loop limits (tune without touching code)
 pre_pr_cycles: 5      # coder<->tester rounds to get green BEFORE opening a PR
 pr_review_cycles: 10  # reviewer<->coder rounds ON the open PR, then arbiter approves/escalates
+
+# Telegram Bot API rich messages are experimental; keep the legacy
+# MarkdownToHTML/plain delivery path by default.
+enable_rich_messages: false
 
 # Group-chat mention behavior: false = answer every message in groups (default);
 # true = only answer on @mention/reply. Private chats are always answered.

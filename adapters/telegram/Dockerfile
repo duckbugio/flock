@@ -1,6 +1,6 @@
 # Self-contained image for the Flock AI dev-team Telegram bot (Go rewrite).
 # A multi-stage build: compile the static Go binary, then assemble a slim runtime
-# with Node + the `claude` CLI and the tools the team shells out to.
+# with Node + the `claude`/`codex` CLIs and the tools the team shells out to.
 # Behaviour is toggled at RUNTIME via env (see .env.example).
 # Built & published by .github/workflows/publish-telegram.yml -> ghcr.io/duckbugio/flock-telegram
 # Build context is the REPO ROOT (COPY paths are root-relative): docker build -f adapters/telegram/Dockerfile .
@@ -30,7 +30,8 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 # --- Runtime stage ------------------------------------------------------------
 # node:24 (current LTS) supplies Node (for the `claude` CLI). Add git/ripgrep/ffmpeg
 # (the CLI shells out to them), the GitHub CLI (`gh`, for PR creation on github.com)
-# + the Docker CLI (talks to the optional dind sidecar).
+# + the Docker CLI (talks to the optional dind sidecar). bubblewrap gives Codex
+# its documented Linux sandbox backend for workspace-write/read-only modes.
 FROM node:24-bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -50,7 +51,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg git ripgrep ffmpeg chromium make \
+        ca-certificates curl gnupg git ripgrep ffmpeg chromium make bubblewrap \
         fonts-liberation fonts-noto-core fonts-noto-color-emoji; \
     install -m 0755 -d /etc/apt/keyrings; \
     curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc; \
@@ -59,6 +60,9 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin; \
     npm install -g @anthropic-ai/claude-code; \
+    mkdir -p /opt/codex; \
+    curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_HOME=/opt/codex CODEX_NON_INTERACTIVE=1 CODEX_INSTALL_DIR=/usr/local/bin sh; \
+    chmod -R a+rX /opt/codex; \
     npm cache clean --force; \
     apt-get clean; rm -rf /var/lib/apt/lists/*
 
@@ -152,8 +156,8 @@ RUN set -eux; \
 # at the SAME uid 1000 the existing volumes are owned by.
 RUN userdel -r node 2>/dev/null || true; \
     useradd -m -u 1000 -s /bin/bash claude \
- && mkdir -p /workspace /app/data /home/claude/.claude /opt/duck/agents \
- && chown -R claude:claude /workspace /app /home/claude/.claude /opt/duck
+ && mkdir -p /workspace /app/data /home/claude/.claude /home/claude/.codex /opt/duck/agents \
+ && chown -R claude:claude /workspace /app /home/claude/.claude /home/claude/.codex /opt/duck
 
 # The compiled bot.
 COPY --from=build /out/flock-telegram /usr/local/bin/flock-telegram
@@ -165,6 +169,7 @@ COPY --chown=claude:claude core/CLAUDE.workspace.md.tmpl /opt/duck/CLAUDE.worksp
 
 USER claude
 ENV HOME=/home/claude \
+    CODEX_HOME=/home/claude/.codex \
     PATH=/home/claude/.local/bin:$PATH
 
 WORKDIR /app

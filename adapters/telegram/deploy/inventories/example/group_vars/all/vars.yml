@@ -11,6 +11,24 @@ telegram_bot_username: "your_bot"
 #   api_key      -> pay-per-token Console key (sk-ant-...)
 claude_auth_mode: subscription
 
+# AI backend:
+#   claude -> existing Claude CLI integration
+#   codex  -> Codex CLI integration
+ai_backend: claude
+
+# Codex auth mode:
+#   subscription -> ChatGPT/Codex subscription via CODEX_HOME/auth.json or CODEX_ACCESS_TOKEN
+#   billing      -> OpenAI Platform key; requires codex_billing_ack: true
+codex_auth_mode: subscription
+codex_billing_ack: false
+
+# OpenAI-compatible answer-only provider config (for AI_BACKEND=openai-compatible).
+# Example Qwen/DashScope base URL:
+#   https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+openai_compat_base_url: ""
+openai_compat_model: ""
+openai_compat_billing_ack: false
+
 # Directory Claude works in INSIDE the container (a Docker volume).
 approved_directory: /workspace
 

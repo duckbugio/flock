@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -26,6 +27,40 @@ var ErrMissingVKToken = errors.New("VK_BOT_TOKEN is required")
 // ErrMissingVKGroupID is returned by ValidateVK when VK_GROUP_ID is unset/zero;
 // the community id is needed for groups.getLongPollServer and the mention parse.
 var ErrMissingVKGroupID = errors.New("VK_GROUP_ID is required")
+
+// AI backend names supported by the shared chat runner wiring.
+const (
+	AIBackendClaude       = "claude"
+	AIBackendCodex        = "codex"
+	AIBackendOpenAICompat = "openai-compatible"
+)
+
+// Codex auth modes. "subscription" uses a persisted Codex login/CODEX_HOME or
+// access token; "billing" uses CODEX_API_KEY and must be opted into explicitly.
+const (
+	CodexAuthSubscription = "subscription"
+	CodexAuthBilling      = "billing"
+)
+
+const (
+	OpenAICompatAuthAPIKey = "api_key"
+)
+
+var (
+	ErrCodexSubscriptionWithAPIKey   = errors.New("CODEX_API_KEY is not allowed when CODEX_AUTH_MODE=subscription")
+	ErrCodexSubscriptionAuthRequired = errors.New(
+		"Codex subscription auth requires CODEX_ACCESS_TOKEN or CODEX_HOME/auth.json",
+	)
+	ErrCodexBillingAckRequired    = errors.New("CODEX_BILLING_ACK=true is required when CODEX_AUTH_MODE=billing")
+	ErrCodexBillingAPIKeyRequired = errors.New("CODEX_API_KEY is required when CODEX_AUTH_MODE=billing")
+	ErrCodexUnknownAuthMode       = errors.New("unknown CODEX_AUTH_MODE")
+
+	ErrOpenAICompatBaseURLRequired    = errors.New("OPENAI_COMPAT_BASE_URL is required when AI_BACKEND=openai-compatible")
+	ErrOpenAICompatModelRequired      = errors.New("OPENAI_COMPAT_MODEL is required when AI_BACKEND=openai-compatible")
+	ErrOpenAICompatAPIKeyRequired     = errors.New("OPENAI-compatible API key is required when OPENAI_COMPAT_AUTH_MODE=api_key")
+	ErrOpenAICompatBillingAckRequired = errors.New("OPENAI_COMPAT_BILLING_ACK=true is required when AI_BACKEND=openai-compatible")
+	ErrOpenAICompatUnknownAuthMode    = errors.New("unknown OPENAI_COMPAT_AUTH_MODE")
+)
 
 // Config holds all runtime configuration sourced from the environment. Field
 // names and env keys mirror adapters/telegram/.env.example for deploy parity.
@@ -62,6 +97,38 @@ type Config struct {
 	// setting (via --settings). Empty (the default) passes nothing, so the model's
 	// default effort applies. The mapping/validation lives in core/claude buildArgs.
 	ClaudeEffort string `env:"CLAUDE_EFFORT"`
+
+	// AIBackend selects the command runner. "claude" preserves the existing
+	// Claude CLI path; "codex" runs the Codex CLI through the same chat.Service
+	// event contract.
+	AIBackend string `env:"AI_BACKEND" envDefault:"claude"`
+
+	// Codex CLI integration. Subscription mode deliberately rejects CODEX_API_KEY
+	// so a ChatGPT/Codex subscription deploy cannot silently switch to API billing.
+	CodexBin              string `env:"CODEX_BIN" envDefault:"codex"`
+	CodexModel            string `env:"CODEX_MODEL" envDefault:"gpt-5.5"`
+	CodexHome             string `env:"CODEX_HOME" envDefault:"/home/claude/.codex"`
+	CodexAuthMode         string `env:"CODEX_AUTH_MODE" envDefault:"subscription"`
+	CodexAccessToken      string `env:"CODEX_ACCESS_TOKEN"`
+	CodexAPIKey           string `env:"CODEX_API_KEY"`
+	CodexRequireAuth      bool   `env:"CODEX_REQUIRE_AUTH" envDefault:"true"`
+	CodexBillingAck       bool   `env:"CODEX_BILLING_ACK" envDefault:"false"`
+	CodexSandbox          string `env:"CODEX_SANDBOX" envDefault:"workspace-write"`
+	CodexApprovalPolicy   string `env:"CODEX_APPROVAL_POLICY" envDefault:"never"`
+	CodexSkipGitRepoCheck bool   `env:"CODEX_SKIP_GIT_REPO_CHECK" envDefault:"false"`
+	CodexExtraArgs        string `env:"CODEX_EXTRA_ARGS"`
+
+	// OpenAI-compatible API integration. This is an answer-only provider in v1:
+	// it can stream/finalize text through the common agent contract, but it does
+	// not edit files or run shell tools unless a future controlled tool loop is
+	// added.
+	OpenAICompatBaseURL        string `env:"OPENAI_COMPAT_BASE_URL"`
+	OpenAICompatModel          string `env:"OPENAI_COMPAT_MODEL"`
+	OpenAICompatAPIKeyEnv      string `env:"OPENAI_COMPAT_API_KEY_ENV" envDefault:"OPENAI_COMPAT_API_KEY"`
+	OpenAICompatAPIKey         string `env:"OPENAI_COMPAT_API_KEY"`
+	OpenAICompatAuthMode       string `env:"OPENAI_COMPAT_AUTH_MODE" envDefault:"api_key"`
+	OpenAICompatBillingAck     bool   `env:"OPENAI_COMPAT_BILLING_ACK" envDefault:"false"`
+	OpenAICompatTimeoutSeconds int    `env:"OPENAI_COMPAT_TIMEOUT_SECONDS" envDefault:"300"`
 
 	// ClaudeTimeoutSeconds bounds a single run's delivery: it is applied as a
 	// per-run context deadline. When it elapses the run is cancelled (delivery
@@ -150,7 +217,7 @@ type Config struct {
 	// deployment where the live API does not yet serve these methods stops paying the
 	// failed round-trip). Set ENABLE_RICH_MESSAGES=false to force the legacy path. VK
 	// ignores it (no rich support). See docs/rich-messages-plan.md.
-	EnableRichMessages bool `env:"ENABLE_RICH_MESSAGES" envDefault:"true"`
+	EnableRichMessages bool `env:"ENABLE_RICH_MESSAGES" envDefault:"false"`
 
 	// Team-loop knobs rendered into each workspace's CLAUDE.md (mirrors the
 	// values the Python entrypoint substituted). Kept as strings since they are
@@ -243,6 +310,137 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
 	return cfg, nil
+}
+
+// AIBackendName normalizes AI_BACKEND. The bool is false for unknown values; the
+// returned backend is then the conservative Claude fallback.
+func (c Config) AIBackendName() (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(c.AIBackend)) {
+	case "", AIBackendClaude:
+		return AIBackendClaude, true
+	case AIBackendCodex:
+		return AIBackendCodex, true
+	case AIBackendOpenAICompat:
+		return AIBackendOpenAICompat, true
+	default:
+		return AIBackendClaude, false
+	}
+}
+
+// CodexAuthModeName normalizes CODEX_AUTH_MODE while preserving unknown values
+// so ValidateCodex can reject them explicitly.
+func (c Config) CodexAuthModeName() string {
+	mode := strings.ToLower(strings.TrimSpace(c.CodexAuthMode))
+	if mode == "" {
+		return CodexAuthSubscription
+	}
+	return mode
+}
+
+// CodexAuthFile is the persisted login file used by Codex subscription auth.
+func (c Config) CodexAuthFile() string {
+	home := strings.TrimSpace(c.CodexHome)
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, "auth.json")
+}
+
+// ValidateCodex checks the auth contract only when AI_BACKEND=codex. The
+// subscription path accepts CODEX_ACCESS_TOKEN or a persisted auth.json under
+// CODEX_HOME, and rejects CODEX_API_KEY to prevent accidental usage-based billing.
+func (c Config) ValidateCodex() error {
+	backend, ok := c.AIBackendName()
+	if !ok || backend != AIBackendCodex {
+		return nil
+	}
+	switch c.CodexAuthModeName() {
+	case CodexAuthSubscription:
+		if strings.TrimSpace(c.CodexAPIKey) != "" {
+			return ErrCodexSubscriptionWithAPIKey
+		}
+		if !c.CodexRequireAuth {
+			return nil
+		}
+		if strings.TrimSpace(c.CodexAccessToken) != "" {
+			return nil
+		}
+		authFile := c.CodexAuthFile()
+		if authFile != "" {
+			if _, err := os.Stat(authFile); err == nil {
+				return nil
+			}
+		}
+		return ErrCodexSubscriptionAuthRequired
+	case CodexAuthBilling:
+		if strings.TrimSpace(c.CodexAPIKey) == "" {
+			return ErrCodexBillingAPIKeyRequired
+		}
+		if !c.CodexBillingAck {
+			return ErrCodexBillingAckRequired
+		}
+		return nil
+	default:
+		return ErrCodexUnknownAuthMode
+	}
+}
+
+// OpenAICompatAuthModeName normalizes OPENAI_COMPAT_AUTH_MODE while preserving
+// unknown values so ValidateOpenAICompat can reject them explicitly.
+func (c Config) OpenAICompatAuthModeName() string {
+	mode := strings.ToLower(strings.TrimSpace(c.OpenAICompatAuthMode))
+	if mode == "" {
+		return OpenAICompatAuthAPIKey
+	}
+	return mode
+}
+
+// OpenAICompatResolvedAPIKey returns the configured key, first from the direct
+// env field, then from the env var named by OPENAI_COMPAT_API_KEY_ENV.
+func (c Config) OpenAICompatResolvedAPIKey() string {
+	if strings.TrimSpace(c.OpenAICompatAPIKey) != "" {
+		return strings.TrimSpace(c.OpenAICompatAPIKey)
+	}
+	keyEnv := strings.TrimSpace(c.OpenAICompatAPIKeyEnv)
+	if keyEnv == "" {
+		return ""
+	}
+	return strings.TrimSpace(os.Getenv(keyEnv))
+}
+
+// OpenAICompatTimeout returns the HTTP timeout for the OpenAI-compatible provider.
+func (c Config) OpenAICompatTimeout() time.Duration {
+	if c.OpenAICompatTimeoutSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(c.OpenAICompatTimeoutSeconds) * time.Second
+}
+
+// ValidateOpenAICompat checks the answer-only OpenAI-compatible provider config
+// when AI_BACKEND=openai-compatible.
+func (c Config) ValidateOpenAICompat() error {
+	backend, ok := c.AIBackendName()
+	if !ok || backend != AIBackendOpenAICompat {
+		return nil
+	}
+	if strings.TrimSpace(c.OpenAICompatBaseURL) == "" {
+		return ErrOpenAICompatBaseURLRequired
+	}
+	if strings.TrimSpace(c.OpenAICompatModel) == "" {
+		return ErrOpenAICompatModelRequired
+	}
+	switch c.OpenAICompatAuthModeName() {
+	case OpenAICompatAuthAPIKey:
+		if c.OpenAICompatResolvedAPIKey() == "" {
+			return ErrOpenAICompatAPIKeyRequired
+		}
+		if !c.OpenAICompatBillingAck {
+			return ErrOpenAICompatBillingAckRequired
+		}
+		return nil
+	default:
+		return ErrOpenAICompatUnknownAuthMode
+	}
 }
 
 // SlogLevel maps the configured LOG_LEVEL word (case-insensitive) to a

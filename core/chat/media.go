@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/duckbugio/flock/core/claude"
+	"github.com/duckbugio/flock/core/agent"
 )
 
 // DocumentPrompt builds the prompt text for an uploaded document saved at path,
@@ -33,15 +33,16 @@ func PhotoPrompt(savedPath, caption string) string {
 }
 
 // LoadPhotoImage reads the saved photo at savedPath and returns it as a single
-// claude.ImageInput for the vision content block, with the media type derived
-// from the file extension. The caller attaches the result to the run so Claude
-// can see the image; on a read error the caller falls back to a path-only run.
-func LoadPhotoImage(savedPath string) ([]claude.ImageInput, error) {
+// agent.ImageInput for the vision content block, with the media type derived
+// from the file extension. The caller attaches the result to the run when the
+// selected provider supports vision; on a read error the caller falls back to a
+// path-only run.
+func LoadPhotoImage(savedPath string) ([]agent.ImageInput, error) {
 	data, err := os.ReadFile(savedPath) //nolint:gosec // G304: path from a workspace upload we wrote, not raw user input.
 	if err != nil {
 		return nil, fmt.Errorf("read photo for vision: %w", err)
 	}
-	return []claude.ImageInput{{
+	return []agent.ImageInput{{
 		MediaType: photoMediaType(savedPath),
 		Data:      data,
 	}}, nil

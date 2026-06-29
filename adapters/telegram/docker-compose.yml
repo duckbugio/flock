@@ -16,6 +16,7 @@ services:
     env_file: .env
     volumes:
       - claude_home:/home/claude/.claude   # Claude sessions + auth state
+      - codex_home:/home/claude/.codex     # Codex sessions + auth state
       - bot_data:/app/data                 # sqlite db + persistence
       - workspace:/workspace               # where the team reads/writes code
     mem_limit: ${BOT_MEM_LIMIT:-3g}
@@ -38,6 +39,7 @@ services:
 
 volumes:
   claude_home:
+  codex_home:
   bot_data:
   workspace:
   dind_storage:
