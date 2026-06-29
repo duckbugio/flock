@@ -17,6 +17,11 @@ type envelope struct {
 	NumTurns  int          `json:"num_turns"`      //nolint:tagliatelle // Claude CLI emits snake_case.
 	CostUSD   float64      `json:"total_cost_usd"` //nolint:tagliatelle // Claude CLI emits snake_case.
 	Duration  int64        `json:"duration_ms"`    //nolint:tagliatelle // Claude CLI emits snake_case.
+	// ParentToolUseID links an event to the subagent that produced it: when the
+	// CLI runs a subagent (an Agent/Task tool_use), the subagent's own assistant/
+	// user envelopes carry the launching tool_use's id here. It is empty for
+	// top-level events. Surfaced on every derived Event as Event.ParentID.
+	ParentToolUseID string `json:"parent_tool_use_id"` //nolint:tagliatelle // Claude CLI emits snake_case.
 }
 
 // messageBody is the assistant/user message wrapper holding content blocks.
@@ -30,6 +35,7 @@ type contentBlock struct {
 	Text  string          `json:"text"`  // text block
 	Name  string          `json:"name"`  // tool_use block
 	Input json.RawMessage `json:"input"` // tool_use block
+	ID    string          `json:"id"`    // tool_use block: the tool_use id
 }
 
 // decode parses one stream-json line into zero or more Events. The bool is
@@ -50,10 +56,10 @@ func decode(line []byte) ([]Event, bool) {
 		return nil, false
 
 	case "assistant":
-		return assistantEvents(env.Message), true
+		return assistantEvents(env.Message, env.ParentToolUseID), true
 
 	case roleUser:
-		return userEvents(env.Message), true
+		return userEvents(env.Message, env.ParentToolUseID), true
 
 	case "result":
 		res := &RunResult{
@@ -73,7 +79,9 @@ func decode(line []byte) ([]Event, bool) {
 }
 
 // assistantEvents converts an assistant message's content blocks into events.
-func assistantEvents(msg *messageBody) []Event {
+// parentID is the envelope's parent_tool_use_id, stamped on every derived event
+// so an inner subagent's activity can be attributed to its launching tool_use.
+func assistantEvents(msg *messageBody, parentID string) []Event {
 	if msg == nil {
 		return nil
 	}
@@ -82,24 +90,26 @@ func assistantEvents(msg *messageBody) []Event {
 		switch b.Type {
 		case "text":
 			if b.Text != "" {
-				evs = append(evs, Event{Type: Text, Text: b.Text})
+				evs = append(evs, Event{Type: Text, Text: b.Text, ParentID: parentID})
 			}
 		case "tool_use":
-			evs = append(evs, Event{Type: ToolUse, Tool: b.Name, ToolInput: b.Input})
+			evs = append(evs, Event{Type: ToolUse, Tool: b.Name, ToolInput: b.Input, ToolID: b.ID, ParentID: parentID})
 		}
 	}
 	return evs
 }
 
 // userEvents emits a ToolResult for each tool_result block in a user message.
-func userEvents(msg *messageBody) []Event {
+// parentID is the envelope's parent_tool_use_id, carried through for consistency
+// with assistantEvents (inner tool results are linked to their subagent too).
+func userEvents(msg *messageBody, parentID string) []Event {
 	if msg == nil {
 		return nil
 	}
 	var evs []Event
 	for _, b := range msg.Content {
 		if b.Type == "tool_result" {
-			evs = append(evs, Event{Type: ToolResult})
+			evs = append(evs, Event{Type: ToolResult, ParentID: parentID})
 		}
 	}
 	return evs

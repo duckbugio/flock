@@ -803,6 +803,19 @@ func taskEvent(subagentType string) claude.Event {
 	}
 }
 
+// agentEvent builds an Agent ToolUse launch carrying the given subagent_type and
+// (optionally) a tool_use id, mirroring how THIS harness spawns subagents — via the
+// Agent tool, not Task (AC1/AC3). A non-empty toolID is what an inner event later
+// echoes as its ParentID, so it can be attributed back to this subagent.
+func agentEvent(subagentType, toolID string) claude.Event {
+	return claude.Event{
+		Type:      claude.ToolUse,
+		Tool:      "Agent",
+		ToolInput: []byte(`{"subagent_type":"` + subagentType + `"}`),
+		ToolID:    toolID,
+	}
+}
+
 // TestStageHeaderActiveSubagent (AC1) asserts a Task event with subagent_type
 // "coder" makes the stage header show the active-stage label "coder".
 func TestStageHeaderActiveSubagent(t *testing.T) {
@@ -866,6 +879,124 @@ func TestStageChangesOnlyOnTask(t *testing.T) {
 	}
 	if !strings.Contains(p.Frame(), stageActiveLeft+"planner"+stageActiveRight) {
 		t.Fatalf("planner not the active stage after inner tools: %q", p.Frame())
+	}
+}
+
+// TestStageTrailFromAgentLaunches (AC1) asserts the stage trail builds when
+// subagents are launched via the Agent tool (this harness's mechanism), with inner
+// non-task/agent ToolUse events NOT flipping the active stage. The sequence
+// Agent{coder} → (inner Bash) → Agent{reviewer} → Agent{arbiter} renders the trail
+// "coder → reviewer → ▸ arbiter ◂" with the most recent one active.
+func TestStageTrailFromAgentLaunches(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5, "")
+	p.Observe(agentEvent("coder", "toolu_1"))
+	// An inner subagent tool call (flat at the top level) — must not advance the stage.
+	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash", ParentID: "toolu_1"})
+	p.Observe(agentEvent("reviewer", "toolu_2"))
+	p.Observe(agentEvent("arbiter", "toolu_3"))
+
+	if got, want := strings.Join(p.stages, ","), "coder,reviewer,arbiter"; got != want {
+		t.Fatalf("Agent-launch trail = %q, want %q", got, want)
+	}
+	if p.activeStage != 2 {
+		t.Fatalf("active stage = %d, want arbiter at index 2", p.activeStage)
+	}
+	wantLine := stagePrefix + "coder" + stageSeparator + "reviewer" + stageSeparator +
+		stageActiveLeft + "arbiter" + stageActiveRight
+	if frame := p.Frame(); !strings.Contains(frame, wantLine) {
+		t.Fatalf("stage line %q not in frame %q", wantLine, frame)
+	}
+}
+
+// TestStageTaskAndAgentInterop (AC1) asserts the Task tool still advances the stage
+// alongside Agent launches, so a mixed stream keeps working.
+func TestStageTaskAndAgentInterop(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5, "")
+	p.Observe(taskEvent("planner"))
+	p.Observe(agentEvent("coder", "toolu_1"))
+	if got, want := strings.Join(p.stages, ","), "planner,coder"; got != want {
+		t.Fatalf("mixed Task/Agent trail = %q, want %q", got, want)
+	}
+	if p.activeStage != 1 {
+		t.Fatalf("active stage = %d, want coder at index 1", p.activeStage)
+	}
+}
+
+// TestActivityLineSubagentAttribution (AC3) asserts an inner event whose ParentID
+// matches a prior Agent launch's ToolID is tagged with that subagent's label at the
+// HEAD of the line body — right after the emoji prefix, before the tool text — so the
+// tag survives capLine's prefix-peeling and tail truncation.
+func TestActivityLineSubagentAttribution(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5, "")
+	p.Observe(agentEvent("coder", "toolu_1"))
+	// The coder subagent runs a Bash command; it arrives flat with ParentID == the
+	// launch's ToolID, so the line is attributed to "coder".
+	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash", ParentID: "toolu_1"})
+
+	frame := p.Frame()
+	wantLine := "⌨️ coder" + subagentTagSeparator + "Bash"
+	if !strings.Contains(frame, wantLine) {
+		t.Fatalf("attributed activity line %q not in frame %q", wantLine, frame)
+	}
+	// The label sits AFTER the emoji prefix, not before it (so capLine's prefix-peel
+	// and the activity-line emoji convention are preserved).
+	if strings.Contains(frame, "coder ⌨️") {
+		t.Fatalf("label leaked BEFORE the emoji prefix: %q", frame)
+	}
+}
+
+// TestActivityLineNoAttributionByteIdentical (AC3/AC4) asserts an event with an
+// empty ParentID (a top-level event, or a stream with no parent linkage) renders
+// with NO tag — byte-identical to the same event observed with attribution machinery
+// absent. The two frames must match exactly.
+func TestActivityLineNoAttributionByteIdentical(t *testing.T) {
+	var e1, e2 time.Duration
+
+	// (a) A progress that never saw a subagent launch — pure top-level activity.
+	bare := NewProgress(fakeClock(&e1), 5, "")
+	bare.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash"})
+
+	// (b) A progress that DID launch a subagent, then sees an unrelated top-level
+	// event (empty ParentID): it must render identically to (a), with no tag.
+	withMap := NewProgress(fakeClock(&e2), 5, "")
+	withMap.Observe(agentEvent("coder", "toolu_1"))
+	bareTopLevel := withMap.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash"})
+	if !bareTopLevel {
+		t.Fatal("expected the top-level Bash event to push an activity line")
+	}
+
+	// The Bash line in (b) must carry no subagent tag.
+	wantBash := "⌨️ Bash"
+	if frame := withMap.Frame(); !strings.Contains(frame, wantBash) {
+		t.Fatalf("untagged Bash line %q not in frame %q", wantBash, frame)
+	}
+	if frame := withMap.Frame(); strings.Contains(frame, "⌨️ coder"+subagentTagSeparator) {
+		t.Fatalf("top-level event wrongly tagged with a subagent: %q", frame)
+	}
+	// And the bare-progress Bash line is byte-identical to the pre-feature rendering.
+	if got, want := bare.Frame(), spinnerFrames[0]+" Working… (0s)"+"\n\n"+"⌨️ Bash"; got != want {
+		t.Fatalf("untagged frame not byte-identical:\n got %q\nwant %q", got, want)
+	}
+}
+
+// TestActivityLineUnknownParentNoTag (AC3) asserts an event whose ParentID does NOT
+// map to a known subagent launch renders untagged (graceful no-op), so a stream that
+// carries parent ids we never saw a launch for never produces a bogus label.
+func TestActivityLineUnknownParentNoTag(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5, "")
+	p.Observe(agentEvent("coder", "toolu_1"))
+	// ParentID points at a tool_use id we never recorded — degrade to no tag.
+	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash", ParentID: "toolu_unknown"})
+	frame := p.Frame()
+	if strings.Contains(frame, subagentTagSeparator+"Bash") {
+		t.Fatalf("unknown-parent event wrongly tagged: %q", frame)
+	}
+	if !strings.Contains(frame, "⌨️ Bash") {
+		t.Fatalf("expected a plain Bash line for an unknown parent: %q", frame)
 	}
 }
 
