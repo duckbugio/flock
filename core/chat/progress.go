@@ -213,12 +213,22 @@ type Progress struct {
 	// stages is the deterministic trail of DISTINCT subagent labels seen, in
 	// first-seen order — pure membership taken from the stream, not an inferred
 	// round count. activeStage indexes the currently running subagent within it
-	// (the most recent Task launch). Both stay empty for a plain chat with no Task
-	// events, so the stage line is omitted and the frame is byte-identical to a
-	// non-pipeline run. State changes ONLY on a Tool=="Task" ToolUse (see Observe);
-	// inner subagent tool events never flip the active stage.
+	// (the most recent Task/Agent launch). Both stay empty for a plain chat with no
+	// subagent launches, so the stage line is omitted and the frame is byte-identical
+	// to a non-pipeline run. State changes ONLY on a Tool=="Task"/"Agent" ToolUse (see
+	// Observe); inner subagent tool events never flip the active stage.
 	stages      []string
 	activeStage int
+	// subagentByToolID maps a launching Agent/Task tool_use id (Event.ToolID) to the
+	// subagent label it spawned, so an inner event whose Event.ParentID matches can be
+	// tagged with that label (see activityLine). It is populated only when a launch
+	// carries a non-empty ToolID; it stays nil/empty when the live stream omits
+	// tool_use ids or parent_tool_use_id, in which case per-line attribution is a
+	// no-op with zero regression. Attribution assumes the launching tool_use envelope
+	// is decoded BEFORE any inner envelope carrying its id as parent_tool_use_id (the
+	// CLI guarantees this ordering); out-of-order arrival degrades to an untagged line
+	// (a benign no-op).
+	subagentByToolID map[string]string
 }
 
 // NewProgress returns a Progress whose header counter reads from elapsed, the
@@ -244,20 +254,46 @@ func NewProgress(elapsed func() time.Duration, ringSize int, baseDir string) *Pr
 // Final / FinalError to render the terminal message. It reports whether the
 // activity ring changed, so callers can skip a redundant edit.
 func (p *Progress) Observe(e claude.Event) bool {
-	// A Task launch (the Lead spawning a dev-team subagent) advances the stage
-	// header. This is the ONLY event that changes the active stage: inner subagent
-	// tool events arrive flat at the top level (the decoder ignores
-	// parent_tool_use_id), so they are ordinary ToolUse events with a non-Task tool
-	// name and must not flip the active stage.
-	if e.Type == claude.ToolUse && strings.EqualFold(e.Tool, "task") {
-		p.advanceStage(subagentLabel(e.ToolInput))
+	// A subagent launch (the Lead spawning a dev-team subagent — via the Task OR the
+	// Agent tool, depending on the harness) advances the stage header. This is the
+	// ONLY event that changes the active stage: an inner subagent's own tool events
+	// arrive flat at the top level (linked back only by ParentID), so they are
+	// ordinary ToolUse events with a non-task/agent tool name and must not flip the
+	// active stage. When the launch carries a tool_use id, remember it so the
+	// subagent's inner activity lines can be attributed to it (see activityLine).
+	if e.Type == claude.ToolUse && isSubagentLaunch(e.Tool) {
+		label := subagentLabel(e.ToolInput)
+		p.advanceStage(label)
+		if e.ToolID != "" {
+			if p.subagentByToolID == nil {
+				p.subagentByToolID = make(map[string]string)
+			}
+			p.subagentByToolID[e.ToolID] = label
+		}
 	}
-	line, ok := activityLine(e, p.baseDir)
+	line, ok := activityLine(e, p.baseDir, p.subagentLabelFor(e.ParentID))
 	if !ok {
 		return false
 	}
 	p.push(line)
 	return true
+}
+
+// isSubagentLaunch reports whether a tool name is a dev-team subagent launch. Both
+// the Task tool and the Agent tool spawn a subagent (the harness picks one), so
+// either advances the stage trail; every other tool is ordinary inner activity.
+func isSubagentLaunch(tool string) bool {
+	return strings.EqualFold(tool, "task") || strings.EqualFold(tool, "agent")
+}
+
+// subagentLabelFor returns the subagent label remembered for parentID (a launching
+// Agent/Task tool_use id), or "" when parentID is empty or not a known launch. A
+// returned label tags the event's activity line with the subagent that produced it.
+func (p *Progress) subagentLabelFor(parentID string) string {
+	if parentID == "" {
+		return ""
+	}
+	return p.subagentByToolID[parentID]
 }
 
 // advanceStage records label as the currently active subagent, appending it to the
@@ -323,7 +359,13 @@ func sanitizeStageLabel(label string) string {
 // upper bound (recentSnippetMax) when stored — enough for any ring position — and
 // Frame() re-caps it tighter per recency. The emoji prefix is added on top of the
 // text budget, so it is never split or counted against the cap.
-func activityLine(e claude.Event, baseDir string) (string, bool) {
+//
+// subagentTag, when non-empty, is the dev-team subagent the event was produced
+// inside (resolved from the event's ParentID); it is prepended to the line BODY,
+// right after the emoji prefix ("⌨️ coder ▸ Bash"), so the tag survives the recency
+// re-cap and the prefix-peeling in capLine. An empty tag (a top-level event, or
+// a stream that omits parent linkage) renders EXACTLY as before — byte-identical.
+func activityLine(e claude.Event, baseDir, subagentTag string) (string, bool) {
 	switch e.Type {
 	case claude.ToolUse:
 		tool := e.Tool
@@ -339,7 +381,7 @@ func activityLine(e claude.Event, baseDir string) (string, bool) {
 				line += toolDetailSeparator + detail
 			}
 		}
-		return toolLinePrefix(tool) + truncateRunes(line, recentSnippetMax), true
+		return toolLinePrefix(tool) + withSubagentTag(subagentTag, truncateRunes(line, recentSnippetMax)), true
 	case claude.Text:
 		// Model "thought" text is free-form prose, not a CLI-shaped command, so it is
 		// shown verbatim and deliberately NOT run through redactSecrets: the keyword
@@ -351,11 +393,34 @@ func activityLine(e claude.Event, baseDir string) (string, bool) {
 		if snippet == "" {
 			return "", false
 		}
-		return thoughtPrefix + truncateRunes(snippet, recentSnippetMax), true
+		return thoughtPrefix + withSubagentTag(subagentTag, truncateRunes(snippet, recentSnippetMax)), true
 	default:
 		// SystemInit, ToolResult, Result, RunError: no activity line.
 		return "", false
 	}
+}
+
+// subagentTagSeparator joins a subagent label to the activity it produced:
+// "coder ▸ Bash · …". It is a plain-text marker (no markdown metacharacters) so it
+// can never desync the rich-markdown parser the live frame is sent on.
+const subagentTagSeparator = " ▸ "
+
+// withSubagentTag prepends the subagent label (sanitized markdown-safe) to a line
+// body so an inner subagent's activity reads "coder ▸ Bash · …". The tag goes at the
+// HEAD of the body — after the caller's emoji prefix, before the tool/thought text —
+// so it survives the tail-truncation in capLine/Frame and capLine's emoji-prefix
+// peeling still works unchanged. An empty label is a no-op: the body is returned
+// untouched, so a top-level event renders byte-identical to before this feature.
+//
+// The tag consumes line budget, so an attributed line's content is truncated
+// ~tag-length earlier than the byte-identical untagged line — intentional, since the
+// attribution is higher-signal than the trailing chars of a long command.
+func withSubagentTag(label, body string) string {
+	if label == "" {
+		return body
+	}
+	clean := sanitizeStageLabel(label)
+	return clean + subagentTagSeparator + body
 }
 
 // toolDetail extracts a short, human-readable detail from a tool's JSON input so a

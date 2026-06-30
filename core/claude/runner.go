@@ -50,6 +50,16 @@ type Event struct {
 	SessionID string          // set on SystemInit
 	Result    *RunResult      // set on Result
 	Err       error           // set on RunError
+	// ParentID is the stream-json envelope's parent_tool_use_id, set on every
+	// event derived from an assistant/user envelope. It is non-empty when the
+	// event was produced INSIDE a subagent the Lead launched (the launching
+	// tool_use's id), so a flat top-level activity line can be attributed to that
+	// subagent. It is empty for top-level (non-subagent) events.
+	ParentID string
+	// ToolID is the tool_use content block's id, set on ToolUse events. For an
+	// Agent/Task launch it is the id later carried as ParentID by the subagent's
+	// own events, letting the renderer map an inner event back to its subagent.
+	ToolID string
 }
 
 // RunResult is the parsed terminal result envelope of a run.
