@@ -12,6 +12,8 @@ func TestEventContractCarriesProviderNeutralRunData(t *testing.T) {
 		Tool:      "command_execution",
 		ToolInput: input,
 		SessionID: "session-1",
+		ParentID:  "parent-tool",
+		ToolID:    "tool-1",
 		Result: &RunResult{
 			Text:      "done",
 			SessionID: "session-1",
@@ -27,6 +29,9 @@ func TestEventContractCarriesProviderNeutralRunData(t *testing.T) {
 	}
 	if ev.Result.Text != "done" || ev.Result.SessionID != "session-1" {
 		t.Fatalf("Result = %+v, want final text/session", ev.Result)
+	}
+	if ev.ParentID != "parent-tool" || ev.ToolID != "tool-1" {
+		t.Fatalf("event ids = parent:%q tool:%q, want parent-tool/tool-1", ev.ParentID, ev.ToolID)
 	}
 }
 

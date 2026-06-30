@@ -34,6 +34,12 @@ type Event struct {
 	SessionID string
 	Result    *RunResult
 	Err       error
+	// ParentID links provider events produced inside a nested/subagent run back to
+	// the launching tool call, when the provider exposes that relationship.
+	ParentID string
+	// ToolID is the provider's id for a tool-use event. When a subagent launch has
+	// an id, later nested events may carry it as ParentID.
+	ToolID string
 }
 
 // RunResult is the parsed terminal result of a provider run.
