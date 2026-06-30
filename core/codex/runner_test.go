@@ -13,15 +13,22 @@ import (
 	"github.com/duckbugio/flock/core/agent"
 )
 
+const commandExecutionTool = "command_execution"
+
 func writeFakeCodex(t *testing.T, dir string) (script, argsFile, envFile string) {
 	t.Helper()
 	script = filepath.Join(dir, "fake-codex.sh")
 	argsFile = filepath.Join(dir, "args.txt")
 	envFile = filepath.Join(dir, "env.txt")
-	body := "#!/bin/sh\n" +
-		"printf '%s\\n' \"$*\" > " + argsFile + "\n" +
-		"printf 'CODEX_HOME=%s\\nCODEX_API_KEY=%s\\nCODEX_ACCESS_TOKEN=%s\\n' \"$CODEX_HOME\" \"$CODEX_API_KEY\" \"$CODEX_ACCESS_TOKEN\" > " + envFile + "\n" +
-		"cat \"$FAKE_CODEX_STREAM\"\n"
+	body := `#!/bin/sh
+printf '%s\n' "$*" > "$FAKE_CODEX_ARGS_FILE"
+{
+	printf 'CODEX_HOME=%s\n' "$CODEX_HOME"
+	printf 'CODEX_API_KEY=%s\n' "$CODEX_API_KEY"
+	printf 'CODEX_ACCESS_TOKEN=%s\n' "$CODEX_ACCESS_TOKEN"
+} > "$FAKE_CODEX_ENV_FILE"
+cat "$FAKE_CODEX_STREAM"
+`
 	//nolint:gosec // test fixture script permissions
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatalf("write fake codex: %v", err)
@@ -67,6 +74,8 @@ func TestRunHappyMapsCodexJSONLToClaudeEvents(t *testing.T) {
 	})
 	env := append(os.Environ(),
 		"FAKE_CODEX_STREAM="+stream,
+		"FAKE_CODEX_ARGS_FILE="+argsFile,
+		"FAKE_CODEX_ENV_FILE="+envFile,
 		"CODEX_HOME="+filepath.Join(dir, "codex-home"),
 		"CODEX_API_KEY=sk-should-not-leak",
 	)
@@ -98,8 +107,8 @@ func TestRunHappyMapsCodexJSONLToClaudeEvents(t *testing.T) {
 	if events[0].SessionID != "thr_123" {
 		t.Errorf("SystemInit.SessionID = %q, want thr_123", events[0].SessionID)
 	}
-	if events[1].Tool != "command_execution" {
-		t.Errorf("ToolUse.Tool = %q, want command_execution", events[1].Tool)
+	if events[1].Tool != commandExecutionTool {
+		t.Errorf("ToolUse.Tool = %q, want %s", events[1].Tool, commandExecutionTool)
 	}
 	var input map[string]any
 	if err := json.Unmarshal(events[1].ToolInput, &input); err != nil {
@@ -115,6 +124,7 @@ func TestRunHappyMapsCodexJSONLToClaudeEvents(t *testing.T) {
 		t.Fatalf("Result = %+v, want session thr_123 and final text", events[3].Result)
 	}
 
+	//nolint:gosec // argsFile is a path returned by writeFakeCodex inside t.TempDir.
 	argsRaw, err := os.ReadFile(argsFile)
 	if err != nil {
 		t.Fatalf("read args: %v", err)
@@ -132,6 +142,7 @@ func TestRunHappyMapsCodexJSONLToClaudeEvents(t *testing.T) {
 			t.Errorf("args %q missing %q", args, want)
 		}
 	}
+	//nolint:gosec // envFile is a path returned by writeFakeCodex inside t.TempDir.
 	envRaw, err := os.ReadFile(envFile)
 	if err != nil {
 		t.Fatalf("read env: %v", err)
@@ -149,7 +160,11 @@ func TestRunResumeUsesCodexExecResume(t *testing.T) {
 		`{"type":"item.completed","item":{"type":"agent_message","text":"continued"}}`,
 		`{"type":"turn.completed"}`,
 	})
-	env := append(os.Environ(), "FAKE_CODEX_STREAM="+stream)
+	env := append(os.Environ(),
+		"FAKE_CODEX_STREAM="+stream,
+		"FAKE_CODEX_ARGS_FILE="+argsFile,
+		"FAKE_CODEX_ENV_FILE="+filepath.Join(dir, "env.txt"),
+	)
 
 	r := New(Config{Bin: bin, Sandbox: "read-only", ApprovalPolicy: "never", AuthMode: AuthSubscription})
 	ch, err := r.Run(context.Background(), "continue", agent.Options{
@@ -162,6 +177,7 @@ func TestRunResumeUsesCodexExecResume(t *testing.T) {
 	}
 	_ = collect(t, ch)
 
+	//nolint:gosec // argsFile is a path returned by writeFakeCodex inside t.TempDir.
 	argsRaw, err := os.ReadFile(argsFile)
 	if err != nil {
 		t.Fatalf("read args: %v", err)

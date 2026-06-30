@@ -1,3 +1,4 @@
+//nolint:testpackage // whitebox tests assert private request mapping.
 package openaicompat
 
 import (

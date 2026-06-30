@@ -52,11 +52,14 @@ type chatResponse struct {
 	Choices []struct {
 		Message chatMessage `json:"message"`
 	} `json:"choices"`
-	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
-	} `json:"usage"`
+	Usage chatUsage `json:"usage"`
+}
+
+//nolint:tagliatelle // OpenAI-compatible APIs return snake_case token usage fields.
+type chatUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 func (r *runner) Run(ctx context.Context, prompt string, o agent.Options) (<-chan agent.Event, error) {
@@ -126,10 +129,14 @@ func (r *runner) complete(ctx context.Context, prompt string, o agent.Options) (
 	if err != nil {
 		return "", tokenUsage{}, fmt.Errorf("openai-compatible request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		tail, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		const errorBodyLimitBytes = 4096
+
+		tail, _ := io.ReadAll(io.LimitReader(resp.Body, errorBodyLimitBytes))
 		if len(tail) > 0 {
 			return "", tokenUsage{}, fmt.Errorf("openai-compatible HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(tail)))
 		}

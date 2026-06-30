@@ -1,3 +1,4 @@
+//nolint:testpackage // whitebox tests keep the provider contract examples concise.
 package agent
 
 import (

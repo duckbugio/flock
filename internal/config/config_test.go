@@ -902,6 +902,7 @@ func TestValidateOpenAICompatBillingRequiresAckAndKey(t *testing.T) {
 	}
 }
 
+//nolint:gosec // fake credential env var is required for auth validation coverage.
 func TestValidateOpenAICompatAcceptsAPIKeyFromNamedEnv(t *testing.T) {
 	t.Setenv("DASHSCOPE_API_KEY", "dashscope-key")
 	c := Config{

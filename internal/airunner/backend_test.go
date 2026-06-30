@@ -1,3 +1,4 @@
+//nolint:testpackage // whitebox tests exercise registry construction directly.
 package airunner
 
 import (
@@ -97,9 +98,12 @@ func TestBuildProviderAliases(t *testing.T) {
 }
 
 func TestBuildRejectsUnknownProvider(t *testing.T) {
-	_, _, _, err := Build(config.Config{AIBackend: "qwen"})
+	runner, opts, info, err := Build(config.Config{AIBackend: "qwen"})
 	if !errors.Is(err, ErrUnknownProvider) {
 		t.Fatalf("Build() error = %v, want ErrUnknownProvider", err)
+	}
+	if runner != nil || opts.Model != "" || info.Name != "" {
+		t.Fatalf("Build() partial result = %T/%+v/%+v, want empty on error", runner, opts, info)
 	}
 }
 

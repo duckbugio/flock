@@ -43,23 +43,42 @@ const (
 )
 
 const (
+	// OpenAICompatAuthAPIKey authenticates OpenAI-compatible providers with a
+	// bearer API key.
 	OpenAICompatAuthAPIKey = "api_key"
 )
 
 var (
-	ErrCodexSubscriptionWithAPIKey   = errors.New("CODEX_API_KEY is not allowed when CODEX_AUTH_MODE=subscription")
+	// ErrCodexSubscriptionWithAPIKey is returned when subscription auth is mixed
+	// with usage-based API billing credentials.
+	ErrCodexSubscriptionWithAPIKey = errors.New("CODEX_API_KEY is not allowed when CODEX_AUTH_MODE=subscription")
+	// ErrCodexSubscriptionAuthRequired is returned when Codex subscription mode
+	// has neither an access token nor persisted CLI login state.
 	ErrCodexSubscriptionAuthRequired = errors.New(
-		"Codex subscription auth requires CODEX_ACCESS_TOKEN or CODEX_HOME/auth.json",
+		"codex subscription auth requires CODEX_ACCESS_TOKEN or CODEX_HOME/auth.json",
 	)
-	ErrCodexBillingAckRequired    = errors.New("CODEX_BILLING_ACK=true is required when CODEX_AUTH_MODE=billing")
+	// ErrCodexBillingAckRequired is returned until API billing mode is explicitly
+	// acknowledged.
+	ErrCodexBillingAckRequired = errors.New("CODEX_BILLING_ACK=true is required when CODEX_AUTH_MODE=billing")
+	// ErrCodexBillingAPIKeyRequired is returned when billing mode has no API key.
 	ErrCodexBillingAPIKeyRequired = errors.New("CODEX_API_KEY is required when CODEX_AUTH_MODE=billing")
-	ErrCodexUnknownAuthMode       = errors.New("unknown CODEX_AUTH_MODE")
+	// ErrCodexUnknownAuthMode is returned for unsupported Codex auth modes.
+	ErrCodexUnknownAuthMode = errors.New("unknown CODEX_AUTH_MODE")
 
-	ErrOpenAICompatBaseURLRequired    = errors.New("OPENAI_COMPAT_BASE_URL is required when AI_BACKEND=openai-compatible")
-	ErrOpenAICompatModelRequired      = errors.New("OPENAI_COMPAT_MODEL is required when AI_BACKEND=openai-compatible")
-	ErrOpenAICompatAPIKeyRequired     = errors.New("OPENAI-compatible API key is required when OPENAI_COMPAT_AUTH_MODE=api_key")
+	// ErrOpenAICompatBaseURLRequired is returned when the OpenAI-compatible
+	// provider is enabled without a base URL.
+	ErrOpenAICompatBaseURLRequired = errors.New("OPENAI_COMPAT_BASE_URL is required when AI_BACKEND=openai-compatible")
+	// ErrOpenAICompatModelRequired is returned when the OpenAI-compatible
+	// provider is enabled without a model.
+	ErrOpenAICompatModelRequired = errors.New("OPENAI_COMPAT_MODEL is required when AI_BACKEND=openai-compatible")
+	// ErrOpenAICompatAPIKeyRequired is returned when API-key auth has no key in
+	// config or in the named environment variable.
+	ErrOpenAICompatAPIKeyRequired = errors.New("openai-compatible API key is required when OPENAI_COMPAT_AUTH_MODE=api_key")
+	// ErrOpenAICompatBillingAckRequired is returned until OpenAI-compatible API
+	// billing is explicitly acknowledged.
 	ErrOpenAICompatBillingAckRequired = errors.New("OPENAI_COMPAT_BILLING_ACK=true is required when AI_BACKEND=openai-compatible")
-	ErrOpenAICompatUnknownAuthMode    = errors.New("unknown OPENAI_COMPAT_AUTH_MODE")
+	// ErrOpenAICompatUnknownAuthMode is returned for unsupported auth modes.
+	ErrOpenAICompatUnknownAuthMode = errors.New("unknown OPENAI_COMPAT_AUTH_MODE")
 )
 
 // Config holds all runtime configuration sourced from the environment. Field

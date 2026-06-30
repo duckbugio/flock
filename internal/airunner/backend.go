@@ -21,8 +21,8 @@ var ErrUnknownProvider = errors.New("unknown AI_BACKEND provider")
 // Provider constructs one AI backend behind the common agent.Runner contract.
 type Provider interface {
 	agent.Provider
-	Validate(config.Config) error
-	Build(config.Config) (agent.Runner, agent.Options, error)
+	Validate(cfg config.Config) error
+	Build(cfg config.Config) (agent.Runner, agent.Options, error)
 	Aliases() []string
 }
 
@@ -152,10 +152,12 @@ func (codexProvider) Capabilities() agent.Capabilities {
 		SupportsApprovalMode: true,
 	}
 }
+
 func (codexProvider) Validate(cfg config.Config) error {
 	cfg.AIBackend = config.AIBackendCodex
 	return cfg.ValidateCodex()
 }
+
 func (codexProvider) Build(cfg config.Config) (agent.Runner, agent.Options, error) {
 	return codex.New(codex.Config{
 			Bin:              cfg.CodexBin,
@@ -183,10 +185,12 @@ func (openAICompatProvider) Capabilities() agent.Capabilities {
 		APIKeyBilling: true,
 	}
 }
+
 func (openAICompatProvider) Validate(cfg config.Config) error {
 	cfg.AIBackend = config.AIBackendOpenAICompat
 	return cfg.ValidateOpenAICompat()
 }
+
 func (openAICompatProvider) Build(cfg config.Config) (agent.Runner, agent.Options, error) {
 	return openaicompat.New(openaicompat.Config{
 			BaseURL: cfg.OpenAICompatBaseURL,
