@@ -794,13 +794,20 @@ func TestElidedIndicatorCountsBudgetDrops(t *testing.T) {
 }
 
 // taskEvent builds a Task ToolUse event carrying the given subagent_type, the way
-// the Lead's subagent launches surface in the stream (AC1/AC2).
-func taskEvent(subagentType string) claude.Event {
-	return claude.Event{
+// the Lead's subagent launches surface in the stream (AC1/AC2). An optional toolID
+// (the first variadic arg) sets the launch's tool_use id — what an inner event later
+// echoes as its ParentID, so the inner activity can be attributed back to this
+// subagent (AC3). Omitting it keeps the existing no-id call sites unchanged.
+func taskEvent(subagentType string, toolID ...string) claude.Event {
+	e := claude.Event{
 		Type:      claude.ToolUse,
 		Tool:      "Task",
 		ToolInput: []byte(`{"subagent_type":"` + subagentType + `"}`),
 	}
+	if len(toolID) > 0 {
+		e.ToolID = toolID[0]
+	}
+	return e
 }
 
 // agentEvent builds an Agent ToolUse launch carrying the given subagent_type and
@@ -997,6 +1004,124 @@ func TestActivityLineUnknownParentNoTag(t *testing.T) {
 	}
 	if !strings.Contains(frame, "⌨️ Bash") {
 		t.Fatalf("expected a plain Bash line for an unknown parent: %q", frame)
+	}
+}
+
+// TestActivityLineTagSurvivesTruncation (AC3) is the load-bearing property test for
+// the HEAD-anchored subagent tag: because the tag is prepended to the body (right
+// after the emoji prefix), it survives both capLine's tail-truncation and the older-
+// line recency re-cap to olderSnippetMax. We attribute a thought event whose body far
+// exceeds olderSnippetMax (400) — a tool-detail line cannot, since toolDetail self-caps
+// at toolDetailMax (160), so a thought is the only body long enough to force the 400-cap
+// truncation — then push enough later lines to shove the tagged line into an OLDER
+// (non-most-recent) ring slot. The rendered older line must STILL begin with the emoji
+// prefix + "coder" + the tag separator (the tag survived) AND end with the ellipsis
+// (the body tail was cut), proving tag-survival, not just that a short tagged line renders.
+func TestActivityLineTagSurvivesTruncation(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5, "")
+	p.Observe(agentEvent("coder", "toolu_1"))
+
+	// A long inner thought attributed to the coder subagent. Its body (after the head
+	// tag) must comfortably exceed olderSnippetMax so the 400-cap actually truncates it.
+	longBody := strings.Repeat("z", olderSnippetMax+300)
+	if !p.Observe(claude.Event{Type: claude.Text, Text: longBody, ParentID: "toolu_1"}) {
+		t.Fatal("expected the inner thought event to push an activity line")
+	}
+	// Sanity: the STORED body (emoji prefix peeled) really exceeds olderSnippetMax before
+	// any re-cap, so the older-line truncation below is genuinely exercised.
+	stored := p.ring[len(p.ring)-1]
+	storedBody := strings.TrimPrefix(stored, thoughtPrefix)
+	if n := utf8.RuneCountInString(storedBody); n <= olderSnippetMax {
+		t.Fatalf("stored tagged body = %d runes, must exceed olderSnippetMax %d to test truncation", n, olderSnippetMax)
+	}
+
+	// Push additional lines so the tagged line leaves the most-recent slot for an OLDER
+	// ring position (where it is re-capped to olderSnippetMax), while staying inside the
+	// 5-slot ring — the launch line + the tagged thought + these three fill it exactly.
+	for i := 0; i < 3; i++ {
+		p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash"})
+	}
+
+	var taggedOlder string
+	for _, line := range strings.Split(p.Frame(), "\n") {
+		if strings.HasPrefix(line, thoughtPrefix+"coder"+subagentTagSeparator) {
+			taggedOlder = line
+		}
+	}
+	if taggedOlder == "" {
+		t.Fatalf("tagged older line not found in frame: %q", p.Frame())
+	}
+	// The tag survived to the HEAD of the older, truncated line.
+	if !strings.HasPrefix(taggedOlder, thoughtPrefix+"coder"+subagentTagSeparator) {
+		t.Fatalf("tag did not survive at the head of the older line: %q", taggedOlder)
+	}
+	// And the body tail was cut: the line ends with the truncation ellipsis.
+	if !strings.HasSuffix(taggedOlder, "…") {
+		t.Fatalf("older tagged line should be tail-truncated with an ellipsis: %q", taggedOlder)
+	}
+	// The older line is capped to olderSnippetMax text runes (prefix rides on top), so the
+	// tag genuinely traded line budget against the body tail rather than expanding the cap.
+	prefixRunes := utf8.RuneCountInString(thoughtPrefix)
+	if n := utf8.RuneCountInString(taggedOlder) - prefixRunes; n != olderSnippetMax {
+		t.Fatalf("older tagged line text = %d runes, want olderSnippetMax %d", n, olderSnippetMax)
+	}
+}
+
+// TestActivityLineTagMarkdownSanitized (AC3) pins the markdown-sanitization of the tag
+// directly on the PER-LINE attribution path (not just transitively via the stage line):
+// a subagent label full of markdown metacharacters from stageLabelMeta must be stripped
+// before it is prepended to the body, so the tag can never inject inline markup into the
+// rich-markdown frame. This is the one NEW injection surface the per-line tag adds.
+func TestActivityLineTagMarkdownSanitized(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5, "")
+	// A label peppered with markdown metacharacters around readable content. Stripping
+	// stageLabelMeta ("*_~`|=[]<>") from "a*b_c~d`|" leaves "abcd".
+	rawLabel := "a*b_c~d`|"
+	p.Observe(agentEvent(rawLabel, "toolu_2"))
+	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash", ParentID: "toolu_2"})
+
+	var tagged string
+	for _, line := range strings.Split(p.Frame(), "\n") {
+		if strings.Contains(line, subagentTagSeparator) {
+			tagged = line
+		}
+	}
+	if tagged == "" {
+		t.Fatalf("no tagged activity line found: %q", p.Frame())
+	}
+	// The tag carries the SANITIZED label (what sanitizeStageLabel actually produces for
+	// this input) ahead of the separator.
+	wantClean := sanitizeStageLabel(rawLabel)
+	if wantClean != "abcd" {
+		t.Fatalf("precondition: sanitizeStageLabel(%q) = %q, want %q", rawLabel, wantClean, "abcd")
+	}
+	if !strings.Contains(tagged, wantClean+subagentTagSeparator) {
+		t.Fatalf("sanitized label %q not at the head of the tag: %q", wantClean, tagged)
+	}
+	// None of the stripped metacharacters survive into the rendered line.
+	for _, meta := range strings.Split(stageLabelMeta, "") {
+		if strings.Contains(tagged, meta) {
+			t.Fatalf("stripped metacharacter %q leaked into the tagged line: %q", meta, tagged)
+		}
+	}
+}
+
+// TestActivityLineTaskLaunchAttribution (AC3) locks the Task launch path to the same
+// per-line attribution contract as the Agent path: production decode stamps a ToolID on
+// both. A Task launch carrying a ToolID, followed by an inner Bash whose ParentID matches,
+// must tag that inner line with the subagent label.
+func TestActivityLineTaskLaunchAttribution(t *testing.T) {
+	var elapsed time.Duration
+	p := NewProgress(fakeClock(&elapsed), 5, "")
+	p.Observe(taskEvent("coder", "toolu_t"))
+	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash", ParentID: "toolu_t"})
+
+	frame := p.Frame()
+	wantLine := "⌨️ coder" + subagentTagSeparator + "Bash"
+	if !strings.Contains(frame, wantLine) {
+		t.Fatalf("Task-launch attributed line %q not in frame %q", wantLine, frame)
 	}
 }
 

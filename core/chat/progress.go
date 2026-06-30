@@ -224,7 +224,10 @@ type Progress struct {
 	// tagged with that label (see activityLine). It is populated only when a launch
 	// carries a non-empty ToolID; it stays nil/empty when the live stream omits
 	// tool_use ids or parent_tool_use_id, in which case per-line attribution is a
-	// no-op with zero regression.
+	// no-op with zero regression. Attribution assumes the launching tool_use envelope
+	// is decoded BEFORE any inner envelope carrying its id as parent_tool_use_id (the
+	// CLI guarantees this ordering); out-of-order arrival degrades to an untagged line
+	// (a benign no-op).
 	subagentByToolID map[string]string
 }
 
@@ -408,6 +411,10 @@ const subagentTagSeparator = " ▸ "
 // so it survives the tail-truncation in capLine/Frame and capLine's emoji-prefix
 // peeling still works unchanged. An empty label is a no-op: the body is returned
 // untouched, so a top-level event renders byte-identical to before this feature.
+//
+// The tag consumes line budget, so an attributed line's content is truncated
+// ~tag-length earlier than the byte-identical untagged line — intentional, since the
+// attribution is higher-signal than the trailing chars of a long command.
 func withSubagentTag(label, body string) string {
 	if label == "" {
 		return body
