@@ -1,6 +1,6 @@
 // Command duck-vk is the Go VKontakte (VK) community-bot adapter for flock. Each
 // allowed VK user's DM/mention is dispatched to that chat's isolated workspace
-// and run through the core/claude Runner; the event stream renders to one live
+// and run through the configured AI provider Runner; the event stream renders to one live
 // "Working… (Ns)" progress message with a Stop button (edited in place), replaced
 // by the final answer on completion. Runs are
 // parallel across chats (capped) and serial within a chat (core/dispatch); each
@@ -38,6 +38,7 @@ import (
 	"github.com/duckbugio/flock/core/session"
 	"github.com/duckbugio/flock/core/voice"
 	"github.com/duckbugio/flock/core/workspace"
+	"github.com/duckbugio/flock/internal/airunner"
 	"github.com/duckbugio/flock/internal/config"
 )
 
@@ -76,6 +77,30 @@ func run() int {
 	}))
 	slog.SetDefault(logger)
 
+	runner, opts, provider, err := airunner.Build(cfg)
+	if err != nil {
+		logger.Error("invalid ai provider config", "provider", cfg.AIBackend, "error", err)
+		return 1
+	}
+	if provider.Name == config.AIBackendCodex {
+		logger.Info("codex backend enabled",
+			"provider", provider.Name,
+			"display_name", provider.DisplayName,
+			"auth_mode", cfg.CodexAuthModeName(),
+			"sandbox", cfg.CodexSandbox,
+			"approval_policy", cfg.CodexApprovalPolicy,
+			"codex_home", cfg.CodexHome,
+			"capabilities", provider.Capabilities,
+		)
+	} else {
+		logger.Info("ai provider enabled",
+			"provider", provider.Name,
+			"display_name", provider.DisplayName,
+			"model", opts.Model,
+			"capabilities", provider.Capabilities,
+		)
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -91,17 +116,10 @@ func run() int {
 		logger.Warn("git setup", "error", err)
 	}
 
-	runner := claude.New(cfg.ClaudeBin)
-	opts := claude.Options{
-		Model:    cfg.ClaudeModel,
-		MaxTurns: cfg.ClaudeMaxTurns,
-		Effort:   cfg.ClaudeEffort,
-		Env:      claudeEnv(cfg),
-	}
 	// Wire the context7 MCP docs server (up-to-date, version-specific library/API
 	// docs) into every run when enabled. A write failure is non-fatal — the bot
 	// runs without it, exactly as before.
-	if cfg.EnableContext7 {
+	if provider.Name == config.AIBackendClaude && cfg.EnableContext7 {
 		mcpPath := filepath.Join(cfg.ApprovedDirectory, ".flock-mcp.json")
 		if err := claude.WriteContext7MCPConfig(mcpPath); err != nil {
 			logger.Warn("write context7 mcp config; running without docs MCP", "error", err)
@@ -347,19 +365,6 @@ func buildStarNudge(cfg config.Config, logger *slog.Logger) chat.StarNudgeConfig
 		Client:  ghstar.New(ghstar.Config{Token: cfg.GitToken, Logger: logger}),
 		Store:   store,
 	}
-}
-
-// claudeEnv derives the child process environment for the claude CLI. Mirrors
-// cmd/flock-telegram.
-func claudeEnv(cfg config.Config) []string {
-	env := os.Environ()
-	if cfg.ClaudeCodeOAuthToken != "" {
-		env = append(env, "CLAUDE_CODE_OAUTH_TOKEN="+cfg.ClaudeCodeOAuthToken)
-	}
-	if cfg.AnthropicAPIKey != "" {
-		env = append(env, "ANTHROPIC_API_KEY="+cfg.AnthropicAPIKey)
-	}
-	return env
 }
 
 // formatPRComment builds a neutral English prompt relaying a polled PR review

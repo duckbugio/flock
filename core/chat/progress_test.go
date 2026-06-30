@@ -10,7 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/duckbugio/flock/core/claude"
+	"github.com/duckbugio/flock/core/agent"
 )
 
 // fakeClock returns a controllable elapsed function for deterministic frames.
@@ -35,7 +35,7 @@ func TestFrameCounterDrivenByClockNotEvents(t *testing.T) {
 
 	// A single tool_use, then a long silent gap: the counter must keep climbing
 	// even though no further events arrived.
-	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash"})
+	p.Observe(agent.Event{Type: agent.ToolUse, Tool: "Bash"})
 	elapsed = 42 * time.Second
 	frame := p.Frame()
 	if !strings.Contains(frame, "Working… (42s)") {
@@ -51,7 +51,7 @@ func TestActivityRingBounded(t *testing.T) {
 	p := NewProgress(fakeClock(&elapsed), 3, "")
 
 	for _, tool := range []string{"Read", "Grep", "Edit", "Bash", "Write"} {
-		p.Observe(claude.Event{Type: claude.ToolUse, Tool: tool})
+		p.Observe(agent.Event{Type: agent.ToolUse, Tool: tool})
 	}
 	frame := p.Frame()
 	// Blocks are separated by a blank line ("\n\n"): 1 header + 1 "+2 earlier"
@@ -78,8 +78,8 @@ func TestActivityRingBounded(t *testing.T) {
 func TestFrameSeparatesStepsWithBlankLine(t *testing.T) {
 	var elapsed time.Duration
 	p := NewProgress(fakeClock(&elapsed), 5, "")
-	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Read"})
-	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash"})
+	p.Observe(agent.Event{Type: agent.ToolUse, Tool: "Read"})
+	p.Observe(agent.Event{Type: agent.ToolUse, Tool: "Bash"})
 
 	frame := p.Frame()
 	// Blocks are separated by a blank line ("\n\n"): the header + one block per step.
@@ -99,16 +99,16 @@ func TestObserveTextAndIgnoredEvents(t *testing.T) {
 	var elapsed time.Duration
 	p := NewProgress(fakeClock(&elapsed), 5, "")
 
-	if p.Observe(claude.Event{Type: claude.SystemInit, SessionID: "s1"}) {
+	if p.Observe(agent.Event{Type: agent.SystemInit, SessionID: "s1"}) {
 		t.Fatal("SystemInit should not change the ring")
 	}
-	if p.Observe(claude.Event{Type: claude.ToolResult}) {
+	if p.Observe(agent.Event{Type: agent.ToolResult}) {
 		t.Fatal("ToolResult should not change the ring")
 	}
-	if p.Observe(claude.Event{Type: claude.Text, Text: "   \n\t "}) {
+	if p.Observe(agent.Event{Type: agent.Text, Text: "   \n\t "}) {
 		t.Fatal("whitespace-only text should not change the ring")
 	}
-	if !p.Observe(claude.Event{Type: claude.Text, Text: "hello\nthere   world"}) {
+	if !p.Observe(agent.Event{Type: agent.Text, Text: "hello\nthere   world"}) {
 		t.Fatal("non-empty text should change the ring")
 	}
 	frame := p.Frame()
@@ -187,7 +187,7 @@ func TestToolUseDetailEnrichment(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var elapsed time.Duration
 			p := NewProgress(fakeClock(&elapsed), 5, "")
-			p.Observe(claude.Event{Type: claude.ToolUse, Tool: tc.tool, ToolInput: []byte(tc.input)})
+			p.Observe(agent.Event{Type: agent.ToolUse, Tool: tc.tool, ToolInput: []byte(tc.input)})
 			frame := p.Frame()
 			if !strings.Contains(frame, tc.wantSub) {
 				t.Fatalf("frame %q does not contain %q", frame, tc.wantSub)
@@ -246,8 +246,8 @@ func TestToolDetailCollapsesMultilineCommand(t *testing.T) {
 func TestActivityLineHidesBashCommand(t *testing.T) {
 	var elapsed time.Duration
 	p := NewProgress(fakeClock(&elapsed), 5, "")
-	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash", ToolInput: []byte(`{"command":"echo secret"}`)})
-	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Read", ToolInput: []byte(`{"file_path":"main.go"}`)})
+	p.Observe(agent.Event{Type: agent.ToolUse, Tool: "Bash", ToolInput: []byte(`{"command":"echo secret"}`)})
+	p.Observe(agent.Event{Type: agent.ToolUse, Tool: "Read", ToolInput: []byte(`{"file_path":"main.go"}`)})
 
 	frame := p.Frame()
 	if !strings.Contains(frame, "⌨️ Bash") {
@@ -532,7 +532,7 @@ func TestFrameRendersFilePathRelative(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Read", ToolInput: input})
+	p.Observe(agent.Event{Type: agent.ToolUse, Tool: "Read", ToolInput: input})
 	frame := p.Frame()
 	if !strings.Contains(frame, "📖 Read · roost/web/src/components/SettingsForm.tsx") {
 		t.Fatalf("frame should render repo-relative Read line, got: %q", frame)
@@ -548,7 +548,7 @@ func TestActivitySnippetTruncated(t *testing.T) {
 	// A single (hence most-recent) line longer than recentSnippetMax is capped at
 	// recentSnippetMax; the emoji prefix rides on top of that text budget.
 	long := strings.Repeat("a", recentSnippetMax+200)
-	p.Observe(claude.Event{Type: claude.Text, Text: long})
+	p.Observe(agent.Event{Type: agent.Text, Text: long})
 	frame := p.Frame()
 	prefixRunes := utf8.RuneCountInString(thoughtPrefix)
 	var sawActivity bool
@@ -582,8 +582,8 @@ func TestPositionalSnippetCaps(t *testing.T) {
 	mid := olderSnippetMax + 100
 	older := strings.Repeat("o", mid)
 	newer := strings.Repeat("n", mid)
-	p.Observe(claude.Event{Type: claude.Text, Text: older})
-	p.Observe(claude.Event{Type: claude.Text, Text: newer})
+	p.Observe(agent.Event{Type: agent.Text, Text: older})
+	p.Observe(agent.Event{Type: agent.Text, Text: newer})
 
 	prefixRunes := utf8.RuneCountInString(thoughtPrefix)
 	var olderLine, newerLine string
@@ -621,7 +621,7 @@ func TestFrameBudgetNeverExceedsLimit(t *testing.T) {
 	var elapsed time.Duration
 	p := NewProgress(fakeClock(&elapsed), 5, "")
 	for i := 0; i < 5; i++ {
-		p.Observe(claude.Event{Type: claude.Text, Text: strings.Repeat("x", recentSnippetMax+500)})
+		p.Observe(agent.Event{Type: agent.Text, Text: strings.Repeat("x", recentSnippetMax+500)})
 	}
 	frame := p.Frame()
 	if n := utf8.RuneCountInString(frame); n > frameBudgetMax {
@@ -732,7 +732,7 @@ func TestElidedIndicatorHiddenWhenAllShown(t *testing.T) {
 	const ring = 5
 	p := NewProgress(fakeClock(&elapsed), ring, "")
 	for i := 0; i < ring; i++ {
-		p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash"})
+		p.Observe(agent.Event{Type: agent.ToolUse, Tool: "Bash"})
 	}
 	if frame := p.Frame(); strings.Contains(frame, "earlier") {
 		t.Fatalf("indicator shown when nothing elided: %q", frame)
@@ -747,7 +747,7 @@ func TestElidedIndicatorShownWhenEvicted(t *testing.T) {
 	const extra = 37
 	p := NewProgress(fakeClock(&elapsed), ring, "")
 	for i := 0; i < ring+extra; i++ {
-		p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash"})
+		p.Observe(agent.Event{Type: agent.ToolUse, Tool: "Bash"})
 	}
 	frame := p.Frame()
 	if !strings.Contains(frame, "+"+strconv.Itoa(extra)+" earlier") {
@@ -798,9 +798,9 @@ func TestElidedIndicatorCountsBudgetDrops(t *testing.T) {
 // (the first variadic arg) sets the launch's tool_use id — what an inner event later
 // echoes as its ParentID, so the inner activity can be attributed back to this
 // subagent (AC3). Omitting it keeps the existing no-id call sites unchanged.
-func taskEvent(subagentType string, toolID ...string) claude.Event {
-	e := claude.Event{
-		Type:      claude.ToolUse,
+func taskEvent(subagentType string, toolID ...string) agent.Event {
+	e := agent.Event{
+		Type:      agent.ToolUse,
 		Tool:      "Task",
 		ToolInput: []byte(`{"subagent_type":"` + subagentType + `"}`),
 	}
@@ -814,9 +814,9 @@ func taskEvent(subagentType string, toolID ...string) claude.Event {
 // (optionally) a tool_use id, mirroring how THIS harness spawns subagents — via the
 // Agent tool, not Task (AC1/AC3). A non-empty toolID is what an inner event later
 // echoes as its ParentID, so it can be attributed back to this subagent.
-func agentEvent(subagentType, toolID string) claude.Event {
-	return claude.Event{
-		Type:      claude.ToolUse,
+func agentEvent(subagentType, toolID string) agent.Event {
+	return agent.Event{
+		Type:      agent.ToolUse,
 		Tool:      "Agent",
 		ToolInput: []byte(`{"subagent_type":"` + subagentType + `"}`),
 		ToolID:    toolID,
@@ -846,8 +846,8 @@ func TestStageHeaderAbsentWithoutTask(t *testing.T) {
 	var elapsed time.Duration
 	p := NewProgress(fakeClock(&elapsed), 5, "")
 	// A non-Task tool and a thought — ordinary activity, no pipeline.
-	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Read", ToolInput: []byte(`{"file_path":"a.go"}`)})
-	p.Observe(claude.Event{Type: claude.Text, Text: "thinking"})
+	p.Observe(agent.Event{Type: agent.ToolUse, Tool: "Read", ToolInput: []byte(`{"file_path":"a.go"}`)})
+	p.Observe(agent.Event{Type: agent.Text, Text: "thinking"})
 	frame := p.Frame()
 	if strings.Contains(frame, stagePrefix) {
 		t.Fatalf("stage header rendered with no Task events: %q", frame)
@@ -879,8 +879,8 @@ func TestStageChangesOnlyOnTask(t *testing.T) {
 	p := NewProgress(fakeClock(&elapsed), 5, "")
 	p.Observe(taskEvent("planner"))
 	// An inner subagent tool call (flat at the top level) — must not flip the stage.
-	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash"})
-	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Read", ToolInput: []byte(`{"file_path":"x.go"}`)})
+	p.Observe(agent.Event{Type: agent.ToolUse, Tool: "Bash"})
+	p.Observe(agent.Event{Type: agent.ToolUse, Tool: "Read", ToolInput: []byte(`{"file_path":"x.go"}`)})
 	if p.activeStage != 0 || len(p.stages) != 1 || p.stages[0] != "planner" {
 		t.Fatalf("inner tool events changed the stage: active=%d stages=%v", p.activeStage, p.stages)
 	}
@@ -899,7 +899,7 @@ func TestStageTrailFromAgentLaunches(t *testing.T) {
 	p := NewProgress(fakeClock(&elapsed), 5, "")
 	p.Observe(agentEvent("coder", "toolu_1"))
 	// An inner subagent tool call (flat at the top level) — must not advance the stage.
-	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash", ParentID: "toolu_1"})
+	p.Observe(agent.Event{Type: agent.ToolUse, Tool: "Bash", ParentID: "toolu_1"})
 	p.Observe(agentEvent("reviewer", "toolu_2"))
 	p.Observe(agentEvent("arbiter", "toolu_3"))
 
@@ -941,7 +941,7 @@ func TestActivityLineSubagentAttribution(t *testing.T) {
 	p.Observe(agentEvent("coder", "toolu_1"))
 	// The coder subagent runs a Bash command; it arrives flat with ParentID == the
 	// launch's ToolID, so the line is attributed to "coder".
-	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash", ParentID: "toolu_1"})
+	p.Observe(agent.Event{Type: agent.ToolUse, Tool: "Bash", ParentID: "toolu_1"})
 
 	frame := p.Frame()
 	wantLine := "⌨️ coder" + subagentTagSeparator + "Bash"
@@ -964,13 +964,13 @@ func TestActivityLineNoAttributionByteIdentical(t *testing.T) {
 
 	// (a) A progress that never saw a subagent launch — pure top-level activity.
 	bare := NewProgress(fakeClock(&e1), 5, "")
-	bare.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash"})
+	bare.Observe(agent.Event{Type: agent.ToolUse, Tool: "Bash"})
 
 	// (b) A progress that DID launch a subagent, then sees an unrelated top-level
 	// event (empty ParentID): it must render identically to (a), with no tag.
 	withMap := NewProgress(fakeClock(&e2), 5, "")
 	withMap.Observe(agentEvent("coder", "toolu_1"))
-	bareTopLevel := withMap.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash"})
+	bareTopLevel := withMap.Observe(agent.Event{Type: agent.ToolUse, Tool: "Bash"})
 	if !bareTopLevel {
 		t.Fatal("expected the top-level Bash event to push an activity line")
 	}
@@ -997,7 +997,7 @@ func TestActivityLineUnknownParentNoTag(t *testing.T) {
 	p := NewProgress(fakeClock(&elapsed), 5, "")
 	p.Observe(agentEvent("coder", "toolu_1"))
 	// ParentID points at a tool_use id we never recorded — degrade to no tag.
-	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash", ParentID: "toolu_unknown"})
+	p.Observe(agent.Event{Type: agent.ToolUse, Tool: "Bash", ParentID: "toolu_unknown"})
 	frame := p.Frame()
 	if strings.Contains(frame, subagentTagSeparator+"Bash") {
 		t.Fatalf("unknown-parent event wrongly tagged: %q", frame)
@@ -1025,7 +1025,7 @@ func TestActivityLineTagSurvivesTruncation(t *testing.T) {
 	// A long inner thought attributed to the coder subagent. Its body (after the head
 	// tag) must comfortably exceed olderSnippetMax so the 400-cap actually truncates it.
 	longBody := strings.Repeat("z", olderSnippetMax+300)
-	if !p.Observe(claude.Event{Type: claude.Text, Text: longBody, ParentID: "toolu_1"}) {
+	if !p.Observe(agent.Event{Type: agent.Text, Text: longBody, ParentID: "toolu_1"}) {
 		t.Fatal("expected the inner thought event to push an activity line")
 	}
 	// Sanity: the STORED body (emoji prefix peeled) really exceeds olderSnippetMax before
@@ -1040,7 +1040,7 @@ func TestActivityLineTagSurvivesTruncation(t *testing.T) {
 	// ring position (where it is re-capped to olderSnippetMax), while staying inside the
 	// 5-slot ring — the launch line + the tagged thought + these three fill it exactly.
 	for i := 0; i < 3; i++ {
-		p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash"})
+		p.Observe(agent.Event{Type: agent.ToolUse, Tool: "Bash"})
 	}
 
 	var taggedOlder string
@@ -1080,7 +1080,7 @@ func TestActivityLineTagMarkdownSanitized(t *testing.T) {
 	// stageLabelMeta ("*_~`|=[]<>") from "a*b_c~d`|" leaves "abcd".
 	rawLabel := "a*b_c~d`|"
 	p.Observe(agentEvent(rawLabel, "toolu_2"))
-	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash", ParentID: "toolu_2"})
+	p.Observe(agent.Event{Type: agent.ToolUse, Tool: "Bash", ParentID: "toolu_2"})
 
 	var tagged string
 	for _, line := range strings.Split(p.Frame(), "\n") {
@@ -1116,7 +1116,7 @@ func TestActivityLineTaskLaunchAttribution(t *testing.T) {
 	var elapsed time.Duration
 	p := NewProgress(fakeClock(&elapsed), 5, "")
 	p.Observe(taskEvent("coder", "toolu_t"))
-	p.Observe(claude.Event{Type: claude.ToolUse, Tool: "Bash", ParentID: "toolu_t"})
+	p.Observe(agent.Event{Type: agent.ToolUse, Tool: "Bash", ParentID: "toolu_t"})
 
 	frame := p.Frame()
 	wantLine := "⌨️ coder" + subagentTagSeparator + "Bash"
@@ -1185,7 +1185,7 @@ func TestStageLineCountedAgainstBudget(t *testing.T) {
 	p := NewProgress(fakeClock(&elapsed), 5, "")
 	p.Observe(taskEvent("coder"))
 	for i := 0; i < 5; i++ {
-		p.Observe(claude.Event{Type: claude.Text, Text: strings.Repeat("x", recentSnippetMax+500)})
+		p.Observe(agent.Event{Type: agent.Text, Text: strings.Repeat("x", recentSnippetMax+500)})
 	}
 	frame := p.Frame()
 	if n := utf8.RuneCountInString(frame); n > frameBudgetMax {
@@ -1222,7 +1222,7 @@ func TestStageLineBoundedByManyDistinctStages(t *testing.T) {
 	}
 	// A full ring of maximal lines on top, so header + ring are both at their worst.
 	for i := 0; i < 5; i++ {
-		p.Observe(claude.Event{Type: claude.Text, Text: strings.Repeat("x", recentSnippetMax+500)})
+		p.Observe(agent.Event{Type: agent.Text, Text: strings.Repeat("x", recentSnippetMax+500)})
 	}
 
 	// The stage line alone must be within its construction cap.
@@ -1364,26 +1364,26 @@ func assertMarkdownSafe(t *testing.T, line string) {
 }
 
 func TestFinalSuccess(t *testing.T) {
-	out := Final(&claude.RunResult{Text: "  the answer is 42  ", IsError: false})
+	out := Final(&agent.RunResult{Text: "  the answer is 42  ", IsError: false})
 	if out != "the answer is 42" {
 		t.Fatalf("got %q", out)
 	}
 }
 
 func TestFinalErrorResult(t *testing.T) {
-	out := Final(&claude.RunResult{Text: "max turns exceeded", IsError: true})
+	out := Final(&agent.RunResult{Text: "max turns exceeded", IsError: true})
 	if !strings.HasPrefix(out, "⚠️") || !strings.Contains(out, "max turns exceeded") {
 		t.Fatalf("error result not flagged: %q", out)
 	}
 
-	empty := Final(&claude.RunResult{Text: "", IsError: true})
+	empty := Final(&agent.RunResult{Text: "", IsError: true})
 	if !strings.HasPrefix(empty, "⚠️") {
 		t.Fatalf("empty error result not flagged: %q", empty)
 	}
 
 	// Diagnostic: an empty-bodied error Result surfaces the subtype so the cause
 	// isn't fully opaque.
-	withSub := Final(&claude.RunResult{Text: "", IsError: true, Subtype: "error_max_turns"})
+	withSub := Final(&agent.RunResult{Text: "", IsError: true, Subtype: "error_max_turns"})
 	if !strings.Contains(withSub, "error_max_turns") {
 		t.Fatalf("empty error result should include the subtype: %q", withSub)
 	}
@@ -1392,7 +1392,7 @@ func TestFinalErrorResult(t *testing.T) {
 		t.Fatalf("empty error result without subtype should use the plain fallback: %q", empty)
 	}
 
-	if got := Final(&claude.RunResult{Text: "", IsError: false}); got != "(empty response)" {
+	if got := Final(&agent.RunResult{Text: "", IsError: false}); got != "(empty response)" {
 		t.Fatalf("empty success placeholder: %q", got)
 	}
 	if got := Final(nil); got != "(no result)" {

@@ -1,6 +1,6 @@
 // Command flock-telegram is the Go Telegram adapter for flock. Each allowed
 // user's message is dispatched to that chat's isolated workspace and run through
-// the core/claude Runner; the event stream renders to one live "Working… (Ns)"
+// the configured AI provider Runner; the event stream renders to one live "Working… (Ns)"
 // progress message with a Stop button, replaced by the final answer on
 // completion. Runs are parallel across chats (capped) and serial within a chat
 // (core/dispatch); each chat gets its own /workspace/chat_<id> with a rendered
@@ -25,6 +25,7 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"github.com/duckbugio/flock/adapters/telegram"
+	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/chat"
 	"github.com/duckbugio/flock/core/claude"
 	"github.com/duckbugio/flock/core/cost"
@@ -39,6 +40,7 @@ import (
 	"github.com/duckbugio/flock/core/session"
 	"github.com/duckbugio/flock/core/voice"
 	"github.com/duckbugio/flock/core/workspace"
+	"github.com/duckbugio/flock/internal/airunner"
 	"github.com/duckbugio/flock/internal/config"
 )
 
@@ -73,6 +75,30 @@ func run() int {
 	}))
 	slog.SetDefault(logger)
 
+	runner, opts, provider, err := airunner.Build(cfg)
+	if err != nil {
+		logger.Error("invalid ai provider config", "provider", cfg.AIBackend, "error", err)
+		return 1
+	}
+	if provider.Name == config.AIBackendCodex {
+		logger.Info("codex backend enabled",
+			"provider", provider.Name,
+			"display_name", provider.DisplayName,
+			"auth_mode", cfg.CodexAuthModeName(),
+			"sandbox", cfg.CodexSandbox,
+			"approval_policy", cfg.CodexApprovalPolicy,
+			"codex_home", cfg.CodexHome,
+			"capabilities", provider.Capabilities,
+		)
+	} else {
+		logger.Info("ai provider enabled",
+			"provider", provider.Name,
+			"display_name", provider.DisplayName,
+			"model", opts.Model,
+			"capabilities", provider.Capabilities,
+		)
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -89,19 +115,10 @@ func run() int {
 		logger.Warn("git setup", "error", err)
 	}
 
-	runner := claude.New(cfg.ClaudeBin)
-	// Workdir is resolved per chat at run time (workspace.Renderer); only the
-	// model/turns/env are constant across runs.
-	opts := claude.Options{
-		Model:    cfg.ClaudeModel,
-		MaxTurns: cfg.ClaudeMaxTurns,
-		Effort:   cfg.ClaudeEffort,
-		Env:      claudeEnv(cfg),
-	}
 	// Wire the context7 MCP docs server (up-to-date, version-specific library/API
 	// docs) into every run when enabled. A write failure is non-fatal — the bot
 	// runs without it, exactly as before.
-	if cfg.EnableContext7 {
+	if provider.Name == config.AIBackendClaude && cfg.EnableContext7 {
 		mcpPath := filepath.Join(cfg.ApprovedDirectory, ".flock-mcp.json")
 		if err := claude.WriteContext7MCPConfig(mcpPath); err != nil {
 			logger.Warn("write context7 mcp config; running without docs MCP", "error", err)
@@ -416,10 +433,10 @@ type messageSubmitter interface {
 	Handle(ctx context.Context, chatID chat.ChatID, userID int64, msgID chat.MessageID, prompt string)
 	HandleEdit(ctx context.Context, chatID chat.ChatID, userID int64, msgID chat.MessageID, prompt string)
 	HandleMedia(
-		ctx context.Context, chatID chat.ChatID, userID int64, msgID chat.MessageID, prompt string, images []claude.ImageInput,
+		ctx context.Context, chatID chat.ChatID, userID int64, msgID chat.MessageID, prompt string, images []agent.ImageInput,
 	)
 	HandleEditMedia(
-		ctx context.Context, chatID chat.ChatID, userID int64, msgID chat.MessageID, prompt string, images []claude.ImageInput,
+		ctx context.Context, chatID chat.ChatID, userID int64, msgID chat.MessageID, prompt string, images []agent.ImageInput,
 	)
 }
 
@@ -629,7 +646,7 @@ func handlePhoto(
 // submitMedia routes a media-derived run through the Service, mirroring the
 // new-vs-edit split of the text path. Images are non-nil only for a vision run.
 func submitMedia(
-	ctx context.Context, service messageSubmitter, msg *models.Message, prompt string, images []claude.ImageInput, isEdit bool,
+	ctx context.Context, service messageSubmitter, msg *models.Message, prompt string, images []agent.ImageInput, isEdit bool,
 ) {
 	if isEdit {
 		service.HandleEditMedia(ctx, chatIDStr(msg.Chat.ID), msg.From.ID, msgIDStr(msg.ID), prompt, images)
@@ -1108,18 +1125,4 @@ func sendNotice(ctx context.Context, b *bot.Bot, chatID int64, text string) {
 	if _, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: text}); err != nil {
 		slog.Debug("send notice", "error", err)
 	}
-}
-
-// claudeEnv derives the child process environment for the claude CLI: the
-// process environment plus the configured auth token, so the CLI authenticates
-// the same way the deploy provides it.
-func claudeEnv(cfg config.Config) []string {
-	env := os.Environ()
-	if cfg.ClaudeCodeOAuthToken != "" {
-		env = append(env, "CLAUDE_CODE_OAUTH_TOKEN="+cfg.ClaudeCodeOAuthToken)
-	}
-	if cfg.AnthropicAPIKey != "" {
-		env = append(env, "ANTHROPIC_API_KEY="+cfg.AnthropicAPIKey)
-	}
-	return env
 }

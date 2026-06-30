@@ -1,6 +1,6 @@
 package chat
 
-// This file holds the transport-agnostic progress rendering: turning a claude
+// This file holds the transport-agnostic progress rendering: turning an agent
 // event stream plus wall-clock ticks into the text of a live "Working… (Ns)"
 // progress message. It knows nothing about any chat platform's API so it can be
 // unit-tested in isolation. Final-answer chunking lives in chunk.go.
@@ -14,7 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/duckbugio/flock/core/claude"
+	"github.com/duckbugio/flock/core/agent"
 )
 
 // defaultRingSize is how many recent activity lines the progress frame shows.
@@ -193,7 +193,7 @@ const (
 // even during a long, silent tool call.
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// Progress accumulates a claude event stream into the text of a single editable
+// Progress accumulates an agent event stream into the text of a single editable
 // "Working…" message. The elapsed header is driven by an injected clock (see
 // NewProgress) rather than by events, so the counter advances even during a
 // long, silent tool call (§7.2 of the rewrite plan). Progress is not safe for
@@ -253,7 +253,7 @@ func NewProgress(elapsed func() time.Duration, ringSize int, baseDir string) *Pr
 // (Result, RunError) carry no activity line and are ignored here; callers use
 // Final / FinalError to render the terminal message. It reports whether the
 // activity ring changed, so callers can skip a redundant edit.
-func (p *Progress) Observe(e claude.Event) bool {
+func (p *Progress) Observe(e agent.Event) bool {
 	// A subagent launch (the Lead spawning a dev-team subagent — via the Task OR the
 	// Agent tool, depending on the harness) advances the stage header. This is the
 	// ONLY event that changes the active stage: an inner subagent's own tool events
@@ -261,7 +261,7 @@ func (p *Progress) Observe(e claude.Event) bool {
 	// ordinary ToolUse events with a non-task/agent tool name and must not flip the
 	// active stage. When the launch carries a tool_use id, remember it so the
 	// subagent's inner activity lines can be attributed to it (see activityLine).
-	if e.Type == claude.ToolUse && isSubagentLaunch(e.Tool) {
+	if e.Type == agent.ToolUse && isSubagentLaunch(e.Tool) {
 		label := subagentLabel(e.ToolInput)
 		p.advanceStage(label)
 		if e.ToolID != "" {
@@ -365,9 +365,9 @@ func sanitizeStageLabel(label string) string {
 // right after the emoji prefix ("⌨️ coder ▸ Bash"), so the tag survives the recency
 // re-cap and the prefix-peeling in capLine. An empty tag (a top-level event, or
 // a stream that omits parent linkage) renders EXACTLY as before — byte-identical.
-func activityLine(e claude.Event, baseDir, subagentTag string) (string, bool) {
+func activityLine(e agent.Event, baseDir, subagentTag string) (string, bool) {
 	switch e.Type {
-	case claude.ToolUse:
+	case agent.ToolUse:
 		tool := e.Tool
 		if tool == "" {
 			tool = "tool"
@@ -382,7 +382,7 @@ func activityLine(e claude.Event, baseDir, subagentTag string) (string, bool) {
 			}
 		}
 		return toolLinePrefix(tool) + withSubagentTag(subagentTag, truncateRunes(line, recentSnippetMax)), true
-	case claude.Text:
+	case agent.Text:
 		// Model "thought" text is free-form prose, not a CLI-shaped command, so it is
 		// shown verbatim and deliberately NOT run through redactSecrets: the keyword
 		// heuristics that are safe on a shell command ("password hunter2") would mangle
@@ -834,7 +834,7 @@ func (p *Progress) Frame() string {
 // Final renders the terminal message text for a successful run result. A
 // result that carries no text (e.g. an error subtype with an empty body) yields
 // a short placeholder so the user is never left with an empty message.
-func Final(res *claude.RunResult) string {
+func Final(res *agent.RunResult) string {
 	if res == nil {
 		return "(no result)"
 	}

@@ -3,7 +3,7 @@ package chat
 import "strings"
 
 // ReservedCommand is one slash command the bot handles itself rather than
-// forwarding to Claude. Name is the bare command word (no leading "/", no
+// forwarding to the selected AI provider. Name is the bare command word (no leading "/", no
 // @botname suffix); Description is a concise English summary surfaced in a
 // transport's command menu (e.g. Telegram's SetMyCommands).
 type ReservedCommand struct {
@@ -13,8 +13,8 @@ type ReservedCommand struct {
 
 // ReservedCommands is the single source of truth for the slash commands the bot
 // intercepts. A reserved command is handled by the bot itself and is NEVER
-// forwarded to the Claude Runner; every OTHER slash command (e.g. /loop, /goal,
-// /security-review) is forwarded verbatim so Claude Code's own slash-command and
+// forwarded to the provider Runner; every OTHER slash command (e.g. /loop, /goal,
+// /security-review) is forwarded verbatim so the provider's own slash-command and
 // skill system runs it. Both adapters (Telegram, VK) decide what to intercept
 // from this list, and Telegram builds its command menu from it. The order here is
 // the order the menu presents: start, help, new, stop, schedule.
@@ -30,7 +30,7 @@ var ReservedCommands = []ReservedCommand{
 // The match is case-insensitive (name is normalized to lower case) and exact:
 // only the bare command word counts, so "new" matches but "news" does not, and a
 // command with a trailing space ("new ") does not match. A reserved command is
-// dispatched by the bot; any other slash command is forwarded to Claude verbatim.
+// dispatched by the bot; any other slash command is forwarded to the provider verbatim.
 func IsReservedCommand(name string) bool {
 	name = strings.ToLower(name)
 	for _, c := range ReservedCommands {

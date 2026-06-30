@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/chat"
-	"github.com/duckbugio/flock/core/claude"
 	"github.com/duckbugio/flock/core/schedule"
 )
 
@@ -32,7 +32,7 @@ const newSessionText = "Started a fresh session. Your next message begins a new 
 type Service interface {
 	Handle(ctx context.Context, chatID chat.ChatID, userID int64, msgID chat.MessageID, prompt string)
 	HandleMedia(
-		ctx context.Context, chatID chat.ChatID, userID int64, msgID chat.MessageID, prompt string, images []claude.ImageInput,
+		ctx context.Context, chatID chat.ChatID, userID int64, msgID chat.MessageID, prompt string, images []agent.ImageInput,
 	)
 	Stop(runID string) bool
 	StopChat(chatID chat.ChatID) bool

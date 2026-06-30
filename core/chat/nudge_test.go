@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/duckbugio/flock/core/claude"
+	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/dispatch"
 )
 
@@ -76,7 +76,7 @@ func (s *fakeNudgeStore) MarkStarred() error {
 // newNudgeService builds a Service wired to the star nudge over a real Dispatcher
 // and fakes. cfg.Chat is the supplied fake chat.
 func newNudgeService(
-	t *testing.T, r claude.Runner, c Transport, cfg StarNudgeConfig,
+	t *testing.T, r agent.Runner, c Transport, cfg StarNudgeConfig,
 ) (*Service, *dispatch.Dispatcher) {
 	t.Helper()
 	d := dispatch.New(4)
@@ -93,9 +93,9 @@ func newNudgeService(
 }
 
 func successRunner() *fakeRunner {
-	return &fakeRunner{events: []claude.Event{
-		{Type: claude.SystemInit, SessionID: "s1"},
-		{Type: claude.Result, Result: &claude.RunResult{Text: finalAnswer, SessionID: "s1"}},
+	return &fakeRunner{events: []agent.Event{
+		{Type: agent.SystemInit, SessionID: "s1"},
+		{Type: agent.Result, Result: &agent.RunResult{Text: finalAnswer, SessionID: "s1"}},
 	}}
 }
 
@@ -128,9 +128,9 @@ func TestNudgeFiresAfterSuccessWhenUnstarred(t *testing.T) {
 func TestNudgeDoesNotFireOnError(t *testing.T) {
 	fc := newFakeChat()
 	st := &fakeStarrer{}
-	fr := &fakeRunner{events: []claude.Event{
-		{Type: claude.SystemInit, SessionID: "s1"},
-		{Type: claude.RunError, Err: errors.New("boom")},
+	fr := &fakeRunner{events: []agent.Event{
+		{Type: agent.SystemInit, SessionID: "s1"},
+		{Type: agent.RunError, Err: errors.New("boom")},
 	}}
 	svc, d := newNudgeService(t, fr, fc, enabledNudgeConfig(st, &fakeNudgeStore{}))
 	defer d.Close()

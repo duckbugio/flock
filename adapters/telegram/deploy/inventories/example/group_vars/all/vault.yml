@@ -16,6 +16,16 @@ vault_claude_oauth_token: "PUT_CLAUDE_CODE_OAUTH_TOKEN_HERE"
 # Claude auth when claude_auth_mode: api_key — Anthropic Console key
 vault_anthropic_api_key: ""
 
+# Codex auth when codex_auth_mode: subscription — optional trusted automation token.
+# Leave empty when using persisted CODEX_HOME/auth.json from `codex login`.
+vault_codex_access_token: ""
+
+# Codex auth when codex_auth_mode: billing — OpenAI Platform API key.
+vault_codex_api_key: ""
+
+# OpenAI-compatible provider API key (Qwen/DashScope, DeepSeek, OpenRouter, etc.).
+vault_openai_compat_api_key: ""
+
 # Git host access token (HTTPS PAT) — for cloning/PRs. Leave empty to skip git auth.
 vault_gitea_token: ""
 
