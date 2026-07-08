@@ -21,6 +21,7 @@ import (
 	"github.com/duckbugio/flock/core/cost"
 	"github.com/duckbugio/flock/core/dispatch"
 	"github.com/duckbugio/flock/core/pending"
+	"github.com/duckbugio/flock/core/verify"
 )
 
 // tickInterval is how often the wall-clock ticker re-renders the progress frame —
@@ -128,12 +129,12 @@ type Service struct {
 	tick       time.Duration
 	nowFunc    func() time.Time
 
-	mu             sync.Mutex           // guards runChat, lastMsg, verifyFixes, verifyRetry and budgetNotified
-	runChat        map[string]ChatID    // active runID -> chatID, for mapping Stop back to a chat
-	lastMsg        map[ChatID]MessageID // chatID -> the source message id of its latest submitted run
-	verifyFixes    map[ChatID]int       // consecutive post-run verification fix rounds per chat
-	verifyRetry    map[ChatID][]string  // repos whose gate failed last round (re-gated even if unchanged)
-	budgetNotified map[ChatID]string    // chatID -> UTC day the budget-reached notice was last sent
+	mu             sync.Mutex                 // guards runChat, lastMsg, verifyRetry, budgetNotified and snapCache
+	runChat        map[string]ChatID          // active runID -> chatID, for mapping Stop back to a chat
+	lastMsg        map[ChatID]MessageID       // chatID -> the source message id of its latest submitted run
+	verifyRetry    map[ChatID][]string        // repos whose gate failed last round (re-gated even if unchanged)
+	budgetNotified map[ChatID]string          // chatID -> UTC day the budget-reached notice was last sent
+	snapCache      map[ChatID]verify.Snapshot // post-run repo fingerprints, reused as the next run's "before"
 	runSeq         atomic.Uint64
 }
 
@@ -223,9 +224,9 @@ func New(cfg Config) *Service {
 		runChat:    map[string]ChatID{},
 		lastMsg:    map[ChatID]MessageID{},
 
-		verifyFixes:    map[ChatID]int{},
 		verifyRetry:    map[ChatID][]string{},
 		budgetNotified: map[ChatID]string{},
+		snapCache:      map[ChatID]verify.Snapshot{},
 	}
 }
 
@@ -256,9 +257,9 @@ func (s *Service) HandleMedia(
 ) {
 	s.mu.Lock()
 	s.lastMsg[chatID] = msgID
-	// A real user message opens a fresh chapter: the post-run verification fix
-	// loop's consecutive-round counter and retry list start over.
-	delete(s.verifyFixes, chatID)
+	// A real user message opens a fresh chapter: the post-run verification retry
+	// list starts over (the fix-round counter rides inside fix-up prompts, so a
+	// user message naturally resets it to zero).
 	delete(s.verifyRetry, chatID)
 	s.mu.Unlock()
 	// Enqueue the interrupted-run marker BEFORE Submit so a run that is only queued
@@ -432,9 +433,21 @@ func (s *Service) run(
 	}
 	opts.Workdir = workdir
 
-	// Fingerprint the workspace repos BEFORE the run so the post-run verifier can
-	// re-check exactly the repos this run changed (nil verifier → nil snapshot).
-	preSnap := s.postrun.Verifier.Take(ctx, workdir)
+	// The post-run verifier needs each repo's state as of BEFORE this run. Reuse
+	// the fingerprint cached at the END of the previous run (refreshSnapCache) so
+	// the git calls stay off the per-message critical path; only the first run
+	// after boot pays a synchronous Take here. Nil verifier → nil snapshot.
+	var preSnap verify.Snapshot
+	if s.postrun.Verifier != nil {
+		s.mu.Lock()
+		cached, ok := s.snapCache[chatID]
+		s.mu.Unlock()
+		if ok {
+			preSnap = cached
+		} else {
+			preSnap = s.postrun.Verifier.Take(ctx, workdir)
+		}
+	}
 	// The dispatcher lane context, captured before the per-run timeout is layered
 	// on: post-run work (verify/evaluate) must not inherit a deadline the main run
 	// already spent, but must still die on Stop/shutdown.
@@ -630,8 +643,26 @@ loop:
 	// spent, yet still dies on Stop/shutdown. It runs synchronously on the lane
 	// so its injected follow-up is ordered before any queued user message.
 	if finalResult != nil && finalErr == nil && ctx.Err() == nil && !finalResult.IsError {
-		s.postRun(laneCtx, chatID, workdir, preSnap)
+		s.postRun(laneCtx, chatID, workdir, prompt, preSnap)
 	}
+
+	// Cache the workspace's post-run fingerprints as the NEXT run's "before"
+	// state. This runs on EVERY terminal (an errored or stopped run may still
+	// have mutated repos) and after the answer is already delivered, so the git
+	// calls never add to the user's perceived latency.
+	s.refreshSnapCache(laneCtx, chatID, workdir)
+}
+
+// refreshSnapCache fingerprints the workspace and stores the result as
+// chatID's cached pre-run snapshot. A nil verifier is a no-op.
+func (s *Service) refreshSnapCache(ctx context.Context, chatID ChatID, workdir string) {
+	if s.postrun.Verifier == nil {
+		return
+	}
+	snap := s.postrun.Verifier.Take(ctx, workdir)
+	s.mu.Lock()
+	s.snapCache[chatID] = snap
+	s.mu.Unlock()
 }
 
 // recordCost accumulates a completed run's USD cost: a real user's run onto

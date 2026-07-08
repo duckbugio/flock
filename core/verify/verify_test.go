@@ -108,9 +108,17 @@ func TestChangedRepoGateFails(t *testing.T) {
 	if !strings.Contains(failed[0].Output, "boom failure detail") {
 		t.Fatalf("failure output not captured: %+v", failed[0])
 	}
-	prompt := FixPrompt(failed)
+	prompt := FixPrompt(failed, 1, 2)
 	if !strings.Contains(prompt, "make check") || !strings.Contains(prompt, "boom failure detail") {
 		t.Fatalf("FixPrompt must carry command and output:\n%s", prompt)
+	}
+	// The loop round rides inside the prompt (that is what makes the cap durable
+	// across restarts) and parses back exactly.
+	if round, ok := ParseFixRound(prompt); !ok || round != 1 {
+		t.Fatalf("ParseFixRound(FixPrompt) = %d, %v; want 1, true", round, ok)
+	}
+	if _, ok := ParseFixRound("an ordinary user message about Auto-fix round things"); ok {
+		t.Fatal("prose must not parse as a fix-round marker")
 	}
 }
 

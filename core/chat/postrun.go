@@ -57,16 +57,22 @@ type PostRunConfig struct {
 	BudgetCapUSD float64
 }
 
-// InjectAuto submits an AUTONOMY-originated prompt (a CI failure, a
-// verification or goal fix-up) into chatID. It differs from Inject in exactly
-// two ways: the run is attributed to AutoUser so its cost lands on the chat's
-// per-day autonomy budget, and the injection itself is gated by that budget —
-// once the day's budget is spent, autonomous work pauses (with a single daily
-// notice) while direct user messages keep working. Unlike InjectScheduled it
-// uses the BLOCKING Submit and enqueues an auto-resume marker: a fix-up for
-// work already paid for should neither be dropped on a busy lane nor lost to a
-// deploy. ctx scopes only the budget notice — the run itself executes under
-// the Dispatcher's per-chat context.
+// InjectAuto submits an AUTONOMY-originated prompt (a CI event, a verification
+// or goal fix-up) into chatID. It differs from Inject in exactly two ways: the
+// run is attributed to AutoUser so its cost lands on the chat's per-day
+// autonomy budget, and the injection itself is gated by that budget — once the
+// day's budget is spent, autonomous work pauses (with a single daily notice)
+// while direct user messages keep working. A fix-up for work already paid for
+// should neither be dropped on a busy lane nor lost to a deploy, so it
+// enqueues an auto-resume marker and never abandons the job — but it must NOT
+// block either: InjectAuto is called from postRun, which executes ON the
+// lane's own worker goroutine, and a blocking Submit against that lane's full
+// queue would deadlock the chat forever (the worker is the only goroutine that
+// drains the queue). Hence TrySubmit first, and on a full lane the blocking
+// wait is handed to a detached goroutine — Submit itself is shutdown-safe (it
+// drops on the dispatcher's root context), and the marker enqueued above
+// resumes the job if the process dies mid-wait. ctx scopes only the budget
+// notice — the run itself executes under the Dispatcher's per-chat context.
 func (s *Service) InjectAuto(ctx context.Context, chatID ChatID, prompt string) {
 	if !s.autoAllowed(chatID) {
 		s.log.Info("autonomy budget reached; dropping injected run", "chat_id", chatID)
@@ -74,22 +80,30 @@ func (s *Service) InjectAuto(ctx context.Context, chatID ChatID, prompt string) 
 		return
 	}
 	id := s.enqueuePending(chatID, prompt)
-	s.dispatch.Submit(chatID, func(runCtx context.Context) {
+	job := func(runCtx context.Context) {
 		s.run(runCtx, chatID, AutoUser, prompt, nil, id)
-	})
+	}
+	if s.dispatch.TrySubmit(chatID, job) {
+		return
+	}
+	s.log.Info("lane full; queuing autonomous run in the background", "chat_id", chatID)
+	go s.dispatch.Submit(chatID, job)
 }
 
 // postRun is the autonomy tail of a CLEANLY successful run: first the
 // deterministic gate re-run (verify), then — only on a clean tree — the goal
 // evaluator. Each stage may inject a follow-up run; the injected run repeats
-// this tail on ITS clean terminal, which is what closes the loop. ctx is the
-// dispatcher lane context (NOT the per-run timeout), so Stop/shutdown still
-// aborts post-run work promptly.
-func (s *Service) postRun(ctx context.Context, chatID ChatID, workdir string, snap verify.Snapshot) {
+// this tail on ITS clean terminal, which is what closes the loop. prompt is
+// the prompt that STARTED this run — a verification fix-up carries its loop
+// round inside it (see verify.FixPrompt), which is what makes the
+// consecutive-round cap survive restarts. ctx is the dispatcher lane context
+// (NOT the per-run timeout), so Stop/shutdown still aborts post-run work
+// promptly.
+func (s *Service) postRun(ctx context.Context, chatID ChatID, workdir, prompt string, snap verify.Snapshot) {
 	if ctx.Err() != nil {
 		return
 	}
-	if !s.verifyGates(ctx, chatID, workdir, snap) {
+	if !s.verifyGates(ctx, chatID, workdir, prompt, snap) {
 		return
 	}
 	s.evaluateGoal(ctx, chatID, workdir)
@@ -108,9 +122,12 @@ func (s *Service) notify(ctx context.Context, chatID ChatID, text string) {
 
 // verifyGates re-runs the check gates of repos this run changed and reports
 // whether the tree is clean (true also when verification is disabled or
-// nothing changed). On failure it notifies the chat and — within the per-chat
-// cap — injects a fix-up run.
-func (s *Service) verifyGates(ctx context.Context, chatID ChatID, workdir string, snap verify.Snapshot) bool {
+// nothing changed). On failure it notifies the chat and — within the
+// consecutive-round cap — injects a fix-up run. The round this run represents
+// is parsed from ITS OWN prompt (a fix-up prompt carries the marker; anything
+// else is round 0), so the cap is durable: a deploy mid-loop resumes the
+// fix-up run from its persisted prompt at the same round.
+func (s *Service) verifyGates(ctx context.Context, chatID ChatID, workdir, prompt string, snap verify.Snapshot) bool {
 	if s.postrun.Verifier == nil {
 		return true
 	}
@@ -125,7 +142,6 @@ func (s *Service) verifyGates(ctx context.Context, chatID ChatID, workdir string
 		if len(results) > 0 {
 			// A verified-clean round closes any ongoing fix loop.
 			s.mu.Lock()
-			delete(s.verifyFixes, chatID)
 			delete(s.verifyRetry, chatID)
 			s.mu.Unlock()
 		}
@@ -140,8 +156,8 @@ func (s *Service) verifyGates(ctx context.Context, chatID ChatID, workdir string
 	}
 	summary := strings.Join(cmds, ", ")
 
+	round, _ := verify.ParseFixRound(prompt) // 0 for a non-fix-up run
 	s.mu.Lock()
-	round := s.verifyFixes[chatID]
 	s.verifyRetry[chatID] = repos
 	s.mu.Unlock()
 	if round >= s.postrun.VerifyMaxFixes {
@@ -150,14 +166,11 @@ func (s *Service) verifyGates(ctx context.Context, chatID ChatID, workdir string
 			round, summary))
 		return false
 	}
-	s.mu.Lock()
-	s.verifyFixes[chatID] = round + 1
-	s.mu.Unlock()
 
 	s.notify(ctx, chatID, fmt.Sprintf(
 		"⚠️ Post-run verification failed: %s. Sending the team back to fix it (round %d/%d).",
 		summary, round+1, s.postrun.VerifyMaxFixes))
-	s.InjectAuto(ctx, chatID, verify.FixPrompt(failed))
+	s.InjectAuto(ctx, chatID, verify.FixPrompt(failed, round+1, s.postrun.VerifyMaxFixes))
 	return false
 }
 
@@ -197,7 +210,7 @@ func (s *Service) evaluateGoal(ctx context.Context, chatID ChatID, workdir strin
 		s.deleteGoal(chatID)
 	case g.Attempts >= g.MaxAttempts:
 		s.notify(ctx, chatID, fmt.Sprintf(
-			"⚠️ Goal NOT achieved after %d evaluation round(s) — stopping the loop. Last verdict: %s Re-arm with /goal when ready.",
+			"⚠️ Goal NOT achieved after %d evaluation round(s) — stopping the loop. Last verdict: %s\nRe-arm with /goal when ready.",
 			g.Attempts, verdict.Summary))
 		s.deleteGoal(chatID)
 	default:
@@ -310,9 +323,15 @@ func (s *Service) ArmGoal(chatID ChatID, criterion string) (goal.Goal, bool) {
 	if s.postrun.Goals == nil {
 		return goal.Goal{}, false
 	}
+	attempts := s.postrun.GoalMaxAttempts
+	if attempts < 1 {
+		// Defense in depth behind config.EffectiveGoalMaxAttempts: a non-positive
+		// cap would end the loop after its first evaluation round.
+		attempts = 1
+	}
 	g := goal.Goal{
 		Criterion:   criterion,
-		MaxAttempts: s.postrun.GoalMaxAttempts,
+		MaxAttempts: attempts,
 		CreatedAt:   s.nowFunc().UnixMilli(),
 	}
 	if err := s.postrun.Goals.Set(chatID, g); err != nil {

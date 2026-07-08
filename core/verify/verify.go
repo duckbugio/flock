@@ -21,6 +21,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -33,6 +35,10 @@ const gitCmdTimeout = 15 * time.Second
 // defaultCheckTimeout bounds one repo's check command when the Verifier is
 // constructed without an explicit timeout.
 const defaultCheckTimeout = 30 * time.Minute
+
+// termGrace is how long a timed-out gate command gets between SIGTERM and
+// SIGKILL — enough for test runners to tear down containers and temp state.
+const termGrace = 2 * time.Second
 
 // outputTailBytes is how much trailing combined output is kept per check — the
 // end of a failing run (the actual failures + summary) is what the fix-up
@@ -137,11 +143,24 @@ func Failed(results []Result) []Result {
 	return out
 }
 
+// fixRoundLine renders (and fixRoundRe parses back) the loop-round marker
+// embedded in every fix-up prompt. Carrying the round INSIDE the prompt makes
+// the consecutive-round cap durable for free: the prompt is persisted in the
+// auto-resume marker, so a deploy mid-loop resumes at the same round instead
+// of resetting an in-memory counter to zero.
+const fixRoundLine = "Auto-fix round %d of %d."
+
+// fixRoundRe matches the marker at the start of a line, anchored so ordinary
+// prose cannot fake it accidentally.
+var fixRoundRe = regexp.MustCompile(`(?m)^Auto-fix round (\d+) of \d+\.$`)
+
 // FixPrompt builds the prompt injected back into the working session when one
-// or more gates failed. It is an engineering artifact (professional English)
-// and carries each failing command plus its output tail.
-func FixPrompt(failed []Result) string {
+// or more gates failed. round is the 1-based fix-up round this prompt starts,
+// out of maxRounds. It is an engineering artifact (professional English) and
+// carries each failing command plus its output tail.
+func FixPrompt(failed []Result, round, maxRounds int) string {
 	var b strings.Builder
+	_, _ = fmt.Fprintf(&b, fixRoundLine+"\n\n", round, maxRounds)
 	_, _ = b.WriteString("Post-run verification re-ran the repos' own check gates and they FAILED. " +
 		"The previous report of success does not hold.\n")
 	for _, r := range failed {
@@ -151,6 +170,21 @@ func FixPrompt(failed []Result) string {
 	_, _ = b.WriteString("\nFix the failures (never weaken or skip tests to get green), " +
 		"re-run the same gate to confirm, and push the fix to the same branch if one was pushed.")
 	return b.String()
+}
+
+// ParseFixRound extracts the round marker from a run's prompt: the fix-up
+// round that run represents, or ok=false for a prompt that is not a
+// verification fix-up (a user message, a poller relay, …).
+func ParseFixRound(prompt string) (round int, ok bool) {
+	m := fixRoundRe.FindStringSubmatch(prompt)
+	if m == nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // checkRepo detects the repo's runner + target and executes the gate.
@@ -285,10 +319,20 @@ func runCmd(ctx context.Context, timeout time.Duration, dir, name string, args .
 	case err := <-done:
 		return buf.String(), err
 	case <-ctx.Done():
+		// Mirror core/claude's kill strategy: SIGTERM first so the runner (and the
+		// tool subprocesses it spawned — docker, builders) can tear down temp
+		// state, escalating to SIGKILL only after a short grace.
 		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 		}
-		<-done
+		select {
+		case <-done:
+		case <-time.After(termGrace):
+			if cmd.Process != nil {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			}
+			<-done
+		}
 		return buf.String(), ctx.Err()
 	}
 }

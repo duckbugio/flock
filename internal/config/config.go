@@ -835,6 +835,17 @@ func (c Config) PostVerifyTimeout() time.Duration {
 	return time.Duration(c.PostVerifyTimeoutSeconds) * time.Second
 }
 
+// EffectiveGoalMaxAttempts floors GOAL_MAX_ATTEMPTS to 1: with a non-positive
+// cap the /goal loop would stop after its very first evaluation round (the
+// bump makes Attempts 1 >= 0) without ever injecting a fix-up — a misconfig
+// must degrade to "one round", never to a broken loop.
+func (c Config) EffectiveGoalMaxAttempts() int {
+	if c.GoalMaxAttempts < 1 {
+		return 1
+	}
+	return c.GoalMaxAttempts
+}
+
 // GoalEvalTimeout returns the evaluator-session deadline as a Duration, or 0
 // when no timeout is configured.
 func (c Config) GoalEvalTimeout() time.Duration {

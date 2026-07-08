@@ -992,3 +992,12 @@ func TestAutonomyStoreFileDefaults(t *testing.T) {
 		t.Errorf("GoalStoreFile override = %q", got)
 	}
 }
+
+func TestEffectiveGoalMaxAttempts(t *testing.T) {
+	for in, want := range map[int]int{0: 1, -3: 1, 1: 1, 5: 5} {
+		c := Config{GoalMaxAttempts: in}
+		if got := c.EffectiveGoalMaxAttempts(); got != want {
+			t.Errorf("EffectiveGoalMaxAttempts(%d) = %d, want %d", in, got, want)
+		}
+	}
+}

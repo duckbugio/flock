@@ -294,3 +294,36 @@ func allSent(f *fakeChat) []string {
 	defer f.mu.Unlock()
 	return append([]string(nil), f.sent...)
 }
+
+// TestInjectAutoNeverBlocksOnFullLane guards the deadlock fix: InjectAuto is
+// called from postRun, which executes ON the lane's own worker goroutine, so
+// it must return promptly even when the chat's queue is completely full — a
+// blocking submit there would deadlock the chat forever (the worker is the
+// only goroutine that drains the queue).
+func TestInjectAutoNeverBlocksOnFullLane(t *testing.T) {
+	fr := &scriptedRunner{}
+	fc := newFakeChat()
+	svc, d := newPostRunService(t, fr, fc, &fakeWorkspace{}, PostRunConfig{})
+	defer d.Close()
+
+	// Occupy the lane worker, then fill the queue buffer completely.
+	gate := make(chan struct{})
+	svc.dispatch.Submit("100", func(context.Context) { <-gate })
+	for i := 0; i < 64; i++ {
+		if !svc.dispatch.(*dispatch.Dispatcher).TrySubmit("100", func(context.Context) {}) {
+			break // buffer full — exactly the state under test
+		}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		svc.InjectAuto(context.Background(), "100", "ci fix-up on a saturated lane")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("InjectAuto blocked on a full lane — lane-deadlock regression")
+	}
+	close(gate)
+}
