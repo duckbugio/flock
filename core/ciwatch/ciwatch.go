@@ -19,17 +19,15 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/duckbugio/flock/core/teambranch"
 )
 
 // minInterval floors the poll period, mirroring core/poller.
 const minInterval = 30 * time.Second
 
-// branchPrefix marks team branches; only these are watched.
-const branchPrefix = "duck/"
-
-// chatSegments is the minimum "/"-separated segments of a team branch
-// (duck/<chatid>[/<slug>]) for it to carry a chat id.
-const chatSegments = 2
+// ownerRepoParts is the exact "/"-separated segments of an owner/repo name.
+const ownerRepoParts = 2
 
 // EventKind discriminates watch events.
 type EventKind int
@@ -39,6 +37,12 @@ const (
 	CIFailed EventKind = iota
 	// PRMerged is emitted after auto-merge lands a green PR.
 	PRMerged
+	// CIGreen is emitted once per (repo, branch, SHA) when CI completes
+	// successfully and auto-merge did not consume the event. It exists to WAKE
+	// the owning chat: nothing else notifies an agent that promised to report a
+	// CI verdict — the poller only relays new PR comments, so without this a
+	// green build ends every conversation until the user pings.
+	CIGreen
 )
 
 // Event is one actionable CI observation, routed by ChatID.
@@ -105,9 +109,14 @@ func Run(ctx context.Context, cfg Config, out chan<- Event) error {
 	}
 }
 
-// scanOnce walks the current checkouts and reconciles each against the host.
+// scanOnce walks the current checkouts and reconciles each against the host,
+// then prunes dedupe state whose branch is no longer checked out anywhere so
+// the store tracks live branches instead of growing toward the wipe backstop.
 func scanOnce(ctx context.Context, cfg Config, log *slog.Logger, out chan<- Event) {
-	for _, co := range Discover(cfg.BaseDir) {
+	checkouts := Discover(cfg.BaseDir)
+	live := make(map[string]struct{}, len(checkouts))
+	for _, co := range checkouts {
+		live[co.Repo+"#"+co.Branch] = struct{}{}
 		if ctx.Err() != nil {
 			return
 		}
@@ -124,6 +133,9 @@ func scanOnce(ctx context.Context, cfg Config, log *slog.Logger, out chan<- Even
 		default:
 			// pending / none — nothing to do this cycle.
 		}
+	}
+	if err := cfg.State.Prune(live); err != nil {
+		log.Warn("ci watch: prune state", "error", err)
 	}
 }
 
@@ -146,37 +158,63 @@ func handleFailure(ctx context.Context, cfg Config, log *slog.Logger, out chan<-
 	}
 }
 
-// handleSuccess optionally auto-merges the branch's open PR once green.
+// handleSuccess reacts to a green build exactly once per (repo, branch, SHA):
+// with auto-merge on it merges the branch's open PR (emitting PRMerged); in
+// every other case it emits CIGreen so the owning chat WAKES UP — an agent
+// that told its user "I'll report when CI finishes" has no other wake-up
+// signal for a green build.
 func handleSuccess(ctx context.Context, cfg Config, log *slog.Logger, out chan<- Event, co Checkout, st Status) {
-	if !cfg.AutoMerge {
-		return
-	}
 	key := co.Repo + "#" + co.Branch
-	mark := st.SHA + "#merged"
-	if cfg.State.Handled(key, mark) {
+	greenMark := st.SHA + "#green"
+	mergedMark := st.SHA + "#merged"
+	if cfg.State.Handled(key, greenMark) || cfg.State.Handled(key, mergedMark) {
 		return
 	}
+	if cfg.AutoMerge {
+		if consumed := tryAutoMerge(ctx, cfg, log, out, co, st, key, mergedMark); consumed {
+			return
+		}
+		// No open PR: the merge path has nothing to do — still announce the green
+		// build below exactly once.
+	}
+	ev := Event{Kind: CIGreen, ChatID: co.ChatID, Repo: co.Repo, Branch: co.Branch, SHA: st.SHA}
+	if !emit(ctx, out, ev) {
+		return
+	}
+	log.Info("ci watch: green relayed", "repo", co.Repo, "branch", co.Branch, "sha", st.SHA)
+	if err := cfg.State.Mark(key, greenMark); err != nil {
+		log.Warn("ci watch: persist state", "error", err)
+	}
+}
+
+// tryAutoMerge merges the branch's open PR, reporting whether the green event
+// was consumed (merged, or a transient lookup/merge failure to retry next
+// cycle). false means "no PR" — the caller falls through to the CIGreen path.
+func tryAutoMerge(
+	ctx context.Context, cfg Config, log *slog.Logger, out chan<- Event, co Checkout, st Status, key, mark string,
+) bool {
 	idx, ok, err := cfg.Host.OpenPR(ctx, co.Repo, co.Branch)
 	if err != nil {
 		log.Warn("ci watch: open-pr lookup failed", "repo", co.Repo, "branch", co.Branch, "error", err)
-		return
+		return true // transient: retry the whole green handling next cycle
 	}
 	if !ok {
-		return
+		return false
 	}
 	if err := cfg.Host.Merge(ctx, co.Repo, idx); err != nil {
 		// Not mergeable yet (conflicts, required reviews) — retried next cycle.
 		log.Warn("ci watch: merge failed", "repo", co.Repo, "pr", idx, "error", err)
-		return
+		return true
 	}
 	ev := Event{Kind: PRMerged, ChatID: co.ChatID, Repo: co.Repo, Branch: co.Branch, SHA: st.SHA, PRIndex: idx}
 	if !emit(ctx, out, ev) {
-		return
+		return true
 	}
 	log.Info("ci watch: auto-merged", "repo", co.Repo, "pr", idx)
 	if err := cfg.State.Mark(key, mark); err != nil {
 		log.Warn("ci watch: persist state", "error", err)
 	}
+	return true
 }
 
 // emit sends ev on out unless ctx is cancelled.
@@ -237,21 +275,18 @@ func Discover(base string) []Checkout {
 }
 
 // checkoutFromGitDir builds a Checkout from one .git directory, requiring a
-// duck/<chatid>/... branch and a parsable origin remote.
+// routable team branch (see core/teambranch) and a parsable origin remote.
 func checkoutFromGitDir(gitDir string) (Checkout, bool) {
 	branch := currentBranch(gitDir)
-	if !strings.HasPrefix(branch, branchPrefix) {
-		return Checkout{}, false
-	}
-	parts := strings.Split(branch, "/")
-	if len(parts) < chatSegments || parts[1] == "" {
+	chatID, ok := teambranch.ChatID(branch)
+	if !ok {
 		return Checkout{}, false
 	}
 	repo, ok := ownerRepo(originURL(gitDir))
 	if !ok {
 		return Checkout{}, false
 	}
-	return Checkout{ChatID: parts[1], Repo: repo, Branch: branch}, true
+	return Checkout{ChatID: chatID, Repo: repo, Branch: branch}, true
 }
 
 // currentBranch reads .git/HEAD and returns the checked-out branch name, or ""
@@ -321,7 +356,7 @@ func ownerRepo(url string) (string, bool) {
 // validOwnerRepo accepts exactly "owner/repo" with non-empty segments.
 func validOwnerRepo(s string) (string, bool) {
 	parts := strings.Split(strings.Trim(s, "/"), "/")
-	if len(parts) != chatSegments || parts[0] == "" || parts[1] == "" {
+	if len(parts) != ownerRepoParts || parts[0] == "" || parts[1] == "" {
 		return "", false
 	}
 	return parts[0] + "/" + parts[1], true

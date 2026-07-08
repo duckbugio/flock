@@ -178,6 +178,35 @@ func TestScanOnceEmitsFailureOncePerSHA(t *testing.T) {
 	}
 }
 
+func TestScanOnceGreenWakesChatOnce(t *testing.T) {
+	base := t.TempDir()
+	fakeCheckout(t, base, "chat_100", "svc", "duck/100/x", "https://git.example.com/acme/svc.git")
+	st, err := OpenState(filepath.Join(t.TempDir(), "ci.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := &fakeHost{status: Status{State: stateSuccess, SHA: "abc"}, prIdx: 7, prOK: true}
+	out := make(chan Event, 4)
+
+	// AutoMerge off → the green build is RELAYED (it wakes the owning chat so a
+	// promised "I'll report when CI finishes" actually happens) — exactly once.
+	cfg := Config{BaseDir: base, Host: host, State: st}
+	scanOnce(context.Background(), cfg, testLogger(), out)
+	scanOnce(context.Background(), cfg, testLogger(), out) // same sha — deduped
+	if len(host.merged) != 0 {
+		t.Fatal("must not merge with AutoMerge off")
+	}
+	ev := <-out
+	if ev.Kind != CIGreen || ev.ChatID != "100" || ev.SHA != "abc" {
+		t.Fatalf("event = %+v", ev)
+	}
+	select {
+	case dup := <-out:
+		t.Fatalf("duplicate green event: %+v", dup)
+	default:
+	}
+}
+
 func TestScanOnceAutoMerge(t *testing.T) {
 	base := t.TempDir()
 	fakeCheckout(t, base, "chat_100", "svc", "duck/100/x", "https://git.example.com/acme/svc.git")
@@ -188,13 +217,8 @@ func TestScanOnceAutoMerge(t *testing.T) {
 	host := &fakeHost{status: Status{State: stateSuccess, SHA: "abc"}, prIdx: 7, prOK: true}
 	out := make(chan Event, 4)
 
-	// AutoMerge off → nothing.
-	scanOnce(context.Background(), Config{BaseDir: base, Host: host, State: st}, testLogger(), out)
-	if len(host.merged) != 0 {
-		t.Fatal("must not merge with AutoMerge off")
-	}
-
-	// AutoMerge on → merge once, dedupe the second scan.
+	// AutoMerge on → merge once, dedupe the second scan, no CIGreen (the merge
+	// notice covers the wake-up).
 	cfg := Config{BaseDir: base, Host: host, State: st, AutoMerge: true}
 	scanOnce(context.Background(), cfg, testLogger(), out)
 	scanOnce(context.Background(), cfg, testLogger(), out)
@@ -204,6 +228,32 @@ func TestScanOnceAutoMerge(t *testing.T) {
 	ev := <-out
 	if ev.Kind != PRMerged || ev.PRIndex != 7 {
 		t.Fatalf("event = %+v", ev)
+	}
+	select {
+	case dup := <-out:
+		t.Fatalf("unexpected extra event: %+v", dup)
+	default:
+	}
+}
+
+func TestScanOncePrunesStaleState(t *testing.T) {
+	base := t.TempDir()
+	fakeCheckout(t, base, "chat_100", "svc", "duck/100/x", "https://git.example.com/acme/svc.git")
+	st, err := OpenState(filepath.Join(t.TempDir(), "ci.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A leftover entry for a branch nobody has checked out anymore.
+	if err := st.Mark("acme/old#duck/100/gone", "dead#failure"); err != nil {
+		t.Fatal(err)
+	}
+	host := &fakeHost{status: Status{State: stateFailure, SHA: "abc"}}
+	scanOnce(context.Background(), Config{BaseDir: base, Host: host, State: st}, testLogger(), make(chan Event, 4))
+	if st.Handled("acme/old#duck/100/gone", "dead#failure") {
+		t.Fatal("stale entry must be pruned after a scan")
+	}
+	if !st.Handled("acme/svc#duck/100/x", "abc#failure") {
+		t.Fatal("live entry must survive the prune")
 	}
 }
 
