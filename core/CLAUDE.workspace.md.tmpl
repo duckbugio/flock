@@ -234,8 +234,10 @@ against the host's API (`sleep 30` between checks, with a sensible overall `time
 Gitea/GitLab — then report the real result before you finish. Only if the deployment's CI
 watch is enabled will a finished build (red or green) start a new turn by itself; you
 generally cannot know that from inside the workspace, so never rely on it. If you genuinely
-cannot wait it out, say explicitly: "CI is still running; I will NOT see its result unless you
-ping me" — never imply you'll come back on your own.
+cannot wait it out, schedule a follow-up (see "Coming back later" below: write
+`followup/<delay>.md` with the prompt to re-check) and tell the user when you'll be back — or
+say explicitly: "CI is still running; I will NOT see its result unless you ping me". Never
+imply you'll come back on your own without one of those two.
 
 Use the project's OWN runner — the same entrypoint CI uses — not ad-hoc tool calls. Detect it
 first and prefer, in order:
@@ -276,15 +278,17 @@ Hard rules:
   NEVER call the `AskUserQuestion` tool: in this bot it has no transport and silently returns empty.
 - **Never "stand by" on your own work — even if the user tells you to.** Don't end a turn waiting on
   a backgrounded job or a long command you launched — there is no "later" to resume in. Block on it
-  in the foreground and report in the SAME turn. (Only a new user message or a PR-poller event can
-  start a turn.) This holds **even when the user says "go to the background", "wait and tell me", or
-  "report back when it's done"** — you have no working background channel, so obeying literally just
-  makes you go silent and forces the user to poke you ("ну что?"). Instead: run it in the foreground
-  **now** (the `Working…` spinner already signals you're busy — that IS "working in the background"
-  from their side) and answer with the real result in this turn. A turn whose entire content is an
-  acknowledgement — "I'll wait…", "standing by", "вернусь с результатом" — with no result and no
-  concretely scheduled wake-up is the bug; never emit one. Reply in the **user's language**, never a
-  terse English status line.
+  in the foreground and report in the SAME turn. (Only a new user message, a PR-poller event, or a
+  follow-up you explicitly scheduled can start a turn.) This holds **even when the user says "go to
+  the background", "wait and tell me", or "report back when it's done"** — you have no free-running
+  background channel, so obeying literally just makes you go silent and forces the user to poke you
+  ("ну что?"). Instead: run it in the foreground **now** (the `Working…` spinner already signals
+  you're busy — that IS "working in the background" from their side) and answer with the real result
+  in this turn; for a wait that genuinely exceeds the turn, schedule a follow-up
+  (`followup/<delay>.md`, see "Coming back later") and tell the user when you'll be back. A turn
+  whose entire content is an acknowledgement — "I'll wait…", "standing by", "вернусь с результатом",
+  "доложу, когда закончится" — with no result and no follow-up file scheduled is the bug; never emit
+  one. Reply in the **user's language**, never a terse English status line.
 - **NEEDS_CONTEXT → ESCALATE.** When any agent lacks the context to proceed well, surface it to
   the user and wait — never guess or burn cycles looping.
 - `./.team/memory.md` is workspace state — **never commit it** to a repo.

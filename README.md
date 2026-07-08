@@ -82,7 +82,9 @@ Four opt-in loops move you up the delegation ladder — from "the agent checks i
 - **`/schedule` cron jobs** — durable per-chat recurring prompts with per-chat timezones (see the SCHEDULER block in `.env.example`); fired as normal team runs, gated by the creator's allow-list status and cost cap at fire time.
 - **CI watch** (`ENABLE_CI_WATCH`) — polls CI state on the `duck/*` branches (GitHub check-runs or Gitea commit status). A red build injects "CI is red — fix and push" into the owning chat; a green build wakes the chat too, so "I'll report when CI finishes" actually happens — each once per commit. With `ENABLE_AUTO_MERGE=true` a green PR is merged automatically — the full hands-off mode; leave it false to keep the human merge.
 
-Two safety rails apply across them: `AUTO_TASK_MAX_COST_PER_DAY` caps what autonomy-originated runs may spend per chat per day (direct messages are unaffected), and `AUTO_APPROVE_SCOPE` controls which planner complexities may skip the "confirm scope & wait" step (`off` by default).
+Runs can also legally **come back later**: writing `followup/<delay>.md` (content = the prompt) schedules a durable one-shot return — and a **promise nudge** fires one corrective run whenever a final answer says "I'll report back" without scheduling anything that actually would, so the bot stops going silent on its own promises.
+
+Two safety rails apply across all of it: `AUTO_TASK_MAX_COST_PER_DAY` caps what autonomy-originated runs may spend per chat per day (direct messages are unaffected), and `AUTO_APPROVE_SCOPE` controls which planner complexities may skip the "confirm scope & wait" step (`off` by default).
 
 ## Repo layout (monorepo)
 
