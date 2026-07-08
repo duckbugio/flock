@@ -54,6 +54,7 @@ Everything else in [`.env.example`](adapters/telegram/.env.example) has sensible
 
 - **The conversation is the task source** — describe what you want in chat and review the PR that comes back; the agent's shell and editor are sandboxed inside the container.
 - **A real dev-team pipeline, not a single prompt** — spec-first acceptance criteria, build/regression gates, and an arbiter that breaks loops.
+- **Autonomy loops** — the bot **verifies its own "done"** by re-running the repo's check gate itself; `/goal` arms an **independent evaluator** that loops the team until your criterion actually holds; `/schedule` runs recurring jobs; an optional **CI watch** reacts to red builds (and can auto-merge green PRs) — all under a per-chat daily autonomy budget. See [Autonomy loops](#autonomy-loops).
 - **Multi-transport** — **Telegram** and **VK** today, both on the same core; a new platform is a thin adapter, not a fork.
 - **PR reactions without inbound webhooks** — the bot *polls* your git host for new review comments and routes each back to the chat that opened the PR.
 - **Subscription-friendly** — authenticate with a Claude Pro/Max token (no per-token cost) or an Anthropic API key.
@@ -71,6 +72,17 @@ You (in a chat): "implement X across the api + web services"
 The five subagents — **planner → coder → tester → reviewer → arbiter** — run as native Claude Code subagents in [`core/agents/`](core/agents/). A plain question is just answered; a build request triggers the team. The **arbiter** is the risk-aware, cycle-limited loop-breaker so agents never spin forever. Branches are named `duck/<chatid>/<slug>` so PR-webhook/poll events route back to the right chat.
 
 The team is built for a **microservices** workspace: a feature can span several services, and it coordinates branches and one cross-linked PR per repo. The full pipeline, guardrails, and role table live in [`core/README.md`](core/README.md).
+
+## Autonomy loops
+
+Four opt-in loops move you up the delegation ladder — from "the agent checks its own work" to "the agent runs without you" — each with a hard stop condition (env keys in [`.env.example`](adapters/telegram/.env.example)):
+
+- **Post-run verification** (`ENABLE_POST_VERIFY`, default **on**) — after a run reports done, the bot itself re-runs the changed repos' own check gate (`task`/`make`/`npm` `check`/`test`/`lint`) and, on red, sends the team back with the real failure output — up to `POST_VERIFY_MAX_FIXES` consecutive rounds. The agent's "tests pass" is verified, not trusted.
+- **`/goal` evaluator** — `/goal all list views paginate correctly` arms a goal; after every completed run an **independent, fresh-session judge** (no shared context with the working session) inspects the workspace, re-runs checks, and returns a strict verdict. Not met → the unmet points are injected back as a fix-up; met → 🎯 and the goal disarms. Bounded by `GOAL_MAX_ATTEMPTS`; `EVALUATOR_MODEL` can pick a cheaper judge; `/goal off` disarms.
+- **`/schedule` cron jobs** — durable per-chat recurring prompts with per-chat timezones (see the SCHEDULER block in `.env.example`); fired as normal team runs, gated by the creator's allow-list status and cost cap at fire time.
+- **CI watch** (`ENABLE_CI_WATCH`) — polls CI state on the `duck/*` branches (GitHub check-runs or Gitea commit status); a red build injects "CI is red — fix and push" into the owning chat, once per commit. With `ENABLE_AUTO_MERGE=true` a green PR is merged automatically — the full hands-off mode; leave it false to keep the human merge.
+
+Two safety rails apply across them: `AUTO_TASK_MAX_COST_PER_DAY` caps what autonomy-originated runs may spend per chat per day (direct messages are unaffected), and `AUTO_APPROVE_SCOPE` controls which planner complexities may skip the "confirm scope & wait" step (`off` by default).
 
 ## Repo layout (monorepo)
 
