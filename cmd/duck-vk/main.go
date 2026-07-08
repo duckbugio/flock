@@ -25,17 +25,20 @@ import (
 	_ "time/tzdata" // embed IANA tz database so /schedule per-chat timezones work without OS zoneinfo
 
 	"github.com/duckbugio/flock/adapters/vk"
+	"github.com/duckbugio/flock/core/autobudget"
 	"github.com/duckbugio/flock/core/chat"
 	"github.com/duckbugio/flock/core/claude"
 	"github.com/duckbugio/flock/core/cost"
 	"github.com/duckbugio/flock/core/dispatch"
 	"github.com/duckbugio/flock/core/ghstar"
 	"github.com/duckbugio/flock/core/gitsetup"
+	"github.com/duckbugio/flock/core/goal"
 	"github.com/duckbugio/flock/core/nudge"
 	"github.com/duckbugio/flock/core/poller"
 	"github.com/duckbugio/flock/core/ratelimit"
 	"github.com/duckbugio/flock/core/schedule"
 	"github.com/duckbugio/flock/core/session"
+	"github.com/duckbugio/flock/core/verify"
 	"github.com/duckbugio/flock/core/voice"
 	"github.com/duckbugio/flock/core/workspace"
 	"github.com/duckbugio/flock/internal/airunner"
@@ -210,6 +213,11 @@ func run() int {
 	// Post-task GitHub star nudge (GitHub-only; the gate is the off switch).
 	starNudge := buildStarNudge(cfg, logger)
 
+	// Autonomy loops (post-run verification, the /goal evaluator, the per-chat
+	// autonomy budget). Store-open failures are non-fatal: log and run with that
+	// single feature disabled. The CI watch is Telegram-only for now.
+	postRun := buildAutonomy(cfg, logger)
+
 	svc := chat.New(chat.Config{
 		Runner:     runner,
 		Transport:  transport,
@@ -220,6 +228,7 @@ func run() int {
 		CostCapUSD: cfg.EffectiveCostCapUSD(),
 		Outbox:     outbox,
 		StarNudge:  starNudge,
+		PostRun:    postRun,
 		Opts:       opts,
 		Timeout:    cfg.ClaudeTimeout(),
 		RetryAfter: vk.RetryAfter,
@@ -365,6 +374,39 @@ func buildStarNudge(cfg config.Config, logger *slog.Logger) chat.StarNudgeConfig
 		Client:  ghstar.New(ghstar.Config{Token: cfg.GitToken, Logger: logger}),
 		Store:   store,
 	}
+}
+
+// buildAutonomy opens the autonomy-loop stores and assembles the post-run
+// config, mirroring cmd/flock-telegram. Every store-open failure is non-fatal
+// (log + run with that single feature disabled).
+func buildAutonomy(cfg config.Config, logger *slog.Logger) chat.PostRunConfig {
+	goals, err := goal.Open(cfg.GoalStoreFile())
+	if err != nil {
+		logger.Error("open goal store; /goal disabled", "path", cfg.GoalStoreFile(), "error", err)
+		goals = nil
+	}
+	budget, err := autobudget.Open(cfg.AutoBudgetStoreFile())
+	if err != nil {
+		logger.Error("open autonomy budget store; auto budget disabled",
+			"path", cfg.AutoBudgetStoreFile(), "error", err)
+		budget = nil
+	}
+	postRun := chat.PostRunConfig{
+		VerifyMaxFixes:  cfg.PostVerifyMaxFixes,
+		GoalMaxAttempts: cfg.GoalMaxAttempts,
+		EvalModel:       cfg.EvaluatorModel,
+		EvalMaxTurns:    cfg.GoalEvalMaxTurns,
+		EvalTimeout:     cfg.GoalEvalTimeout(),
+		Budget:          budget,
+		BudgetCapUSD:    cfg.AutoTaskMaxCostPerDay,
+	}
+	if cfg.EnablePostVerify {
+		postRun.Verifier = &verify.Verifier{Timeout: cfg.PostVerifyTimeout(), Log: logger}
+	}
+	if goals != nil {
+		postRun.Goals = goals
+	}
+	return postRun
 }
 
 // formatPRComment builds a neutral English prompt relaying a polled PR review

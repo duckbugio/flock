@@ -3,6 +3,7 @@ package vk
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/chat"
+	"github.com/duckbugio/flock/core/goal"
 	"github.com/duckbugio/flock/core/schedule"
 )
 
@@ -38,6 +40,9 @@ type Service interface {
 	StopChat(chatID chat.ChatID) bool
 	NewSession(chatID chat.ChatID) error
 	StarPress() (toast string, ok bool)
+	ArmGoal(chatID chat.ChatID, criterion string) (goal.Goal, bool)
+	GoalStatus(chatID chat.ChatID) (goal.Goal, bool)
+	DisarmGoal(chatID chat.ChatID) bool
 }
 
 // guardChecker decides whether an allowed user's accepted message may run (rate
@@ -383,6 +388,39 @@ func (r *Receiver) dispatchReserved(ctx context.Context, name string, msg messag
 		r.svc.StopChat(chatIDStr(peerID))
 	case "schedule":
 		r.dispatchSchedule(ctx, msg)
+	case "goal":
+		r.dispatchGoal(ctx, msg)
+	}
+}
+
+// dispatchGoal serves /goal: arm, show, or disarm the calling chat's goal via
+// the shared Service, mirroring the Telegram adapter's goalHandler.
+func (r *Receiver) dispatchGoal(ctx context.Context, msg messageObject) {
+	peerID := msg.PeerID
+	args := commandArgs(msg.Text)
+	switch strings.ToLower(args) {
+	case "":
+		if g, armed := r.svc.GoalStatus(chatIDStr(peerID)); armed {
+			r.notify(ctx, peerID, fmt.Sprintf(
+				"Armed goal (evaluation round %d/%d):\n%s\n\n%s", g.Attempts, g.MaxAttempts, g.Criterion, goalUsageText))
+			return
+		}
+		r.notify(ctx, peerID, "No goal armed.\n\n"+goalUsageText)
+	case "off", "clear", "stop":
+		if r.svc.DisarmGoal(chatIDStr(peerID)) {
+			r.notify(ctx, peerID, "Goal disarmed.")
+			return
+		}
+		r.notify(ctx, peerID, "No goal was armed.")
+	default:
+		g, armed := r.svc.ArmGoal(chatIDStr(peerID), args)
+		if !armed {
+			r.notify(ctx, peerID, "The goal evaluator is disabled on this deployment.")
+			return
+		}
+		r.notify(ctx, peerID, fmt.Sprintf(
+			"🎯 Goal armed (up to %d evaluation rounds). After every completed run an independent "+
+				"evaluator will judge:\n%s", g.MaxAttempts, g.Criterion))
 	}
 }
 

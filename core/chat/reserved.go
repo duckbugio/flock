@@ -13,17 +13,18 @@ type ReservedCommand struct {
 
 // ReservedCommands is the single source of truth for the slash commands the bot
 // intercepts. A reserved command is handled by the bot itself and is NEVER
-// forwarded to the provider Runner; every OTHER slash command (e.g. /loop, /goal,
+// forwarded to the provider Runner; every OTHER slash command (e.g. /loop,
 // /security-review) is forwarded verbatim so the provider's own slash-command and
 // skill system runs it. Both adapters (Telegram, VK) decide what to intercept
 // from this list, and Telegram builds its command menu from it. The order here is
-// the order the menu presents: start, help, new, stop, schedule.
+// the order the menu presents: start, help, new, stop, schedule, goal.
 var ReservedCommands = []ReservedCommand{
 	{Name: "start", Description: "Show a short welcome and usage"},
 	{Name: "help", Description: "List the bot's own commands"},
 	{Name: "new", Description: "Start a fresh session (forget the current conversation)"},
 	{Name: "stop", Description: "Stop the run currently in progress"},
 	{Name: "schedule", Description: "Manage scheduled jobs"},
+	{Name: "goal", Description: "Arm a goal an independent evaluator re-checks after every run"},
 }
 
 // IsReservedCommand reports whether name is one of the bot's reserved commands.
