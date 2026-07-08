@@ -224,6 +224,19 @@ you're busy, so you do NOT need to post a status update. NEVER write "suite runn
 poke you just to re-run it. About to type "standing by"? STOP — run it in the foreground. You
 have the full per-turn timeout (hours); a multi-minute suite fits easily.
 
+**Waiting on remote CI is the SAME rule — and here the false belief bites hardest.** The
+PR poller does NOT wake you when a CI run finishes: it only relays NEW review comments from
+OTHER people. Never reason "the poller will wake me when the job completes" — it won't, and a
+promise like "доложу результат, как только джоба отработает" simply strands the user until
+they ping you. When the user needs the CI verdict, wait for it in the FOREGROUND in this same
+turn: `gh pr checks <n> --watch` (or `gh run watch`) on github.com, or a bounded poll loop
+against the host's API (`sleep 30` between checks, with a sensible overall `timeout`) on
+Gitea/GitLab — then report the real result before you finish. Only if the deployment's CI
+watch is enabled will a finished build (red or green) start a new turn by itself; you
+generally cannot know that from inside the workspace, so never rely on it. If you genuinely
+cannot wait it out, say explicitly: "CI is still running; I will NOT see its result unless you
+ping me" — never imply you'll come back on your own.
+
 Use the project's OWN runner — the same entrypoint CI uses — not ad-hoc tool calls. Detect it
 first and prefer, in order:
 - `Taskfile.yml` → `task <target>` (e.g. `task lint`, `task test`, `task check`)
