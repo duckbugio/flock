@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -915,5 +916,79 @@ func TestValidateOpenAICompatAcceptsAPIKeyFromNamedEnv(t *testing.T) {
 	}
 	if err := c.ValidateOpenAICompat(); err != nil {
 		t.Fatalf("ValidateOpenAICompat() with env key = %v, want nil", err)
+	}
+}
+
+func TestAutoApproveScopeLevel(t *testing.T) {
+	for in, want := range map[string]string{
+		"":         "off",
+		"off":      "off",
+		"trivial":  "trivial",
+		"Standard": "standard",
+		"ALL":      "all",
+		"typo":     "off", // fail-safe: never silently skip the approval gate
+	} {
+		c := Config{AutoApproveScope: in}
+		if got := c.AutoApproveScopeLevel(); got != want {
+			t.Errorf("AutoApproveScopeLevel(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCIWatchEnabled(t *testing.T) {
+	const giteaHostName = "git.example.com"
+	base := Config{EnableCIWatch: true, GitToken: "tok", CIPollInterval: 120, GitHost: "github.com"}
+	if !base.CIWatchEnabled() {
+		t.Error("fully configured GitHub watch must be enabled")
+	}
+	gitea := base
+	gitea.GitHost = giteaHostName
+	gitea.GiteaAPIURL = "https://git.example.com/api/v1"
+	if !gitea.CIWatchEnabled() {
+		t.Error("fully configured Gitea watch must be enabled")
+	}
+	for _, tt := range []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"flag off", func(c *Config) { c.EnableCIWatch = false }},
+		{"no token", func(c *Config) { c.GitToken = "" }},
+		{"zero interval", func(c *Config) { c.CIPollInterval = 0 }},
+		{"no host api", func(c *Config) { c.GitHost = giteaHostName; c.GiteaAPIURL = "" }},
+	} {
+		c := base
+		tt.mutate(&c)
+		if c.CIWatchEnabled() {
+			t.Errorf("CIWatchEnabled() = true for %q, want false", tt.name)
+		}
+	}
+}
+
+func TestCIPollDuration(t *testing.T) {
+	if got := (Config{CIPollInterval: 0}).CIPollDuration(); got != 0 {
+		t.Errorf("zero interval = %v, want 0", got)
+	}
+	if got := (Config{CIPollInterval: 5}).CIPollDuration(); got != 30*time.Second {
+		t.Errorf("tiny interval = %v, want floored 30s", got)
+	}
+	if got := (Config{CIPollInterval: 120}).CIPollDuration(); got != 120*time.Second {
+		t.Errorf("interval = %v, want 120s", got)
+	}
+}
+
+func TestAutonomyStoreFileDefaults(t *testing.T) {
+	c := Config{ApprovedDirectory: "/workspace"}
+	for name, got := range map[string]string{
+		"goals":    c.GoalStoreFile(),
+		"ci_state": c.CIStateFile(),
+		"budget":   c.AutoBudgetStoreFile(),
+	} {
+		if !strings.HasPrefix(got, "/workspace/") {
+			t.Errorf("%s store default = %q, want under /workspace", name, got)
+		}
+	}
+	override := Config{ApprovedDirectory: "/workspace", GoalStorePath: "/data/g.json"}
+	if got := override.GoalStoreFile(); got != "/data/g.json" {
+		t.Errorf("GoalStoreFile override = %q", got)
 	}
 }

@@ -245,6 +245,51 @@ type Config struct {
 	PrReviewCycles string `env:"PR_REVIEW_CYCLES" envDefault:"10"`
 	EnablePRReview string `env:"ENABLE_PR_REVIEW" envDefault:"false"`
 
+	// AutoApproveScope controls the Phase-1 "confirm scope with the user" wait,
+	// rendered into the workspace CLAUDE.md: off (always wait, the default) |
+	// trivial | standard | all — the highest planner COMPLEXITY that proceeds
+	// WITHOUT waiting for approval (the spec summary is still posted). Kept as a
+	// string for verbatim template substitution; see AutoApproveScopeLevel.
+	AutoApproveScope string `env:"AUTO_APPROVE_SCOPE" envDefault:"off"`
+
+	// Post-run verification (core/verify): after a cleanly successful run the bot
+	// re-runs the changed repos' OWN check gates (task/make/npm) from the Go side
+	// and, on red, injects a fix-up run — bounded by POST_VERIFY_MAX_FIXES
+	// consecutive rounds per chat. ENABLE_POST_VERIFY=false turns the whole pass
+	// off; the timeout bounds ONE repo's gate command.
+	EnablePostVerify         bool `env:"ENABLE_POST_VERIFY" envDefault:"true"`
+	PostVerifyMaxFixes       int  `env:"POST_VERIFY_MAX_FIXES" envDefault:"2"`
+	PostVerifyTimeoutSeconds int  `env:"POST_VERIFY_TIMEOUT_SECONDS" envDefault:"1800"`
+
+	// /goal evaluator (core/goal): an INDEPENDENT fresh-session judge re-checks
+	// the user's stated "done" criterion after every clean run, looping fix-ups
+	// until achieved or GOAL_MAX_ATTEMPTS evaluation rounds. EVALUATOR_MODEL
+	// overrides the judge's model (empty = the run model); the timeout / turn cap
+	// bound one evaluator session. The store persists armed goals across restarts.
+	GoalMaxAttempts        int    `env:"GOAL_MAX_ATTEMPTS" envDefault:"5"`
+	EvaluatorModel         string `env:"EVALUATOR_MODEL"`
+	GoalEvalTimeoutSeconds int    `env:"GOAL_EVAL_TIMEOUT_SECONDS" envDefault:"1800"`
+	GoalEvalMaxTurns       int    `env:"GOAL_EVAL_MAX_TURNS" envDefault:"25"`
+	GoalStorePath          string `env:"GOAL_STORE_PATH"`
+
+	// CI watch (core/ciwatch): poll the git host for CI state on the duck/*
+	// branches checked out in the workspaces; a red build injects a fix-up into
+	// the owning chat, and (opt-in) a green PR is auto-merged. Needs GIT_TOKEN
+	// plus either GITEA_API_URL or GIT_HOST=github.com (see CIWatchEnabled).
+	EnableCIWatch   bool   `env:"ENABLE_CI_WATCH" envDefault:"false"`
+	CIPollInterval  int    `env:"CI_POLL_INTERVAL" envDefault:"120"`
+	EnableAutoMerge bool   `env:"ENABLE_AUTO_MERGE" envDefault:"false"`
+	CIStatePath     string `env:"CI_STATE_PATH"`
+
+	// AutoTaskMaxCostPerDay is the per-chat per-UTC-day USD ceiling for the
+	// AUTONOMY-originated runs (CI fix-ups, verification fix-ups, goal-evaluator
+	// rounds and their follow-ups). Reactive like the per-user cap; non-positive
+	// disables the gate. Deliberately much smaller than CLAUDE_MAX_COST_PER_USER:
+	// nobody is watching an autonomous loop overnight. Scheduled jobs are gated
+	// separately (their creator's cost cap, see InjectScheduled).
+	AutoTaskMaxCostPerDay float64 `env:"AUTO_TASK_MAX_COST_PER_DAY" envDefault:"20.0"`
+	AutoBudgetStorePath   string  `env:"AUTO_BUDGET_STORE_PATH"`
+
 	// Source paths for the shared team config baked into the image (see the
 	// Dockerfile's /opt/duck layout). Rendered per chat by core/workspace.
 	TeamTemplatePath string `env:"TEAM_TEMPLATE_PATH" envDefault:"/opt/duck/CLAUDE.workspace.md.tmpl"`
@@ -763,4 +808,100 @@ func (c Config) ValidateVK() error {
 		return ErrMissingVKGroupID
 	}
 	return nil
+}
+
+// autoApproveLevels is the set of accepted AUTO_APPROVE_SCOPE values.
+var autoApproveLevels = map[string]struct{}{
+	"off": {}, "trivial": {}, "standard": {}, "all": {},
+}
+
+// AutoApproveScopeLevel normalizes AUTO_APPROVE_SCOPE for template rendering:
+// lowercased, and any unrecognized value falls back to "off" (fail-safe: a typo
+// must never silently skip the human approval gate).
+func (c Config) AutoApproveScopeLevel() string {
+	v := strings.ToLower(strings.TrimSpace(c.AutoApproveScope))
+	if _, ok := autoApproveLevels[v]; ok {
+		return v
+	}
+	return "off"
+}
+
+// PostVerifyTimeout returns the per-repo gate-command timeout as a Duration; a
+// non-positive value falls back to the verifier's built-in default.
+func (c Config) PostVerifyTimeout() time.Duration {
+	if c.PostVerifyTimeoutSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(c.PostVerifyTimeoutSeconds) * time.Second
+}
+
+// GoalEvalTimeout returns the evaluator-session deadline as a Duration, or 0
+// when no timeout is configured.
+func (c Config) GoalEvalTimeout() time.Duration {
+	if c.GoalEvalTimeoutSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(c.GoalEvalTimeoutSeconds) * time.Second
+}
+
+// GoalStoreFile returns the path to the JSON goal store, defaulting to
+// <ApprovedDirectory>/goals.json so it lives under the workspace data dir
+// alongside the session/cost stores, never inside a repo.
+func (c Config) GoalStoreFile() string {
+	if strings.TrimSpace(c.GoalStorePath) != "" {
+		return c.GoalStorePath
+	}
+	return filepath.Join(c.ApprovedDirectory, "goals.json")
+}
+
+// CIStateFile returns the path to the JSON CI-watch dedupe store, defaulting to
+// <ApprovedDirectory>/ci_state.json.
+func (c Config) CIStateFile() string {
+	if strings.TrimSpace(c.CIStatePath) != "" {
+		return c.CIStatePath
+	}
+	return filepath.Join(c.ApprovedDirectory, "ci_state.json")
+}
+
+// AutoBudgetStoreFile returns the path to the JSON autonomy-budget store,
+// defaulting to <ApprovedDirectory>/auto_budget.json.
+func (c Config) AutoBudgetStoreFile() string {
+	if strings.TrimSpace(c.AutoBudgetStorePath) != "" {
+		return c.AutoBudgetStorePath
+	}
+	return filepath.Join(c.ApprovedDirectory, "auto_budget.json")
+}
+
+// minCIPollInterval floors the CI poll period, mirroring the Gitea poller.
+const minCIPollInterval = 30 * time.Second
+
+// CIPollDuration returns the CI poll period as a Duration, floored to 30s, or 0
+// when the configured interval is not positive.
+func (c Config) CIPollDuration() time.Duration {
+	if c.CIPollInterval <= 0 {
+		return 0
+	}
+	d := time.Duration(c.CIPollInterval) * time.Second
+	if d < minCIPollInterval {
+		return minCIPollInterval
+	}
+	return d
+}
+
+// CIWatchGitHub reports whether the CI watch should speak the GitHub API (the
+// deployment's git host is github.com); otherwise it uses the Gitea API URL.
+func (c Config) CIWatchGitHub() bool {
+	return strings.EqualFold(strings.TrimSpace(c.GitHost), gitHubHost)
+}
+
+// CIWatchEnabled reports whether the CI watch loop should run: the feature flag
+// is on, a token is set, a positive interval is configured, and the deployment
+// has a host API to poll (github.com, or a Gitea API URL). Unlike the PR-comment
+// poller it does NOT require ENABLE_PR_REVIEW — reacting to a red build is
+// useful even when the on-PR review loop is off.
+func (c Config) CIWatchEnabled() bool {
+	if !c.EnableCIWatch || c.GitToken == "" || c.CIPollInterval <= 0 {
+		return false
+	}
+	return c.CIWatchGitHub() || c.GiteaAPIURL != ""
 }
