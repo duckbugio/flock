@@ -5,10 +5,12 @@
 package autonomy
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/duckbugio/flock/core/autobudget"
 	"github.com/duckbugio/flock/core/chat"
+	"github.com/duckbugio/flock/core/followup"
 	"github.com/duckbugio/flock/core/goal"
 	"github.com/duckbugio/flock/core/verify"
 	"github.com/duckbugio/flock/internal/config"
@@ -29,6 +31,11 @@ func Build(cfg config.Config, logger *slog.Logger) chat.PostRunConfig {
 			"path", cfg.AutoBudgetStoreFile(), "error", err)
 		budget = nil
 	}
+	followups, err := followup.Open(cfg.FollowupStoreFile())
+	if err != nil {
+		logger.Error("open follow-up store; follow-ups disabled", "path", cfg.FollowupStoreFile(), "error", err)
+		followups = nil
+	}
 	postRun := chat.PostRunConfig{
 		VerifyMaxFixes:  cfg.PostVerifyMaxFixes,
 		GoalMaxAttempts: cfg.EffectiveGoalMaxAttempts(),
@@ -37,6 +44,8 @@ func Build(cfg config.Config, logger *slog.Logger) chat.PostRunConfig {
 		EvalTimeout:     cfg.GoalEvalTimeout(),
 		Budget:          budget,
 		BudgetCapUSD:    cfg.AutoTaskMaxCostPerDay,
+		Followups:       followups,
+		PromiseNudge:    cfg.EnablePromiseNudge,
 	}
 	if cfg.EnablePostVerify {
 		postRun.Verifier = &verify.Verifier{Timeout: cfg.PostVerifyTimeout(), Log: logger}
@@ -51,6 +60,24 @@ func Build(cfg config.Config, logger *slog.Logger) chat.PostRunConfig {
 		"auto_merge", cfg.CIWatchEnabled() && cfg.EnableAutoMerge,
 		"auto_budget_usd_per_day", cfg.AutoTaskMaxCostPerDay,
 		"auto_approve_scope", cfg.AutoApproveScopeLevel(),
+		"followups", followups != nil,
+		"promise_nudge", cfg.EnablePromiseNudge && followups != nil,
 	)
 	return postRun
+}
+
+// StartFollowups runs the one-shot follow-up firing loop for the store wired
+// into pr, injecting each due item into its chat through the autonomy-budgeted
+// path. A nil store (open failed / feature off) is a no-op.
+func StartFollowups(ctx context.Context, svc *chat.Service, pr chat.PostRunConfig, logger *slog.Logger) {
+	if pr.Followups == nil {
+		return
+	}
+	go func() {
+		if err := followup.Run(ctx, pr.Followups, nil, func(it followup.Item) {
+			svc.InjectAuto(ctx, it.ChatID, chat.FollowupPrompt(it))
+		}); err != nil && ctx.Err() == nil {
+			logger.Error("follow-up loop stopped", "error", err)
+		}
+	}()
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/autobudget"
 	"github.com/duckbugio/flock/core/dispatch"
+	"github.com/duckbugio/flock/core/followup"
 	"github.com/duckbugio/flock/core/goal"
 	"github.com/duckbugio/flock/core/verify"
 )
@@ -326,4 +327,99 @@ func TestInjectAutoNeverBlocksOnFullLane(t *testing.T) {
 		t.Fatal("InjectAuto blocked on a full lane — lane-deadlock regression")
 	}
 	close(gate)
+}
+
+// TestFollowupSweepSchedules asserts a followup/<delay>.md file written during
+// a run is scheduled into the durable store, the file is consumed, and the
+// chat gets the confirmation notice.
+func TestFollowupSweepSchedules(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, "followup"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "followup", "15m.md"), []byte("re-check the deploy\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := followup.Open(filepath.Join(t.TempDir(), "followups.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr := &scriptedRunner{script: [][]agent.Event{cleanResult("done", 0)}}
+	fc := newFakeChat()
+	svc, d := newPostRunService(t, fr, fc, &dirWorkspace{dir: ws}, PostRunConfig{
+		Followups: store, PromiseNudge: true,
+	})
+	defer d.Close()
+
+	svc.Handle(context.Background(), "100", 42, "1", "deploy it")
+
+	waitUntil(t, func() bool {
+		_, statErr := os.Stat(filepath.Join(ws, "followup", "15m.md"))
+		return store.Count("100") == 1 && os.IsNotExist(statErr)
+	})
+	if joined := strings.Join(allSent(fc), "\n"); !strings.Contains(joined, "Follow-up scheduled") {
+		t.Fatalf("confirmation notice missing; sent:\n%s", joined)
+	}
+	// A scheduled follow-up suppresses the promise nudge even if the answer
+	// promised — exactly one run happened.
+	time.Sleep(50 * time.Millisecond)
+	if got := len(fr.recorded()); got != 1 {
+		t.Fatalf("want exactly 1 run, got %d: %q", got, fr.recorded())
+	}
+}
+
+// TestPromiseNudgeFiresOnceAndNeverChains asserts a final answer that promises
+// an unprompted return triggers exactly ONE corrective run — even when that
+// corrective run's own answer promises again.
+func TestPromiseNudgeFiresOnceAndNeverChains(t *testing.T) {
+	store, err := followup.Open(filepath.Join(t.TempDir(), "followups.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr := &scriptedRunner{script: [][]agent.Event{
+		cleanResult("Deploy started. I'll report back once it completes.", 0),
+		cleanResult("Понял. Доложу, как только процесс завершится.", 0), // the nudge run promises AGAIN
+	}}
+	fc := newFakeChat()
+	svc, d := newPostRunService(t, fr, fc, &fakeWorkspace{}, PostRunConfig{
+		Followups: store, PromiseNudge: true,
+	})
+	defer d.Close()
+
+	svc.Handle(context.Background(), "100", 42, "1", "deploy it and tell me")
+
+	waitUntil(t, func() bool { return len(fr.recorded()) == 2 })
+	time.Sleep(100 * time.Millisecond)
+	prompts := fr.recorded()
+	if len(prompts) != 2 {
+		t.Fatalf("want exactly 2 runs (work + one nudge), got %d: %q", len(prompts), prompts)
+	}
+	if !strings.Contains(prompts[1], "Self-follow-up check.") {
+		t.Fatalf("second run must be the corrective nudge, got: %s", prompts[1])
+	}
+}
+
+// TestNoNudgeOnPlainAnswer asserts ordinary answers (including ones asking the
+// USER to follow up) do not trigger the corrective run.
+func TestNoNudgeOnPlainAnswer(t *testing.T) {
+	store, err := followup.Open(filepath.Join(t.TempDir(), "followups.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr := &scriptedRunner{script: [][]agent.Event{
+		cleanResult("Готово: PR открыт. Напиши мне, если CI упадёт — сам я его не увижу.", 0),
+	}}
+	fc := newFakeChat()
+	svc, d := newPostRunService(t, fr, fc, &fakeWorkspace{}, PostRunConfig{
+		Followups: store, PromiseNudge: true,
+	})
+	defer d.Close()
+
+	svc.Handle(context.Background(), "100", 42, "1", "open the pr")
+
+	waitUntil(t, func() bool { return len(fr.recorded()) == 1 })
+	time.Sleep(100 * time.Millisecond)
+	if got := len(fr.recorded()); got != 1 {
+		t.Fatalf("plain answer must not nudge, got %d runs: %q", got, fr.recorded())
+	}
 }

@@ -290,6 +290,13 @@ type Config struct {
 	AutoTaskMaxCostPerDay float64 `env:"AUTO_TASK_MAX_COST_PER_DAY" envDefault:"20.0"`
 	AutoBudgetStorePath   string  `env:"AUTO_BUDGET_STORE_PATH"`
 
+	// Follow-ups (core/followup): the workspace followup/<delay>.md convention
+	// that lets a run legally come back later, plus the promise nudge — one
+	// corrective run fired when a final answer promises to return on its own
+	// without scheduling anything that would.
+	FollowupStorePath  string `env:"FOLLOWUP_STORE_PATH"`
+	EnablePromiseNudge bool   `env:"ENABLE_PROMISE_NUDGE" envDefault:"true"`
+
 	// Source paths for the shared team config baked into the image (see the
 	// Dockerfile's /opt/duck layout). Rendered per chat by core/workspace.
 	TeamTemplatePath string `env:"TEAM_TEMPLATE_PATH" envDefault:"/opt/duck/CLAUDE.workspace.md.tmpl"`
@@ -881,6 +888,15 @@ func (c Config) AutoBudgetStoreFile() string {
 		return c.AutoBudgetStorePath
 	}
 	return filepath.Join(c.ApprovedDirectory, "auto_budget.json")
+}
+
+// FollowupStoreFile returns the path to the JSON follow-up store, defaulting
+// to <ApprovedDirectory>/followups.json.
+func (c Config) FollowupStoreFile() string {
+	if strings.TrimSpace(c.FollowupStorePath) != "" {
+		return c.FollowupStorePath
+	}
+	return filepath.Join(c.ApprovedDirectory, "followups.json")
 }
 
 // minCIPollInterval floors the CI poll period, mirroring the Gitea poller.

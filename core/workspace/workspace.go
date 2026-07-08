@@ -142,6 +142,24 @@ content). Writing the PNG into ` + "`outbox/`" + ` delivers it to the user in ch
 e.g. a Telegram Mini App that needs ` + "`initData`" + ` — will not render.
 `
 
+// followupConvention is appended to every rendered CLAUDE.md so the agents
+// know the LEGAL way to come back later — instead of ending a turn with an
+// "I'll report back" promise that nothing ever wakes. Like outboxConvention it
+// lives here so the template file on disk stays byte-identical.
+const followupConvention = `
+
+## Coming back later (follow-ups)
+
+You cannot promise "I'll report back when it's done": nothing wakes you when a turn ends, so
+that promise strands the user. When work genuinely must wait on something external (a deploy
+propagating, a long remote job), schedule a follow-up instead: write a file
+` + "`followup/<delay>.md`" + ` at the workspace root — a sibling of the repos, e.g.
+` + "`followup/15m.md`" + `, ` + "`followup/2h.md`" + ` (min 1m, max 48h) — whose CONTENT is the
+prompt you want run at that time. After this run ends the bot schedules it durably and starts a
+new turn with that prompt when due; tell the user when you'll be back. Anything under a few
+minutes: just wait in the foreground of THIS turn. Recurring needs belong in /schedule.
+`
+
 // renderClaudeMD reads the template, substitutes the three configured
 // placeholders, appends the outbox convention, drops any stale CLAUDE.md, and
 // writes the fresh file.
@@ -161,10 +179,12 @@ func (r *Renderer) renderClaudeMD(ws string) error {
 		"${AUTO_APPROVE_SCOPE}", r.autoApproveScope(),
 	).Replace(string(raw))
 
-	// Append the outbox + screenshot conventions to the RENDERED output (after
-	// substitution), keeping the protected template file on disk byte-identical.
+	// Append the outbox + screenshot + follow-up conventions to the RENDERED
+	// output (after substitution), keeping the protected template file on disk
+	// byte-identical.
 	rendered += outboxConvention
 	rendered += shotConvention
+	rendered += followupConvention
 
 	dst := filepath.Join(ws, "CLAUDE.md")
 	// Drop a possibly stale/root-owned stub so the write recreates it fresh,

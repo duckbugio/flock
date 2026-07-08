@@ -8,6 +8,7 @@ import (
 
 	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/autobudget"
+	"github.com/duckbugio/flock/core/followup"
 	"github.com/duckbugio/flock/core/goal"
 	"github.com/duckbugio/flock/core/verify"
 )
@@ -55,6 +56,13 @@ type PostRunConfig struct {
 	// BudgetCapUSD is the per-chat per-day autonomy ceiling; non-positive
 	// disables the gate.
 	BudgetCapUSD float64
+	// Followups persists the one-shot "come back later" items the workspace
+	// followup/ convention schedules (see core/followup). Nil disables the sweep
+	// and the promise nudge.
+	Followups *followup.FileStore
+	// PromiseNudge fires one corrective run when a final answer promises to
+	// come back on its own without scheduling anything that would.
+	PromiseNudge bool
 }
 
 // InjectAuto submits an AUTONOMY-originated prompt (a CI event, a verification

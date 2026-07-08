@@ -314,6 +314,10 @@ func run() int {
 	// goroutine runs — the path is a true no-op.
 	mgr := buildScheduler(ctx, cfg, svc, logger)
 
+	// One-shot follow-ups (the workspace followup/<delay>.md convention): fire
+	// each due item as an autonomy-budgeted injected run.
+	autonomy.StartFollowups(ctx, svc, postRun, logger)
+
 	// CI watch: poll the git host for CI state on the duck/* branches checked out
 	// in the workspaces; a red build is relayed into the owning chat as a fix-up
 	// prompt, and (opt-in) a green PR is auto-merged.

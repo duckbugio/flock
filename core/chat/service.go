@@ -651,6 +651,14 @@ loop:
 	// have mutated repos) and after the answer is already delivered, so the git
 	// calls never add to the user's perceived latency.
 	s.refreshSnapCache(laneCtx, chatID, workdir)
+
+	// Schedule any follow-up files the run wrote (the legal "come back later"),
+	// then — only on a clean success that scheduled nothing — check the final
+	// answer for an unbacked "I'll report back" promise and nudge once.
+	scheduled := s.sweepFollowups(laneCtx, chatID, workdir)
+	if scheduled == 0 && finalResult != nil && finalErr == nil && ctx.Err() == nil && !finalResult.IsError {
+		s.maybeNudgePromise(laneCtx, chatID, prompt, finalResult.Text)
+	}
 }
 
 // refreshSnapCache fingerprints the workspace and stores the result as

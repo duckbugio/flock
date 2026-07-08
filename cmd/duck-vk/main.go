@@ -233,6 +233,9 @@ func run() int {
 		Logger:     logger,
 	})
 
+	// One-shot follow-ups (the workspace followup/<delay>.md convention).
+	autonomy.StartFollowups(ctx, svc, postRun, logger)
+
 	// Background cron scheduler (OFF by default). When enabled, open the durable
 	// per-chat job store and start the scheduler loop, firing each due job into the
 	// same dispatch lane a user message uses (svc.InjectScheduled, non-blocking +
