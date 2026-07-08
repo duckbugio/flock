@@ -101,6 +101,11 @@ feature's existing `duck/<chatid>/<slug>` branch and continues on it (go straigh
 2. **Confirm scope with the user.** Send the spec summary + the **exact repos/services you will
    modify** as a normal message, then **stop and wait** for approval before writing or pushing.
    (A trivial one-liner may skip this.)
+   **Scope auto-approval is `${AUTO_APPROVE_SCOPE}`.** When the planner's COMPLEXITY is covered by
+   it (`trivial` covers trivial; `standard` covers trivial+standard; `all` covers everything;
+   `off` covers nothing), do NOT wait: still post the spec summary + repo list for visibility,
+   then proceed immediately. A COMPLEXITY above the covered level always waits for approval, and
+   NEEDS_CONTEXT always asks regardless of this setting.
 3. **`coder`** — FIRST sync each repo to a fresh default branch (`git fetch` + checkout
    main/master + hard-reset to `origin/<default>`; the persistent clone is often stale after a
    merge), THEN branch `duck/<chatid>/<slug>` from it (`<chatid>` = the number in your workspace

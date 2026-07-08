@@ -35,17 +35,22 @@ type Renderer struct {
 	// <name>/SKILL.md subdirectory). Empty or a missing dir disables skills.
 	SkillsDir string
 
-	// PrePRCycles, PrReviewCycles, EnablePRReview and GitHost are substituted into
-	// the template for the ${PRE_PR_CYCLES} ${PR_REVIEW_CYCLES} ${ENABLE_PR_REVIEW}
-	// ${GIT_HOST} placeholders respectively. Only these placeholders are
-	// substituted; any other ${...} in the template is left untouched (matching
-	// envsubst with an explicit variable list).
+	// PrePRCycles, PrReviewCycles, EnablePRReview, GitHost and AutoApproveScope
+	// are substituted into the template for the ${PRE_PR_CYCLES}
+	// ${PR_REVIEW_CYCLES} ${ENABLE_PR_REVIEW} ${GIT_HOST} ${AUTO_APPROVE_SCOPE}
+	// placeholders respectively. Only these placeholders are substituted; any
+	// other ${...} in the template is left untouched (matching envsubst with an
+	// explicit variable list).
 	PrePRCycles    string
 	PrReviewCycles string
 	EnablePRReview string
 	// GitHost names the real git host (github.com / a Gitea host / …) so the prompt
 	// states it instead of assuming "Gitea". Empty when git is not configured.
 	GitHost string
+	// AutoApproveScope is the highest planner COMPLEXITY that skips the Phase-1
+	// "confirm scope and wait" gate: off | trivial | standard | all. Normalized
+	// by config.AutoApproveScopeLevel (an unknown value renders as "off").
+	AutoApproveScope string
 }
 
 // Ensure creates (or refreshes) the workspace for chatID and returns its path.
@@ -153,6 +158,7 @@ func (r *Renderer) renderClaudeMD(ws string) error {
 		"${PR_REVIEW_CYCLES}", r.PrReviewCycles,
 		"${ENABLE_PR_REVIEW}", r.EnablePRReview,
 		"${GIT_HOST}", r.GitHost,
+		"${AUTO_APPROVE_SCOPE}", r.autoApproveScope(),
 	).Replace(string(raw))
 
 	// Append the outbox + screenshot conventions to the RENDERED output (after
@@ -171,6 +177,16 @@ func (r *Renderer) renderClaudeMD(ws string) error {
 		return fmt.Errorf("write CLAUDE.md: %w", err)
 	}
 	return nil
+}
+
+// autoApproveScope returns the substitution value for ${AUTO_APPROVE_SCOPE},
+// defaulting an empty field to the fail-safe "off" so a caller that never sets
+// it (tests, the VK adapter) renders the always-wait behavior.
+func (r *Renderer) autoApproveScope() string {
+	if r.AutoApproveScope == "" {
+		return "off"
+	}
+	return r.AutoApproveScope
 }
 
 // copyAgents copies every *.md under AgentsDir into agentsDst, overwriting any

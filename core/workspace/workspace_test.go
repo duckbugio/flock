@@ -310,3 +310,38 @@ func TestEnsureIdempotent(t *testing.T) {
 		t.Fatalf("CLAUDE.md content lost after second Ensure: %q", string(body))
 	}
 }
+
+func TestAutoApproveScopeSubstitution(t *testing.T) {
+	r := newTestRenderer(t)
+	tmpl := filepath.Join(t.TempDir(), "tmpl.md")
+	if err := os.WriteFile(tmpl, []byte("auto=${AUTO_APPROVE_SCOPE}\n"), 0o600); err != nil {
+		t.Fatalf("write template: %v", err)
+	}
+	r.TemplatePath = tmpl
+
+	// Unset renders the fail-safe "off".
+	ws, err := r.Ensure("900")
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(ws, "CLAUDE.md")) //nolint:gosec // test path under t.TempDir
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	if !strings.Contains(string(data), "auto=off") {
+		t.Fatalf("unset AutoApproveScope must render off, got: %s", data)
+	}
+
+	// A configured level renders verbatim.
+	r.AutoApproveScope = "trivial"
+	if _, err := r.Ensure("900"); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	data, err = os.ReadFile(filepath.Join(ws, "CLAUDE.md")) //nolint:gosec // test path under t.TempDir
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	if !strings.Contains(string(data), "auto=trivial") {
+		t.Fatalf("AutoApproveScope must substitute, got: %s", data)
+	}
+}
