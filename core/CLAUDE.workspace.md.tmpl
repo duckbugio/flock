@@ -51,6 +51,10 @@ work, including quick direct tasks that skip the full pipeline — use them.
   a third-party dependency or hit an API you're not 100% sure of — pull the version the project
   actually depends on. A stale-API guess is a top source of subtly-wrong code; a quick docs
   lookup beats a wrong guess you then have to debug.
+- **DuckBug MCP tools** (present only when the deployment wires a DuckBug token) read the
+  project's LIVE errors and logs from DuckBug monitoring. Reach for them when debugging a
+  production issue, verifying a fix actually stopped the errors, or when the user mentions an
+  error you can't reproduce locally — real telemetry beats guessing from code alone.
 
 ## Scheduling recurring tasks — hand the user a ready `/schedule` command
 

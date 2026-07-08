@@ -120,13 +120,21 @@ func run() int {
 	// Wire the context7 MCP docs server (up-to-date, version-specific library/API
 	// docs) into every run when enabled. A write failure is non-fatal — the bot
 	// runs without it, exactly as before.
-	if provider.Name == config.AIBackendClaude && cfg.EnableContext7 {
+	if provider.Name == config.AIBackendClaude {
+		servers := map[string]claude.MCPServer{}
+		if cfg.EnableContext7 {
+			servers["context7"] = claude.MCPServer{URL: claude.Context7URL}
+		}
+		if cfg.DuckBugMCPEnabled() {
+			servers["duckbug"] = claude.MCPServer{URL: cfg.DuckBugMCPURL, BearerToken: cfg.DuckBugMCPToken}
+		}
 		mcpPath := filepath.Join(cfg.ApprovedDirectory, ".flock-mcp.json")
-		if err := claude.WriteContext7MCPConfig(mcpPath); err != nil {
-			logger.Warn("write context7 mcp config; running without docs MCP", "error", err)
-		} else {
+		if ok, err := claude.WriteMCPConfig(mcpPath, servers); err != nil {
+			logger.Warn("write mcp config; running without MCP tools", "error", err)
+		} else if ok {
 			opts.MCPConfig = mcpPath
-			logger.Info("context7 MCP enabled", "config", mcpPath)
+			logger.Info("MCP servers enabled",
+				"config", mcpPath, "context7", cfg.EnableContext7, "duckbug", cfg.DuckBugMCPEnabled())
 		}
 	}
 

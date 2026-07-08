@@ -1001,3 +1001,17 @@ func TestEffectiveGoalMaxAttempts(t *testing.T) {
 		}
 	}
 }
+
+func TestDuckBugMCPEnabled(t *testing.T) {
+	if (Config{}).DuckBugMCPEnabled() {
+		t.Error("no token must disable the DuckBug MCP")
+	}
+	on := Config{DuckBugMCPToken: "sk-duck-api01-x", DuckBugMCPURL: "https://duckbug.io/api/mcp"} //nolint:gosec // test fixture
+	if !on.DuckBugMCPEnabled() {
+		t.Error("token + url must enable the DuckBug MCP")
+	}
+	noURL := Config{DuckBugMCPToken: "sk-duck-api01-x", DuckBugMCPURL: " "} //nolint:gosec // test fixture
+	if noURL.DuckBugMCPEnabled() {
+		t.Error("a blank URL must disable the DuckBug MCP")
+	}
+}

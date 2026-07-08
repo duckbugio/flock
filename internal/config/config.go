@@ -297,6 +297,14 @@ type Config struct {
 	FollowupStorePath  string `env:"FOLLOWUP_STORE_PATH"`
 	EnablePromiseNudge bool   `env:"ENABLE_PROMISE_NUDGE" envDefault:"true"`
 
+	// DuckBug MCP: wire the DuckBug (error & log monitoring) MCP server into
+	// every Claude run so the team can read the project's live errors/logs. The
+	// TOKEN is the on/off switch (a sk-duck-api01-… API token from the DuckBug
+	// UI); the URL defaults to the cloud endpoint and self-hosted deployments
+	// override it with <their-duckbug>/api/mcp.
+	DuckBugMCPToken string `env:"DUCKBUG_MCP_TOKEN"`
+	DuckBugMCPURL   string `env:"DUCKBUG_MCP_URL" envDefault:"https://duckbug.io/api/mcp"`
+
 	// Source paths for the shared team config baked into the image (see the
 	// Dockerfile's /opt/duck layout). Rendered per chat by core/workspace.
 	TeamTemplatePath string `env:"TEAM_TEMPLATE_PATH" envDefault:"/opt/duck/CLAUDE.workspace.md.tmpl"`
@@ -897,6 +905,13 @@ func (c Config) FollowupStoreFile() string {
 		return c.FollowupStorePath
 	}
 	return filepath.Join(c.ApprovedDirectory, "followups.json")
+}
+
+// DuckBugMCPEnabled reports whether the DuckBug MCP server should be wired
+// into runs: the token is the on/off switch (no separate flag), and a usable
+// URL must remain (the default cloud endpoint unless overridden).
+func (c Config) DuckBugMCPEnabled() bool {
+	return strings.TrimSpace(c.DuckBugMCPToken) != "" && strings.TrimSpace(c.DuckBugMCPURL) != ""
 }
 
 // minCIPollInterval floors the CI poll period, mirroring the Gitea poller.
