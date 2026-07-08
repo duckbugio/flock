@@ -1,7 +1,7 @@
 // Autonomy-loop glue for the Telegram adapter: the /goal command, the CI-watch
-// wiring, and the prompt formatter for injected CI fix-ups. The mechanics live
-// in core/{goal,ciwatch,verify,autobudget}; this file only parses commands,
-// replies, and routes events into chat.Service.InjectAuto.
+// wiring, and the prompt formatters for injected CI events. The mechanics live
+// in core/{goal,ciwatch,verify,autobudget} and internal/autonomy; this file
+// only parses commands, replies, and routes events into chat.Service.InjectAuto.
 package main
 
 import (
@@ -14,54 +14,10 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
-	"github.com/duckbugio/flock/core/autobudget"
 	"github.com/duckbugio/flock/core/chat"
 	"github.com/duckbugio/flock/core/ciwatch"
-	"github.com/duckbugio/flock/core/goal"
-	"github.com/duckbugio/flock/core/verify"
 	"github.com/duckbugio/flock/internal/config"
 )
-
-// buildAutonomy opens the autonomy-loop stores and assembles the post-run
-// config. Every store-open failure is non-fatal (log + run with that single
-// feature disabled), matching the rest of the best-effort startup wiring.
-func buildAutonomy(cfg config.Config, logger *slog.Logger) chat.PostRunConfig {
-	goals, err := goal.Open(cfg.GoalStoreFile())
-	if err != nil {
-		logger.Error("open goal store; /goal disabled", "path", cfg.GoalStoreFile(), "error", err)
-		goals = nil
-	}
-	budget, err := autobudget.Open(cfg.AutoBudgetStoreFile())
-	if err != nil {
-		logger.Error("open autonomy budget store; auto budget disabled",
-			"path", cfg.AutoBudgetStoreFile(), "error", err)
-		budget = nil
-	}
-	postRun := chat.PostRunConfig{
-		VerifyMaxFixes:  cfg.PostVerifyMaxFixes,
-		GoalMaxAttempts: cfg.GoalMaxAttempts,
-		EvalModel:       cfg.EvaluatorModel,
-		EvalMaxTurns:    cfg.GoalEvalMaxTurns,
-		EvalTimeout:     cfg.GoalEvalTimeout(),
-		Budget:          budget,
-		BudgetCapUSD:    cfg.AutoTaskMaxCostPerDay,
-	}
-	if cfg.EnablePostVerify {
-		postRun.Verifier = &verify.Verifier{Timeout: cfg.PostVerifyTimeout(), Log: logger}
-	}
-	if goals != nil {
-		postRun.Goals = goals
-	}
-	logger.Info("autonomy loops configured",
-		"post_verify", cfg.EnablePostVerify,
-		"goal_evaluator", goals != nil,
-		"ci_watch", cfg.CIWatchEnabled(),
-		"auto_merge", cfg.CIWatchEnabled() && cfg.EnableAutoMerge,
-		"auto_budget_usd_per_day", cfg.AutoTaskMaxCostPerDay,
-		"auto_approve_scope", cfg.AutoApproveScopeLevel(),
-	)
-	return postRun
-}
 
 // goalUsage is the /goal help reply (engineering artifact, plain English).
 const goalUsage = "Usage:\n" +
@@ -148,6 +104,8 @@ func wireCIWatch(ctx context.Context, cfg config.Config, b *bot.Bot, svc *chat.S
 				switch ev.Kind {
 				case ciwatch.CIFailed:
 					svc.InjectAuto(ctx, ev.ChatID, formatCIFailure(ev))
+				case ciwatch.CIGreen:
+					svc.InjectAuto(ctx, ev.ChatID, formatCIGreen(ev))
 				case ciwatch.PRMerged:
 					sendNotice(ctx, b, id, fmt.Sprintf(
 						"✅ CI is green on %s (%s) — auto-merged PR #%d.", ev.Branch, ev.Repo, ev.PRIndex))
@@ -176,4 +134,22 @@ func formatCIFailure(ev ciwatch.Event) string {
 			"Read the failing check logs via the git host, reproduce the failure locally with the repo's "+
 			"own runner, fix it (never weaken or skip tests to get green), and push the fix to the SAME branch.",
 		ev.Branch, ev.Repo, sha, detail)
+}
+
+// formatCIGreen builds the injected prompt for a green build. Its whole job is
+// to WAKE the session: an agent that told its user "I'll report when CI
+// finishes" has no other wake-up signal for success (the poller only relays
+// new PR comments), so a green build would otherwise end the conversation
+// until the user pings.
+func formatCIGreen(ev ciwatch.Event) string {
+	sha := ev.SHA
+	if len(sha) > shortSHALen {
+		sha = sha[:shortSHALen]
+	}
+	return fmt.Sprintf(
+		"CI completed SUCCESSFULLY on branch %s in %s (commit %s).\n\n"+
+			"If you told the user you would report the CI result, do that now, in their language. "+
+			"Otherwise confirm the green build briefly and continue any follow-up you deferred on it "+
+			"(e.g. asking the human to merge). Do not re-run the checks.",
+		ev.Branch, ev.Repo, sha)
 }

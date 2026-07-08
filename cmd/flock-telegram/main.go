@@ -41,6 +41,7 @@ import (
 	"github.com/duckbugio/flock/core/voice"
 	"github.com/duckbugio/flock/core/workspace"
 	"github.com/duckbugio/flock/internal/airunner"
+	"github.com/duckbugio/flock/internal/autonomy"
 	"github.com/duckbugio/flock/internal/config"
 )
 
@@ -284,7 +285,7 @@ func run() int {
 	// Autonomy loops (durable stores + post-run config). Every store-open failure
 	// is non-fatal, matching the rest of the best-effort startup wiring: log and
 	// run with that single feature disabled rather than crash-loop the bot.
-	postRun := buildAutonomy(cfg, logger)
+	postRun := autonomy.Build(cfg, logger)
 
 	svc = chat.New(chat.Config{
 		Runner:     runner,
