@@ -60,11 +60,29 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin; \
     npm install -g @anthropic-ai/claude-code; \
-    mkdir -p /opt/codex; \
-    curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_HOME=/opt/codex CODEX_NON_INTERACTIVE=1 CODEX_INSTALL_DIR=/usr/local/bin sh; \
-    chmod -R a+rX /opt/codex; \
     npm cache clean --force; \
     apt-get clean; rm -rf /var/lib/apt/lists/*
+
+# Codex CLI — installed from the pinned GitHub release tarball, NOT the
+# `curl | sh` installer: the installer resolves the release and its asset
+# digests through the unauthenticated GitHub API, which rate-limits shared CI
+# runners and then intermittently reports the platform assets missing ("Could
+# not find Codex package or platform npm release assets"), breaking the arm64
+# leg of the multi-arch build. One arch-matched, retried, direct download
+# mirrors the pinned `gh`/`task` installs below.
+ARG CODEX_VERSION=0.143.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+        amd64) target="x86_64-unknown-linux-musl" ;; \
+        arm64) target="aarch64-unknown-linux-musl" ;; \
+        *) echo "unsupported arch for codex: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --retry 5 --retry-all-errors -o /tmp/codex.tgz \
+        "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${target}.tar.gz"; \
+    tar -xzf /tmp/codex.tgz -C /tmp; \
+    install -m 0755 "/tmp/codex-${target}" /usr/local/bin/codex; \
+    rm -f /tmp/codex.tgz "/tmp/codex-${target}"
 
 # GitHub CLI (gh) for PR creation on github.com — installed from the official release
 # tarball, NOT the apt repo: that extra apt source tipped the QEMU-emulated arm64
