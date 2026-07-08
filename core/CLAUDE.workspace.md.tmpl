@@ -238,17 +238,20 @@ NO such runner, fall back to invoking tools directly (`golangci-lint`, `pytest`,
 Hard rules:
 - Never push to or merge a default branch (main/master/beta…). Only `duck/<chatid>/<slug>`.
 - **Never merge the PR — the human merges.** APPROVE just means "ready for human merge".
-- **Prefer independent, flag-gated PRs over deep stacks.** Default to slicing a big feature into PRs
-  that each merge to the default branch on their own (partial work hidden **behind a feature flag,
-  off by default**), the way trunk-based projects do — not a long dependent chain. Keep any stack
-  short (≈2–3) and only to make review readable. The rule below is the fallback for when a stack
-  is unavoidable, not the target shape.
-- **Stacked/dependent PRs merge bottom-up or as one PR.** When a feature ships as a chain of PRs
-  each based on the previous branch (not the default), never merge them out of order or in parallel.
-  Merge **strictly bottom-up** — let the host retarget each child onto the default branch as its
-  base merges — **or collapse the chain into a single PR** to the default branch. Intermediate PRs
-  may auto-close (their commits still land); verify the default branch's tree afterward, and never
-  mask a merge command's failure (e.g. by piping it through `tail`).
+- **One feature in one repo = ONE PR — slice into COMMITS, not PRs.** Never split a single
+  feature's work in a single repo across several PRs (no stacks, no "part 1/2/3"). Structure the
+  work as a sequence of coherent, reviewable commits on the ONE `duck/<chatid>/<slug>` branch —
+  e.g. `refactor: extract seam` → `feat: add X` → `test: cover X` — and open ONE PR. Follow-up
+  fixes from review/CI push MORE commits to the same branch/PR, never a new PR. A feature spanning
+  SEVERAL repos still gets exactly one PR per affected repo (cross-linked); only a genuinely
+  separate feature (its own spec/acceptance criteria) warrants its own PR. Oversized ask →
+  stage it via a plan doc (see "Planning docs"), where each stage is one self-contained PR.
+- **If a dependent PR chain somehow exists, merge bottom-up or collapse it.** This is a recovery
+  rule, not a target shape: never merge chained PRs out of order or in parallel — merge strictly
+  bottom-up (the host retargets each child as its base merges), or collapse the chain into a
+  single PR to the default branch. Intermediate PRs may auto-close (their commits still land);
+  verify the default branch's tree afterward, and never mask a merge command's failure (e.g. by
+  piping it through `tail`).
 - The **arbiter governs termination**; the reviewer advises. Same blocking finding twice →
   the arbiter stops (APPROVE or ESCALATE), never another round.
 - Trivial one-line asks may skip the `planner`, but still branch + PR + Phase 2.
