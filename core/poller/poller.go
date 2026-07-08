@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/duckbugio/flock/core/teambranch"
 )
 
 // PRComment is a new, non-self comment observed on an OPEN team PR whose head
@@ -42,10 +44,6 @@ const minInterval = 30 * time.Second
 // defaultClientTimeout is the request timeout for the default HTTP client used
 // when Config.Client is nil.
 const defaultClientTimeout = 20 * time.Second
-
-// minRefParts is the minimum number of "/"-separated segments a team branch ref
-// must have to carry a chatID: duck/<chatid>[/<slug>].
-const minRefParts = 2
 
 // poller holds the resolved runtime state for one Run.
 type poller struct {
@@ -174,8 +172,9 @@ func (p *poller) handleThread(ctx context.Context, t *notification, out chan<- P
 		return nil
 	}
 	ref := pr.Head.Ref
-	if !strings.HasPrefix(ref, "duck/") {
-		p.markRead(ctx, threadID) // not a team branch — clear it
+	chatID, ok := teambranch.ChatID(ref)
+	if !ok {
+		p.markRead(ctx, threadID) // not a (routable) team branch — clear it
 		return nil
 	}
 
@@ -201,14 +200,6 @@ func (p *poller) handleThread(ctx context.Context, t *notification, out chan<- P
 	if repo == "" {
 		repo = t.Repository.FullName
 	}
-
-	// Parse chatID from duck/<chatid>/<slug>.
-	parts := strings.Split(ref, "/")
-	if len(parts) < minRefParts {
-		p.markRead(ctx, threadID)
-		return nil
-	}
-	chatID := parts[1]
 
 	select {
 	case out <- PRComment{
