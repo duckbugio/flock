@@ -35,17 +35,22 @@ type Renderer struct {
 	// <name>/SKILL.md subdirectory). Empty or a missing dir disables skills.
 	SkillsDir string
 
-	// PrePRCycles, PrReviewCycles, EnablePRReview and GitHost are substituted into
-	// the template for the ${PRE_PR_CYCLES} ${PR_REVIEW_CYCLES} ${ENABLE_PR_REVIEW}
-	// ${GIT_HOST} placeholders respectively. Only these placeholders are
-	// substituted; any other ${...} in the template is left untouched (matching
-	// envsubst with an explicit variable list).
+	// PrePRCycles, PrReviewCycles, EnablePRReview, GitHost and AutoApproveScope
+	// are substituted into the template for the ${PRE_PR_CYCLES}
+	// ${PR_REVIEW_CYCLES} ${ENABLE_PR_REVIEW} ${GIT_HOST} ${AUTO_APPROVE_SCOPE}
+	// placeholders respectively. Only these placeholders are substituted; any
+	// other ${...} in the template is left untouched (matching envsubst with an
+	// explicit variable list).
 	PrePRCycles    string
 	PrReviewCycles string
 	EnablePRReview string
 	// GitHost names the real git host (github.com / a Gitea host / …) so the prompt
 	// states it instead of assuming "Gitea". Empty when git is not configured.
 	GitHost string
+	// AutoApproveScope is the highest planner COMPLEXITY that skips the Phase-1
+	// "confirm scope and wait" gate: off | trivial | standard | all. Normalized
+	// by config.AutoApproveScopeLevel (an unknown value renders as "off").
+	AutoApproveScope string
 }
 
 // Ensure creates (or refreshes) the workspace for chatID and returns its path.
@@ -137,6 +142,24 @@ content). Writing the PNG into ` + "`outbox/`" + ` delivers it to the user in ch
 e.g. a Telegram Mini App that needs ` + "`initData`" + ` — will not render.
 `
 
+// followupConvention is appended to every rendered CLAUDE.md so the agents
+// know the LEGAL way to come back later — instead of ending a turn with an
+// "I'll report back" promise that nothing ever wakes. Like outboxConvention it
+// lives here so the template file on disk stays byte-identical.
+const followupConvention = `
+
+## Coming back later (follow-ups)
+
+You cannot promise "I'll report back when it's done": nothing wakes you when a turn ends, so
+that promise strands the user. When work genuinely must wait on something external (a deploy
+propagating, a long remote job), schedule a follow-up instead: write a file
+` + "`followup/<delay>.md`" + ` at the workspace root — a sibling of the repos, e.g.
+` + "`followup/15m.md`" + `, ` + "`followup/2h.md`" + ` (min 1m, max 48h) — whose CONTENT is the
+prompt you want run at that time. After this run ends the bot schedules it durably and starts a
+new turn with that prompt when due; tell the user when you'll be back. Anything under a few
+minutes: just wait in the foreground of THIS turn. Recurring needs belong in /schedule.
+`
+
 // renderClaudeMD reads the template, substitutes the three configured
 // placeholders, appends the outbox convention, drops any stale CLAUDE.md, and
 // writes the fresh file.
@@ -153,12 +176,15 @@ func (r *Renderer) renderClaudeMD(ws string) error {
 		"${PR_REVIEW_CYCLES}", r.PrReviewCycles,
 		"${ENABLE_PR_REVIEW}", r.EnablePRReview,
 		"${GIT_HOST}", r.GitHost,
+		"${AUTO_APPROVE_SCOPE}", r.autoApproveScope(),
 	).Replace(string(raw))
 
-	// Append the outbox + screenshot conventions to the RENDERED output (after
-	// substitution), keeping the protected template file on disk byte-identical.
+	// Append the outbox + screenshot + follow-up conventions to the RENDERED
+	// output (after substitution), keeping the protected template file on disk
+	// byte-identical.
 	rendered += outboxConvention
 	rendered += shotConvention
+	rendered += followupConvention
 
 	dst := filepath.Join(ws, "CLAUDE.md")
 	// Drop a possibly stale/root-owned stub so the write recreates it fresh,
@@ -171,6 +197,16 @@ func (r *Renderer) renderClaudeMD(ws string) error {
 		return fmt.Errorf("write CLAUDE.md: %w", err)
 	}
 	return nil
+}
+
+// autoApproveScope returns the substitution value for ${AUTO_APPROVE_SCOPE},
+// defaulting an empty field to the fail-safe "off" so a caller that never sets
+// it (tests, the VK adapter) renders the always-wait behavior.
+func (r *Renderer) autoApproveScope() string {
+	if r.AutoApproveScope == "" {
+		return "off"
+	}
+	return r.AutoApproveScope
 }
 
 // copyAgents copies every *.md under AgentsDir into agentsDst, overwriting any

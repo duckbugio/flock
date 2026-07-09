@@ -12,6 +12,7 @@ import (
 
 	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/chat"
+	"github.com/duckbugio/flock/core/goal"
 	"github.com/duckbugio/flock/core/schedule"
 )
 
@@ -24,6 +25,7 @@ type fakeService struct {
 	stopChats   []string
 	newSessions []string
 	starPresses int
+	goals       map[string]goal.Goal
 }
 
 type handleCall struct {
@@ -72,6 +74,32 @@ func (f *fakeService) StarPress() (string, bool) {
 	defer f.mu.Unlock()
 	f.starPresses++
 	return "ok", true
+}
+
+func (f *fakeService) ArmGoal(chatID chat.ChatID, criterion string) (goal.Goal, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.goals == nil {
+		f.goals = map[string]goal.Goal{}
+	}
+	g := goal.Goal{Criterion: criterion, MaxAttempts: 5}
+	f.goals[chatID] = g
+	return g, true
+}
+
+func (f *fakeService) GoalStatus(chatID chat.ChatID) (goal.Goal, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	g, ok := f.goals[chatID]
+	return g, ok
+}
+
+func (f *fakeService) DisarmGoal(chatID chat.ChatID) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.goals[chatID]
+	delete(f.goals, chatID)
+	return ok
 }
 
 // fakeNotice records notice calls.

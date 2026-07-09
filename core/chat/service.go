@@ -21,6 +21,7 @@ import (
 	"github.com/duckbugio/flock/core/cost"
 	"github.com/duckbugio/flock/core/dispatch"
 	"github.com/duckbugio/flock/core/pending"
+	"github.com/duckbugio/flock/core/verify"
 )
 
 // tickInterval is how often the wall-clock ticker re-renders the progress frame —
@@ -121,16 +122,20 @@ type Service struct {
 	costCapUSD float64
 	outbox     *Sweeper
 	nudge      *starNudge
+	postrun    PostRunConfig
 	opts       agent.Options
 	timeout    time.Duration
 	log        *slog.Logger
 	tick       time.Duration
 	nowFunc    func() time.Time
 
-	mu      sync.Mutex           // guards runChat and lastMsg
-	runChat map[string]ChatID    // active runID -> chatID, for mapping Stop back to a chat
-	lastMsg map[ChatID]MessageID // chatID -> the source message id of its latest submitted run
-	runSeq  atomic.Uint64
+	mu             sync.Mutex                 // guards runChat, lastMsg, verifyRetry, budgetNotified and snapCache
+	runChat        map[string]ChatID          // active runID -> chatID, for mapping Stop back to a chat
+	lastMsg        map[ChatID]MessageID       // chatID -> the source message id of its latest submitted run
+	verifyRetry    map[ChatID][]string        // repos whose gate failed last round (re-gated even if unchanged)
+	budgetNotified map[ChatID]string          // chatID -> UTC day the budget-reached notice was last sent
+	snapCache      map[ChatID]verify.Snapshot // post-run repo fingerprints, reused as the next run's "before"
+	runSeq         atomic.Uint64
 }
 
 // Config bundles the dependencies of a Service.
@@ -162,7 +167,11 @@ type Config struct {
 	// StarNudge configures the post-task GitHub star nudge. When its Enabled flag
 	// is false (the default for non-GitHub deploys) the whole nudge path is inert.
 	StarNudge StarNudgeConfig
-	Opts      agent.Options // Model/MaxTurns/Env for every run; Workdir is set per chat
+	// PostRun configures the autonomous post-run loop (deterministic gate
+	// verification, the /goal evaluator, and the per-chat autonomy budget). The
+	// zero value disables all of it (see PostRunConfig).
+	PostRun PostRunConfig
+	Opts    agent.Options // Model/MaxTurns/Env for every run; Workdir is set per chat
 	// Timeout bounds a single run's delivery; 0 means no deadline. On timeout the
 	// run is cancelled but the captured session_id is still stored (plan §7.3).
 	Timeout time.Duration
@@ -206,6 +215,7 @@ func New(cfg Config) *Service {
 		costCapUSD: cfg.CostCapUSD,
 		outbox:     cfg.Outbox,
 		nudge:      newStarNudge(cfg.StarNudge, cfg.Transport, log),
+		postrun:    cfg.PostRun,
 		opts:       cfg.Opts,
 		timeout:    cfg.Timeout,
 		log:        log,
@@ -213,6 +223,10 @@ func New(cfg Config) *Service {
 		nowFunc:    time.Now,
 		runChat:    map[string]ChatID{},
 		lastMsg:    map[ChatID]MessageID{},
+
+		verifyRetry:    map[ChatID][]string{},
+		budgetNotified: map[ChatID]string{},
+		snapCache:      map[ChatID]verify.Snapshot{},
 	}
 }
 
@@ -243,6 +257,10 @@ func (s *Service) HandleMedia(
 ) {
 	s.mu.Lock()
 	s.lastMsg[chatID] = msgID
+	// A real user message opens a fresh chapter: the post-run verification retry
+	// list starts over (the fix-round counter rides inside fix-up prompts, so a
+	// user message naturally resets it to zero).
+	delete(s.verifyRetry, chatID)
 	s.mu.Unlock()
 	// Enqueue the interrupted-run marker BEFORE Submit so a run that is only queued
 	// (behind a still-running run in the same chat) when the process is killed on a
@@ -415,6 +433,26 @@ func (s *Service) run(
 	}
 	opts.Workdir = workdir
 
+	// The post-run verifier needs each repo's state as of BEFORE this run. Reuse
+	// the fingerprint cached at the END of the previous run (refreshSnapCache) so
+	// the git calls stay off the per-message critical path; only the first run
+	// after boot pays a synchronous Take here. Nil verifier → nil snapshot.
+	var preSnap verify.Snapshot
+	if s.postrun.Verifier != nil {
+		s.mu.Lock()
+		cached, ok := s.snapCache[chatID]
+		s.mu.Unlock()
+		if ok {
+			preSnap = cached
+		} else {
+			preSnap = s.postrun.Verifier.Take(ctx, workdir)
+		}
+	}
+	// The dispatcher lane context, captured before the per-run timeout is layered
+	// on: post-run work (verify/evaluate) must not inherit a deadline the main run
+	// already spent, but must still die on Stop/shutdown.
+	laneCtx := ctx
+
 	// The interrupted-run marker already exists: it was enqueued at SUBMIT time (so
 	// a still-queued run is captured too), not at run start. This run clears that
 	// exact marker by id on its clean terminal, and enriches it with the anchor id
@@ -563,12 +601,13 @@ loop:
 		}
 	}
 
-	// Record this run's cost against the sending user for the cumulative cost cap.
-	// Only a run that reached its terminal Result carries a cost; an error,
-	// timeout, or Stop with no Result records ZERO (finalResult is nil) and is a
-	// no-op. The cap is reactive: this Add may push the user over the cap, in which
-	// case their NEXT request is denied (the crossing request still ran).
-	s.recordCost(userID, finalResult)
+	// Record this run's cost: against the sending user for the cumulative cost
+	// cap, or — for an autonomous run (AutoUser) — against the chat's per-day
+	// autonomy budget. Only a run that reached its terminal Result carries a cost;
+	// an error, timeout, or Stop with no Result records ZERO (finalResult is nil)
+	// and is a no-op. Both caps are reactive: this Add may push over the cap, in
+	// which case the NEXT request is denied (the crossing request still ran).
+	s.recordCost(chatID, userID, finalResult)
 
 	s.finish(ctx, chatID, progressMsgID, markerID, finalResult, finalErr, ctx.Err(), s.nowFunc().Sub(start))
 
@@ -596,15 +635,58 @@ loop:
 		//nolint:contextcheck // intentionally detached; the nudge runs post-completion.
 		s.nudge.maybeNudge(chatID)
 	}
+
+	// The autonomy tail (deterministic gate verification, then the /goal
+	// evaluator) fires ONLY on a cleanly successful run — never on an error
+	// result, a RunError, a Stop, or a timeout. It runs on the lane context
+	// (pre-timeout) so it is not starved by a deadline the main run already
+	// spent, yet still dies on Stop/shutdown. It runs synchronously on the lane
+	// so its injected follow-up is ordered before any queued user message.
+	if finalResult != nil && finalErr == nil && ctx.Err() == nil && !finalResult.IsError {
+		s.postRun(laneCtx, chatID, workdir, prompt, preSnap)
+	}
+
+	// Cache the workspace's post-run fingerprints as the NEXT run's "before"
+	// state. This runs on EVERY terminal (an errored or stopped run may still
+	// have mutated repos) and after the answer is already delivered, so the git
+	// calls never add to the user's perceived latency.
+	s.refreshSnapCache(laneCtx, chatID, workdir)
+
+	// Schedule any follow-up files the run wrote (the legal "come back later"),
+	// then — only on a clean success that scheduled nothing — check the final
+	// answer for an unbacked "I'll report back" promise and nudge once.
+	scheduled := s.sweepFollowups(laneCtx, chatID, workdir)
+	if scheduled == 0 && finalResult != nil && finalErr == nil && ctx.Err() == nil && !finalResult.IsError {
+		s.maybeNudgePromise(laneCtx, chatID, prompt, finalResult.Text)
+	}
 }
 
-// recordCost accumulates a completed run's USD cost onto userID's running total
-// for the cumulative cost cap. A nil result (error/timeout/Stop with no Result)
-// records nothing, and a nil store / non-positive cost is a no-op inside Add. A
-// store write failure is logged but never aborts the run — a lost accounting
-// write only weakens the cap slightly, it does not break delivery.
-func (s *Service) recordCost(userID int64, res *agent.RunResult) {
-	if s.costs == nil || res == nil {
+// refreshSnapCache fingerprints the workspace and stores the result as
+// chatID's cached pre-run snapshot. A nil verifier is a no-op.
+func (s *Service) refreshSnapCache(ctx context.Context, chatID ChatID, workdir string) {
+	if s.postrun.Verifier == nil {
+		return
+	}
+	snap := s.postrun.Verifier.Take(ctx, workdir)
+	s.mu.Lock()
+	s.snapCache[chatID] = snap
+	s.mu.Unlock()
+}
+
+// recordCost accumulates a completed run's USD cost: a real user's run onto
+// their cumulative cost-cap total, an autonomous run (AutoUser) onto the chat's
+// per-day autonomy budget. The 0 sentinel (poller relays and startup resumes,
+// whose original sender is unknown) records nowhere, preserving its old
+// behavior. A nil result (error/timeout/Stop with no Result) records nothing,
+// and a nil store / non-positive cost is a no-op inside Add. A store write
+// failure is logged but never aborts the run — a lost accounting write only
+// weakens the cap slightly, it does not break delivery.
+func (s *Service) recordCost(chatID ChatID, userID int64, res *agent.RunResult) {
+	if userID == AutoUser {
+		s.recordAutoCost(chatID, res)
+		return
+	}
+	if s.costs == nil || res == nil || userID <= 0 {
 		return
 	}
 	if err := s.costs.Add(userID, res.CostUSD); err != nil {

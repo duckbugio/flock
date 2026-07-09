@@ -120,3 +120,31 @@ dind_image: "docker:27-dind"
 enable_docker_prune: true
 docker_prune_schedule: "weekly"   # systemd OnCalendar (weekly | daily | "Sun *-*-* 04:00:00")
 docker_prune_keep_hours: 168      # keep anything newer than this many hours (168 = 7 days)
+
+# MCP tools (Claude backend only). context7 = live library docs (free, no key).
+# DuckBug MCP activates when vault_duckbug_mcp_token is set in vault.yml — the team
+# then reads the project's live errors/logs from DuckBug; self-hosted deployments
+# override duckbug_mcp_url with <their-duckbug>/api/mcp.
+enable_context7: true
+duckbug_mcp_url: "https://duckbug.io/api/mcp"
+
+# Autonomy loops (see adapters/telegram/.env.example for the full story).
+# Post-run verification re-runs changed repos' own check gates after every run.
+enable_post_verify: true
+post_verify_max_fixes: 2
+post_verify_timeout_seconds: 1800
+# /goal evaluator rounds cap + optional cheaper judge model.
+goal_max_attempts: 5
+evaluator_model: ""
+goal_eval_timeout_seconds: 1800
+# CI watch: red build → fix-up run; green build → wake the chat. Auto-merge merges
+# a green PR (full hands-off) — keep false to leave merges to the human.
+enable_ci_watch: false
+ci_poll_interval: 120
+enable_auto_merge: false
+# Scope auto-approval: off | trivial | standard | all.
+auto_approve_scope: off
+# Per-chat per-day USD ceiling for autonomy-originated runs (verify/goal/CI/follow-ups).
+auto_task_max_cost_per_day: "20.0"
+# followup/<delay>.md convention + the "I'll report back" promise nudge.
+enable_promise_nudge: true

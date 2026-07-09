@@ -39,6 +39,7 @@ import (
 	"github.com/duckbugio/flock/core/voice"
 	"github.com/duckbugio/flock/core/workspace"
 	"github.com/duckbugio/flock/internal/airunner"
+	"github.com/duckbugio/flock/internal/autonomy"
 	"github.com/duckbugio/flock/internal/config"
 )
 
@@ -119,13 +120,21 @@ func run() int {
 	// Wire the context7 MCP docs server (up-to-date, version-specific library/API
 	// docs) into every run when enabled. A write failure is non-fatal — the bot
 	// runs without it, exactly as before.
-	if provider.Name == config.AIBackendClaude && cfg.EnableContext7 {
+	if provider.Name == config.AIBackendClaude {
+		servers := map[string]claude.MCPServer{}
+		if cfg.EnableContext7 {
+			servers["context7"] = claude.MCPServer{URL: claude.Context7URL}
+		}
+		if cfg.DuckBugMCPEnabled() {
+			servers["duckbug"] = claude.MCPServer{URL: cfg.DuckBugMCPURL, BearerToken: cfg.DuckBugMCPToken}
+		}
 		mcpPath := filepath.Join(cfg.ApprovedDirectory, ".flock-mcp.json")
-		if err := claude.WriteContext7MCPConfig(mcpPath); err != nil {
-			logger.Warn("write context7 mcp config; running without docs MCP", "error", err)
-		} else {
+		if ok, err := claude.WriteMCPConfig(mcpPath, servers); err != nil {
+			logger.Warn("write mcp config; running without MCP tools", "error", err)
+		} else if ok {
 			opts.MCPConfig = mcpPath
-			logger.Info("context7 MCP enabled", "config", mcpPath)
+			logger.Info("MCP servers enabled",
+				"config", mcpPath, "context7", cfg.EnableContext7, "duckbug", cfg.DuckBugMCPEnabled())
 		}
 	}
 
@@ -210,6 +219,11 @@ func run() int {
 	// Post-task GitHub star nudge (GitHub-only; the gate is the off switch).
 	starNudge := buildStarNudge(cfg, logger)
 
+	// Autonomy loops (post-run verification, the /goal evaluator, the per-chat
+	// autonomy budget). Store-open failures are non-fatal: log and run with that
+	// single feature disabled. The CI watch is Telegram-only for now.
+	postRun := autonomy.Build(cfg, logger)
+
 	svc := chat.New(chat.Config{
 		Runner:     runner,
 		Transport:  transport,
@@ -220,11 +234,15 @@ func run() int {
 		CostCapUSD: cfg.EffectiveCostCapUSD(),
 		Outbox:     outbox,
 		StarNudge:  starNudge,
+		PostRun:    postRun,
 		Opts:       opts,
 		Timeout:    cfg.ClaudeTimeout(),
 		RetryAfter: vk.RetryAfter,
 		Logger:     logger,
 	})
+
+	// One-shot follow-ups (the workspace followup/<delay>.md convention).
+	autonomy.StartFollowups(ctx, svc, postRun, logger)
 
 	// Background cron scheduler (OFF by default). When enabled, open the durable
 	// per-chat job store and start the scheduler loop, firing each due job into the

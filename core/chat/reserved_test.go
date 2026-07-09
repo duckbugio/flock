@@ -26,8 +26,9 @@ func TestIsReservedCommand(t *testing.T) {
 		{"NeW", true},
 		{"STOP", true},
 		{"Schedule", true},
+		{"goal", true},
+		{"GOAL", true},
 		{"loop", false},
-		{"goal", false},
 		{"news", false},
 		{"", false},
 		{"new ", false},
@@ -45,9 +46,9 @@ func TestIsReservedCommand(t *testing.T) {
 
 // TestReservedCommandsShape guards the menu source: names are unique, lowercase,
 // non-empty, every command has a description, and the order is the documented
-// start, help, new, stop, schedule.
+// start, help, new, stop, schedule, goal.
 func TestReservedCommandsShape(t *testing.T) {
-	wantOrder := []string{"start", "help", "new", "stop", "schedule"}
+	wantOrder := []string{"start", "help", "new", "stop", "schedule", "goal"}
 	if len(chat.ReservedCommands) != len(wantOrder) {
 		t.Fatalf("ReservedCommands has %d entries, want %d", len(chat.ReservedCommands), len(wantOrder))
 	}

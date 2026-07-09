@@ -41,6 +41,7 @@ import (
 	"github.com/duckbugio/flock/core/voice"
 	"github.com/duckbugio/flock/core/workspace"
 	"github.com/duckbugio/flock/internal/airunner"
+	"github.com/duckbugio/flock/internal/autonomy"
 	"github.com/duckbugio/flock/internal/config"
 )
 
@@ -118,27 +119,36 @@ func run() int {
 	// Wire the context7 MCP docs server (up-to-date, version-specific library/API
 	// docs) into every run when enabled. A write failure is non-fatal — the bot
 	// runs without it, exactly as before.
-	if provider.Name == config.AIBackendClaude && cfg.EnableContext7 {
+	if provider.Name == config.AIBackendClaude {
+		servers := map[string]claude.MCPServer{}
+		if cfg.EnableContext7 {
+			servers["context7"] = claude.MCPServer{URL: claude.Context7URL}
+		}
+		if cfg.DuckBugMCPEnabled() {
+			servers["duckbug"] = claude.MCPServer{URL: cfg.DuckBugMCPURL, BearerToken: cfg.DuckBugMCPToken}
+		}
 		mcpPath := filepath.Join(cfg.ApprovedDirectory, ".flock-mcp.json")
-		if err := claude.WriteContext7MCPConfig(mcpPath); err != nil {
-			logger.Warn("write context7 mcp config; running without docs MCP", "error", err)
-		} else {
+		if ok, err := claude.WriteMCPConfig(mcpPath, servers); err != nil {
+			logger.Warn("write mcp config; running without MCP tools", "error", err)
+		} else if ok {
 			opts.MCPConfig = mcpPath
-			logger.Info("context7 MCP enabled", "config", mcpPath)
+			logger.Info("MCP servers enabled",
+				"config", mcpPath, "context7", cfg.EnableContext7, "duckbug", cfg.DuckBugMCPEnabled())
 		}
 	}
 
 	// Per-chat workspaces (isolated /workspace/chat_<id> with a rendered CLAUDE.md
 	// + agents) and the dispatcher enforcing parallel-across-chats / serial-within.
 	ws := &workspace.Renderer{
-		BaseDir:        cfg.ApprovedDirectory,
-		TemplatePath:   cfg.TeamTemplatePath,
-		AgentsDir:      cfg.TeamAgentsDir,
-		SkillsDir:      cfg.TeamSkillsDir,
-		PrePRCycles:    cfg.PrePRCycles,
-		PrReviewCycles: cfg.PrReviewCycles,
-		EnablePRReview: cfg.EnablePRReview,
-		GitHost:        cfg.GitHost,
+		BaseDir:          cfg.ApprovedDirectory,
+		TemplatePath:     cfg.TeamTemplatePath,
+		AgentsDir:        cfg.TeamAgentsDir,
+		SkillsDir:        cfg.TeamSkillsDir,
+		PrePRCycles:      cfg.PrePRCycles,
+		PrReviewCycles:   cfg.PrReviewCycles,
+		EnablePRReview:   cfg.EnablePRReview,
+		GitHost:          cfg.GitHost,
+		AutoApproveScope: cfg.AutoApproveScopeLevel(),
 	}
 	// Durable per-chat session store: chatID -> session_id, reloaded on startup so
 	// conversations survive a restart and resumed via --resume (plan §4).
@@ -280,6 +290,11 @@ func run() int {
 	// and disable the feature rather than crash-loop the bot.
 	starNudge := buildStarNudge(cfg, logger)
 
+	// Autonomy loops (durable stores + post-run config). Every store-open failure
+	// is non-fatal, matching the rest of the best-effort startup wiring: log and
+	// run with that single feature disabled rather than crash-loop the bot.
+	postRun := autonomy.Build(cfg, logger)
+
 	svc = chat.New(chat.Config{
 		Runner:     runner,
 		Transport:  telegram.NewBotChat(b, cfg.EnableRichMessages),
@@ -291,6 +306,7 @@ func run() int {
 		CostCapUSD: cfg.EffectiveCostCapUSD(),
 		Outbox:     outbox,
 		StarNudge:  starNudge,
+		PostRun:    postRun,
 		Opts:       opts,
 		Timeout:    cfg.ClaudeTimeout(),
 		RetryAfter: telegram.RetryAfter,
@@ -305,6 +321,17 @@ func run() int {
 	// best-effort startup wiring. With the flag off no store is opened and no
 	// goroutine runs — the path is a true no-op.
 	mgr := buildScheduler(ctx, cfg, svc, logger)
+
+	// One-shot follow-ups (the workspace followup/<delay>.md convention): fire
+	// each due item as an autonomy-budgeted injected run.
+	autonomy.StartFollowups(ctx, svc, postRun, logger)
+
+	// CI watch: poll the git host for CI state on the duck/* branches checked out
+	// in the workspaces; a red build is relayed into the owning chat as a fix-up
+	// prompt, and (opt-in) a green PR is auto-merged.
+	if cfg.CIWatchEnabled() {
+		wireCIWatch(ctx, cfg, b, svc, logger)
+	}
 
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, telegram.CallbackMatch(), bot.MatchTypePrefix, stopHandler(cfg, svc))
 	b.RegisterHandler(
@@ -327,7 +354,7 @@ func run() int {
 	}
 
 	// Publish the bot's own command menu from the canonical reserved set (the same
-	// source the handlers above route on). Native Claude commands (/loop, /goal, …)
+	// source the handlers above route on). Native Claude commands (/loop, /security-review, …)
 	// are intentionally NOT listed — they pass through as free text. Best-effort:
 	// a failure here only means an empty/stale menu, so log and continue.
 	if _, err := b.SetMyCommands(ctx, &bot.SetMyCommandsParams{Commands: reservedBotCommands()}); err != nil {
@@ -875,6 +902,7 @@ func reservedHandlers(cfg config.Config, svc *chat.Service, sched *schedule.Mana
 		"new":      newHandler(cfg, svc),
 		"stop":     stopCommandHandler(cfg, svc),
 		"schedule": scheduleHandler(cfg, sched),
+		"goal":     goalHandler(cfg, svc),
 	}
 }
 
