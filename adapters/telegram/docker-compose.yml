@@ -35,6 +35,13 @@ services:
     volumes:
       - dind_storage:/var/lib/docker
       - workspace:/workspace               # same path as the bot, so -v mounts line up
+    # docker:27-dind ships the docker CLI, so `docker info` probes the daemon locally.
+    healthcheck:
+      test: ["CMD-SHELL", "docker info >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     # NOTE: set DOCKER_HOST=tcp://dind:2375 in .env to make the bot use this.
 
 volumes:
