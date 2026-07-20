@@ -110,8 +110,9 @@ caddy_image: "caddy:2-alpine"
 # Active whenever gitea_host is set; 0 disables it.
 gitea_poll_interval: 90
 
-# Docker-in-Docker sidecar so the team can run dockerized linters/tests
-enable_dind: false
+# Docker-in-Docker sidecar so the team can run dockerized linters/tests. ON by
+# default; set to false on hosts that cannot run a privileged container.
+enable_dind: true
 dind_image: "docker:27-dind"
 
 # Weekly reclaim of unused Docker images + build cache via a systemd timer. Only prunes
