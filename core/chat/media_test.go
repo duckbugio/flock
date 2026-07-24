@@ -4,6 +4,7 @@ package chat
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestDocumentPrompt(t *testing.T) {
@@ -50,6 +51,68 @@ func TestPhotoPrompt(t *testing.T) {
 		}
 		if !strings.Contains(got, "image") {
 			t.Errorf("caption-less photo prompt %q missing default", got)
+		}
+	})
+}
+
+func TestQuotedPrompt(t *testing.T) {
+	const userText = "What did you mean by this?"
+
+	t.Run("with quote and author contains both, distinguishably", func(t *testing.T) {
+		got := QuotedPrompt("Alice", "the original message", userText)
+		if !strings.Contains(got, "the original message") {
+			t.Errorf("prompt %q missing quoted text", got)
+		}
+		if !strings.Contains(got, userText) {
+			t.Errorf("prompt %q missing user text", got)
+		}
+		if !strings.Contains(got, "Alice") {
+			t.Errorf("prompt %q missing author clause", got)
+		}
+		// The two parts are labeled so the model can tell context from instruction.
+		if !strings.Contains(got, "reference data") || !strings.Contains(got, "The user's message:") {
+			t.Errorf("prompt %q does not clearly separate quoted context from the user's message", got)
+		}
+		// The quoted context is framed FIRST, the user's operative message LAST.
+		if strings.Index(got, "the original message") > strings.Index(got, userText) {
+			t.Errorf("prompt %q must place the quoted context before the user's message", got)
+		}
+	})
+
+	t.Run("empty author omits the clause", func(t *testing.T) {
+		got := QuotedPrompt("", "the original message", userText)
+		if !strings.Contains(got, "the original message") || !strings.Contains(got, userText) {
+			t.Errorf("prompt %q missing quoted or user text", got)
+		}
+		if strings.Contains(got, " from ") {
+			t.Errorf("prompt %q should not include an author clause when author is empty", got)
+		}
+	})
+
+	t.Run("blank quote returns user text unchanged", func(t *testing.T) {
+		for _, blank := range []string{"", "   ", "\n\t  \r\n"} {
+			if got := QuotedPrompt("Alice", blank, userText); got != userText {
+				t.Errorf("QuotedPrompt(author, %q, userText) = %q, want the userText unchanged", blank, got)
+			}
+		}
+	})
+
+	t.Run("over-cap quote is truncated but user text intact", func(t *testing.T) {
+		// A multibyte quote well over the rune cap: truncation must be rune-safe and
+		// must never touch the user's message.
+		longQuote := strings.Repeat("документация ", 400) // ~5200 runes
+		got := QuotedPrompt("Alice", longQuote, userText)
+		if !strings.Contains(got, userText) {
+			t.Errorf("prompt %q dropped the user text on truncation", got)
+		}
+		if !strings.Contains(got, quotedEllipsis) {
+			t.Errorf("prompt %q missing the truncation marker", got)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("prompt %q is not valid UTF-8 (truncation cut mid-rune)", got)
+		}
+		if strings.Contains(got, longQuote) {
+			t.Errorf("prompt %q should not contain the full over-cap quote", got)
 		}
 	})
 }
