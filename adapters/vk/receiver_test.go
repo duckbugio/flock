@@ -159,6 +159,134 @@ func TestReceiverMessageNewFromAllowedUser(t *testing.T) {
 	}
 }
 
+// TestReceiverFoldsReplyMessage: a reply_message is folded into the text prompt so
+// the run sees the quoted original plus the user's new text.
+func TestReceiverFoldsReplyMessage(t *testing.T) {
+	svc := &fakeService{}
+	r := newTestReceiver(svc, &fakeNotice{}, false, nil)
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{
+		FromID: 42, PeerID: 200, Text: "и что с этим", ConversationMessageID: 10,
+		ReplyMessage: &messageObject{FromID: 42, Text: "Проверил функционал Git Runners"},
+	}))
+
+	if len(svc.handleCalls) != 1 {
+		t.Fatalf("Handle calls = %d, want 1", len(svc.handleCalls))
+	}
+	got := svc.handleCalls[0].prompt
+	if !strings.Contains(got, "Проверил функционал Git Runners") {
+		t.Errorf("prompt %q missing the quoted reply original", got)
+	}
+	if !strings.Contains(got, "и что с этим") {
+		t.Errorf("prompt %q missing the user's new text", got)
+	}
+	if !strings.Contains(got, quotedUserLabel) {
+		t.Errorf("prompt %q missing the participant author label", got)
+	}
+}
+
+// TestReceiverFoldsForwardedMessage: with no reply_message, the FIRST fwd_messages
+// entry is used as the quoted original. A community source (from_id < 0) is labeled
+// as the assistant.
+func TestReceiverFoldsForwardedMessage(t *testing.T) {
+	svc := &fakeService{}
+	r := newTestReceiver(svc, &fakeNotice{}, false, nil)
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{
+		FromID: 42, PeerID: 200, Text: "look at this", ConversationMessageID: 11,
+		FwdMessages: []messageObject{
+			{FromID: -100, Text: "forwarded original"},
+			{FromID: 42, Text: "second one, ignored"},
+		},
+	}))
+
+	if len(svc.handleCalls) != 1 {
+		t.Fatalf("Handle calls = %d, want 1", len(svc.handleCalls))
+	}
+	got := svc.handleCalls[0].prompt
+	if !strings.Contains(got, "forwarded original") || !strings.Contains(got, "look at this") {
+		t.Errorf("prompt %q missing the forwarded original or the user text", got)
+	}
+	if strings.Contains(got, "second one, ignored") {
+		t.Errorf("prompt %q folded more than the first forwarded message", got)
+	}
+	if !strings.Contains(got, quotedAssistantLabel) {
+		t.Errorf("prompt %q should label the community-sourced quote as the assistant", got)
+	}
+}
+
+// TestReceiverMediaOnlyReplyPlaceholder: a reply_message that carries only an
+// attachment (no text) yields a generic "[media]" reference rather than being
+// silently dropped.
+func TestReceiverMediaOnlyReplyPlaceholder(t *testing.T) {
+	svc := &fakeService{}
+	r := newTestReceiver(svc, &fakeNotice{}, false, nil)
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{
+		FromID: 42, PeerID: 200, Text: "про это", ConversationMessageID: 12,
+		ReplyMessage: &messageObject{
+			FromID:      42,
+			Attachments: []attachment{{Type: "photo", Photo: &photoAttachment{}}},
+		},
+	}))
+
+	if len(svc.handleCalls) != 1 {
+		t.Fatalf("Handle calls = %d, want 1", len(svc.handleCalls))
+	}
+	got := svc.handleCalls[0].prompt
+	if !strings.Contains(got, "[media]") {
+		t.Errorf("prompt %q missing the [media] placeholder for a media-only reply", got)
+	}
+	if !strings.Contains(got, "про это") {
+		t.Errorf("prompt %q missing the user's new text", got)
+	}
+}
+
+// TestReceiverNoReplyPromptUnchanged: a message with neither reply_message nor
+// fwd_messages is submitted byte-for-byte unchanged (the QuotedPrompt no-op).
+func TestReceiverNoReplyPromptUnchanged(t *testing.T) {
+	svc := &fakeService{}
+	r := newTestReceiver(svc, &fakeNotice{}, false, nil)
+
+	const userText = "just a normal message"
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{
+		FromID: 42, PeerID: 200, Text: userText, ConversationMessageID: 13,
+	}))
+
+	if len(svc.handleCalls) != 1 {
+		t.Fatalf("Handle calls = %d, want 1", len(svc.handleCalls))
+	}
+	if svc.handleCalls[0].prompt != userText {
+		t.Errorf("non-reply prompt = %q, want it byte-for-byte unchanged (%q)", svc.handleCalls[0].prompt, userText)
+	}
+}
+
+// TestReceiverFoldsMediaOnlyForward: a forwarded message that carries only an
+// attachment (no text) yields the generic [media] reference, the same as a media-only
+// reply — so the forwarded reference is never silently dropped.
+func TestReceiverFoldsMediaOnlyForward(t *testing.T) {
+	svc := &fakeService{}
+	r := newTestReceiver(svc, &fakeNotice{}, false, nil)
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{
+		FromID: 42, PeerID: 200, Text: "смотри", ConversationMessageID: 14,
+		FwdMessages: []messageObject{
+			{FromID: 42, Attachments: []attachment{{Type: "doc", Doc: &docAttachment{}}}},
+		},
+	}))
+
+	if len(svc.handleCalls) != 1 {
+		t.Fatalf("Handle calls = %d, want 1", len(svc.handleCalls))
+	}
+	got := svc.handleCalls[0].prompt
+	if !strings.Contains(got, "[media]") {
+		t.Errorf("prompt %q missing the [media] placeholder for a media-only forward", got)
+	}
+	if !strings.Contains(got, "смотри") {
+		t.Errorf("prompt %q missing the user's new text", got)
+	}
+}
+
 func TestReceiverIgnoresDisallowedAndCommunityMessages(t *testing.T) {
 	svc := &fakeService{}
 	r := newTestReceiver(svc, &fakeNotice{}, false, nil)

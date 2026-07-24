@@ -592,6 +592,13 @@ func handleMessage(ctx context.Context, deps messageDeps, b *bot.Bot, msg *model
 		return
 	}
 
+	// Fold any quoted/replied-to original into the prompt so the run sees the
+	// context the user is referring to, not just their new text (voice is covered
+	// too: its transcript became `text` above). QuotedPrompt is a strict no-op when
+	// there is no quote, so a non-reply message stays byte-for-byte identical.
+	qAuthor, qText := quotedContext(b, msg)
+	text = chat.QuotedPrompt(qAuthor, qText, text)
+
 	// Submit hands the work to the chat's own goroutine and is effectively
 	// non-blocking until that chat's queue buffer fills (then it applies
 	// back-pressure); during shutdown the job is cleanly dropped. Either way no
@@ -630,6 +637,8 @@ func handleDocument(
 		return
 	}
 	prompt := chat.DocumentPrompt(savedPath, msg.Caption)
+	qAuthor, qText := quotedContext(b, msg)
+	prompt = chat.QuotedPrompt(qAuthor, qText, prompt)
 	submitMedia(ctx, service, msg, prompt, nil, isEdit)
 }
 
@@ -660,6 +669,8 @@ func handlePhoto(
 		return
 	}
 	prompt := chat.PhotoPrompt(savedPath, msg.Caption)
+	qAuthor, qText := quotedContext(b, msg)
+	prompt = chat.QuotedPrompt(qAuthor, qText, prompt)
 	images, err := chat.LoadPhotoImage(savedPath)
 	if err != nil {
 		// Vision attach failed (e.g. unreadable file); fall back to a path-only run
@@ -723,6 +734,69 @@ func replyToBot(b *bot.Bot, msg *models.Message) bool {
 // the token avoids an extra getMe round-trip on every message.
 func botID(b *bot.Bot) int64 {
 	return b.ID()
+}
+
+// assistantAuthorLabel names the bot's own earlier message when it is the quoted
+// original, so the folded context reads as coming from the assistant rather than a
+// human participant.
+const assistantAuthorLabel = "the assistant"
+
+// quotedContext extracts the quoted/replied-to original from a message so it can be
+// folded into the prompt (via chat.QuotedPrompt). It returns an empty text when the
+// message is not a reply/quote, which keeps a normal message byte-for-byte
+// unchanged. The quoted text prefers the exact highlighted portion (msg.Quote.Text),
+// then the replied-to message's text, then its caption, then a generic "[media]"
+// placeholder for any reply with no usable text — so the reference is never silently
+// dropped. The author is derived from the replied-to message's sender (empty for a
+// quote-only selection with no sender), labeled as the assistant when it is the
+// bot's own message.
+func quotedContext(b *bot.Bot, msg *models.Message) (author, text string) {
+	if msg == nil {
+		return "", ""
+	}
+	reply := msg.ReplyToMessage
+	switch {
+	case msg.Quote != nil && strings.TrimSpace(msg.Quote.Text) != "":
+		text = msg.Quote.Text
+	case reply != nil && reply.Text != "":
+		text = reply.Text
+	case reply != nil && reply.Caption != "":
+		text = reply.Caption
+	case reply != nil:
+		// A reply to a message with no text or caption — a photo, file, voice, poll,
+		// location, and so on: keep a generic reference so the quote is never dropped.
+		text = "[media]"
+	}
+	if reply != nil {
+		author = quotedAuthorLabel(b, reply.From)
+	}
+	return author, text
+}
+
+// quotedAuthorLabel derives a short author label for a replied-to message's sender.
+// Only the bot's OWN message (the same identity check as replyToBot: from.ID ==
+// botID) is labeled as the assistant; any other sender — a human or a third-party
+// bot — yields "FirstName (@username)" (or whichever part is present), and an unknown
+// sender yields an empty label.
+func quotedAuthorLabel(b *bot.Bot, from *models.User) string {
+	if from == nil {
+		return ""
+	}
+	if id := botID(b); id != 0 && from.ID == id {
+		return assistantAuthorLabel
+	}
+	name := strings.TrimSpace(from.FirstName)
+	username := strings.TrimSpace(from.Username)
+	switch {
+	case name != "" && username != "":
+		return name + " (@" + username + ")"
+	case name != "":
+		return name
+	case username != "":
+		return "@" + username
+	default:
+		return ""
+	}
 }
 
 // toGateEntities maps Telegram message entities to the transport-agnostic

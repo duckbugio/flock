@@ -82,7 +82,7 @@ type mediaTestHarness struct {
 	srvCleanup func()
 }
 
-func newMediaHarness(t *testing.T, maxUpload int64) *mediaTestHarness {
+func newMediaHarness(t *testing.T) *mediaTestHarness {
 	t.Helper()
 	var downloads int32
 	const content = "FILECONTENT-1234567890"
@@ -121,7 +121,9 @@ func newMediaHarness(t *testing.T, maxUpload int64) *mediaTestHarness {
 
 	logger := slog.New(slog.DiscardHandler)
 	uploadsRoot := t.TempDir()
-	up := telegram.NewUploader(telegram.NewBotFileSource(b), srv.Client(), &fakeUploads{root: uploadsRoot}, maxUpload, logger)
+	// 0 lets NewUploader apply its default download cap; the harness never exercises
+	// the size limit, so no test needs to vary it.
+	up := telegram.NewUploader(telegram.NewBotFileSource(b), srv.Client(), &fakeUploads{root: uploadsRoot}, 0, logger)
 
 	runner := &recordingRunner{}
 	disp := dispatch.New(2)
@@ -146,7 +148,7 @@ func (h *mediaTestHarness) downloadCount() int32 { return atomic.LoadInt32(h.dow
 // mention-gate rejects (group chat, mention required, no @mention) must perform
 // ZERO downloads and ZERO submits.
 func TestMediaGateRejectionZeroWork(t *testing.T) {
-	h := newMediaHarness(t, 0)
+	h := newMediaHarness(t)
 	defer h.srvCleanup()
 
 	cfg := config.Config{
@@ -177,7 +179,7 @@ func TestMediaGateRejectionZeroWork(t *testing.T) {
 // TestDocumentRoutingSubmitsPromptWithPath is AC1: an accepted document upload is
 // downloaded once and submitted with a prompt referencing the saved path.
 func TestDocumentRoutingSubmitsPromptWithPath(t *testing.T) {
-	h := newMediaHarness(t, 0)
+	h := newMediaHarness(t)
 	defer h.srvCleanup()
 
 	cfg := config.Config{AllowedUsers: []int64{10}}
@@ -215,7 +217,7 @@ func TestDocumentRoutingSubmitsPromptWithPath(t *testing.T) {
 // AND attached as a vision image block, with the prompt referencing the saved
 // path; the largest photo size is chosen.
 func TestPhotoRoutingAttachesImageAndPath(t *testing.T) {
-	h := newMediaHarness(t, 0)
+	h := newMediaHarness(t)
 	defer h.srvCleanup()
 
 	cfg := config.Config{AllowedUsers: []int64{10}}
