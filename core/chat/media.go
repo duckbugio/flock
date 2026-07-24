@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/duckbugio/flock/core/agent"
 )
@@ -46,8 +47,10 @@ func QuotedPrompt(quotedAuthor, quotedText, userText string) string {
 	if quoted == "" {
 		return userText
 	}
-	if r := []rune(quoted); len(r) > maxQuotedRunes {
-		quoted = string(r[:maxQuotedRunes]) + quotedEllipsis
+	// Rune-count first so the common short quote never allocates a rune slice; only
+	// the rare over-cap quote pays for the []rune conversion to cut on a boundary.
+	if utf8.RuneCountInString(quoted) > maxQuotedRunes {
+		quoted = string([]rune(quoted)[:maxQuotedRunes]) + quotedEllipsis
 	}
 	intro := "The user is replying to an earlier message"
 	if author := strings.TrimSpace(quotedAuthor); author != "" {

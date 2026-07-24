@@ -261,6 +261,32 @@ func TestReceiverNoReplyPromptUnchanged(t *testing.T) {
 	}
 }
 
+// TestReceiverFoldsMediaOnlyForward: a forwarded message that carries only an
+// attachment (no text) yields the generic [media] reference, the same as a media-only
+// reply — so the forwarded reference is never silently dropped.
+func TestReceiverFoldsMediaOnlyForward(t *testing.T) {
+	svc := &fakeService{}
+	r := newTestReceiver(svc, &fakeNotice{}, false, nil)
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{
+		FromID: 42, PeerID: 200, Text: "смотри", ConversationMessageID: 14,
+		FwdMessages: []messageObject{
+			{FromID: 42, Attachments: []attachment{{Type: "doc", Doc: &docAttachment{}}}},
+		},
+	}))
+
+	if len(svc.handleCalls) != 1 {
+		t.Fatalf("Handle calls = %d, want 1", len(svc.handleCalls))
+	}
+	got := svc.handleCalls[0].prompt
+	if !strings.Contains(got, "[media]") {
+		t.Errorf("prompt %q missing the [media] placeholder for a media-only forward", got)
+	}
+	if !strings.Contains(got, "смотри") {
+		t.Errorf("prompt %q missing the user's new text", got)
+	}
+}
+
 func TestReceiverIgnoresDisallowedAndCommunityMessages(t *testing.T) {
 	svc := &fakeService{}
 	r := newTestReceiver(svc, &fakeNotice{}, false, nil)

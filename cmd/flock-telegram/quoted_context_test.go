@@ -70,7 +70,9 @@ func TestHandleMessageLabelsBotQuoteAsAssistant(t *testing.T) {
 		Chat: models.Chat{ID: 555, Type: models.ChatTypePrivate},
 		Text: "expand on that",
 		ReplyToMessage: &models.Message{
-			From: &models.User{ID: 999, IsBot: true, FirstName: "Flock"},
+			// The bot's OWN message: its sender id equals the bot's id (123, parsed
+			// from the "123:ABC" token), which is what marks it as the assistant.
+			From: &models.User{ID: 123, IsBot: true, FirstName: "Flock"},
 			Text: "Here is the summary.",
 		},
 	}
@@ -87,6 +89,39 @@ func TestHandleMessageLabelsBotQuoteAsAssistant(t *testing.T) {
 	}
 	if strings.Contains(got, "Flock") {
 		t.Errorf("prompt %q leaked the bot's display name instead of the assistant label", got)
+	}
+}
+
+// TestHandleMessageThirdPartyBotNotAssistant (text path): replying to a DIFFERENT
+// bot's message is attributed to that bot's name, never "the assistant" — only our
+// own bot's messages (matched by id) are the assistant.
+func TestHandleMessageThirdPartyBotNotAssistant(t *testing.T) {
+	sub := &recordingSubmitter{}
+	b := quoteTestBot(t)
+	cfg := config.Config{AllowedUsers: []int64{10}}
+	msg := &models.Message{
+		ID:   8,
+		From: &models.User{ID: 10},
+		Chat: models.Chat{ID: 555, Type: models.ChatTypePrivate},
+		Text: "what did it say",
+		ReplyToMessage: &models.Message{
+			From: &models.User{ID: 555001, IsBot: true, FirstName: "OtherBot", Username: "other_bot"},
+			Text: "some third-party output",
+		},
+	}
+
+	deps := messageDeps{cfg: cfg, service: sub, guards: chat.GuardConfig{}}
+	handleMessage(context.Background(), deps, b, msg, false)
+
+	if len(sub.seen()) != 1 {
+		t.Fatalf("Handle calls = %d, want 1", len(sub.seen()))
+	}
+	got := sub.seen()[0]
+	if strings.Contains(got, assistantAuthorLabel) {
+		t.Errorf("prompt %q mislabeled a third-party bot as the assistant", got)
+	}
+	if !strings.Contains(got, "OtherBot") {
+		t.Errorf("prompt %q should attribute the quote to the third-party bot's name", got)
 	}
 }
 
@@ -112,6 +147,73 @@ func TestHandleMessageNonReplyUnchanged(t *testing.T) {
 	}
 	if sub.seen()[0] != userText {
 		t.Errorf("non-reply prompt = %q, want it byte-for-byte unchanged (%q)", sub.seen()[0], userText)
+	}
+}
+
+// TestHandleMessageQuoteWinsOverReplyText (text path): when the user highlights an
+// exact portion (msg.Quote), that selection is folded — not the whole replied-to
+// text. This is Telegram's native "quote" feature and the highest-preference branch.
+func TestHandleMessageQuoteWinsOverReplyText(t *testing.T) {
+	sub := &recordingSubmitter{}
+	b := quoteTestBot(t)
+	cfg := config.Config{AllowedUsers: []int64{10}}
+	msg := &models.Message{
+		ID:    6,
+		From:  &models.User{ID: 10},
+		Chat:  models.Chat{ID: 555, Type: models.ChatTypePrivate},
+		Text:  "clarify this part",
+		Quote: &models.TextQuote{Text: "the highlighted fragment"},
+		ReplyToMessage: &models.Message{
+			From: &models.User{ID: 77, FirstName: "Ivan"},
+			Text: "the full original message body",
+		},
+	}
+
+	deps := messageDeps{cfg: cfg, service: sub, guards: chat.GuardConfig{}}
+	handleMessage(context.Background(), deps, b, msg, false)
+
+	if len(sub.seen()) != 1 {
+		t.Fatalf("Handle calls = %d, want 1", len(sub.seen()))
+	}
+	got := sub.seen()[0]
+	if !strings.Contains(got, "the highlighted fragment") {
+		t.Errorf("prompt %q missing the highlighted quote selection", got)
+	}
+	if strings.Contains(got, "the full original message body") {
+		t.Errorf("prompt %q folded the full replied-to text instead of the highlighted selection", got)
+	}
+}
+
+// TestHandleMessageMediaOnlyReplyPlaceholder (text path): a reply to a message with
+// no text or caption (e.g. a photo) still yields a non-empty [media] reference rather
+// than silently dropping the quote.
+func TestHandleMessageMediaOnlyReplyPlaceholder(t *testing.T) {
+	sub := &recordingSubmitter{}
+	b := quoteTestBot(t)
+	cfg := config.Config{AllowedUsers: []int64{10}}
+	msg := &models.Message{
+		ID:   7,
+		From: &models.User{ID: 10},
+		Chat: models.Chat{ID: 555, Type: models.ChatTypePrivate},
+		Text: "про это",
+		ReplyToMessage: &models.Message{
+			From:  &models.User{ID: 77, FirstName: "Ivan"},
+			Photo: []models.PhotoSize{{FileID: "x", Width: 100, Height: 100}},
+		},
+	}
+
+	deps := messageDeps{cfg: cfg, service: sub, guards: chat.GuardConfig{}}
+	handleMessage(context.Background(), deps, b, msg, false)
+
+	if len(sub.seen()) != 1 {
+		t.Fatalf("Handle calls = %d, want 1", len(sub.seen()))
+	}
+	got := sub.seen()[0]
+	if !strings.Contains(got, "[media]") {
+		t.Errorf("prompt %q missing the [media] placeholder for a media-only reply", got)
+	}
+	if !strings.Contains(got, "про это") {
+		t.Errorf("prompt %q missing the user's new text", got)
 	}
 }
 

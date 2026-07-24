@@ -746,7 +746,7 @@ const assistantAuthorLabel = "the assistant"
 // message is not a reply/quote, which keeps a normal message byte-for-byte
 // unchanged. The quoted text prefers the exact highlighted portion (msg.Quote.Text),
 // then the replied-to message's text, then its caption, then a generic "[media]"
-// placeholder when the reply carries only media — so the reference is never silently
+// placeholder for any reply with no usable text — so the reference is never silently
 // dropped. The author is derived from the replied-to message's sender (empty for a
 // quote-only selection with no sender), labeled as the assistant when it is the
 // bot's own message.
@@ -762,7 +762,9 @@ func quotedContext(b *bot.Bot, msg *models.Message) (author, text string) {
 		text = reply.Text
 	case reply != nil && reply.Caption != "":
 		text = reply.Caption
-	case reply != nil && replyHasMedia(reply):
+	case reply != nil:
+		// A reply to a message with no text or caption — a photo, file, voice, poll,
+		// location, and so on: keep a generic reference so the quote is never dropped.
 		text = "[media]"
 	}
 	if reply != nil {
@@ -772,14 +774,15 @@ func quotedContext(b *bot.Bot, msg *models.Message) (author, text string) {
 }
 
 // quotedAuthorLabel derives a short author label for a replied-to message's sender.
-// The bot's own message (reusing the same identity check as replyToBot) is labeled
-// as the assistant; a human sender yields "FirstName (@username)" (or whichever part
-// is present), and an unknown sender yields an empty label.
+// Only the bot's OWN message (the same identity check as replyToBot: from.ID ==
+// botID) is labeled as the assistant; any other sender — a human or a third-party
+// bot — yields "FirstName (@username)" (or whichever part is present), and an unknown
+// sender yields an empty label.
 func quotedAuthorLabel(b *bot.Bot, from *models.User) string {
 	if from == nil {
 		return ""
 	}
-	if id := botID(b); from.IsBot || (id != 0 && from.ID == id) {
+	if id := botID(b); id != 0 && from.ID == id {
 		return assistantAuthorLabel
 	}
 	name := strings.TrimSpace(from.FirstName)
@@ -794,20 +797,6 @@ func quotedAuthorLabel(b *bot.Bot, from *models.User) string {
 	default:
 		return ""
 	}
-}
-
-// replyHasMedia reports whether a replied-to message carries a media payload with
-// no text or caption, so a reply to a photo/file/voice still yields a non-empty
-// quoted reference (a generic placeholder) rather than being silently dropped.
-func replyHasMedia(reply *models.Message) bool {
-	return reply.Photo != nil ||
-		reply.Document != nil ||
-		reply.Voice != nil ||
-		reply.Audio != nil ||
-		reply.Video != nil ||
-		reply.VideoNote != nil ||
-		reply.Animation != nil ||
-		reply.Sticker != nil
 }
 
 // toGateEntities maps Telegram message entities to the transport-agnostic
