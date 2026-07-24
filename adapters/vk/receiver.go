@@ -362,6 +362,11 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 	if text == "" {
 		return
 	}
+	// Fold any quoted/replied-to/forwarded original into the prompt so the run sees
+	// the context the user is referring to, not just their new text. QuotedPrompt is
+	// a strict no-op when there is no quote, so a normal message stays unchanged.
+	qAuthor, qText := quotedContext(msg)
+	text = chat.QuotedPrompt(qAuthor, qText, text)
 	r.svc.Handle(ctx, chatIDStr(peerID), msg.FromID, msgIDStr(msg.ConversationMessageID), text)
 }
 
@@ -492,6 +497,10 @@ func (r *Receiver) handleVoice(ctx context.Context, msg messageObject, att *audi
 		r.notify(ctx, msg.PeerID, "Sorry, I couldn't make out that voice message.")
 		return
 	}
+	// VK voice does not flow through the text path, so fold any quoted original in
+	// here too, keeping voice replies uniform with text/media replies.
+	qAuthor, qText := quotedContext(msg)
+	text = chat.QuotedPrompt(qAuthor, qText, text)
 	r.svc.Handle(ctx, chatIDStr(msg.PeerID), msg.FromID, msgIDStr(msg.ConversationMessageID), text)
 }
 
@@ -505,6 +514,8 @@ func (r *Receiver) handleDocument(ctx context.Context, msg messageObject, doc *d
 		return
 	}
 	prompt := chat.DocumentPrompt(savedPath, caption)
+	qAuthor, qText := quotedContext(msg)
+	prompt = chat.QuotedPrompt(qAuthor, qText, prompt)
 	r.svc.HandleMedia(ctx, chatIDStr(msg.PeerID), msg.FromID, msgIDStr(msg.ConversationMessageID), prompt, nil)
 }
 
@@ -523,6 +534,8 @@ func (r *Receiver) handlePhoto(ctx context.Context, msg messageObject, ph *photo
 		return
 	}
 	prompt := chat.PhotoPrompt(savedPath, caption)
+	qAuthor, qText := quotedContext(msg)
+	prompt = chat.QuotedPrompt(qAuthor, qText, prompt)
 	images, err := chat.LoadPhotoImage(savedPath)
 	if err != nil {
 		r.logger.Warn("vk: load photo image failed; path-only", "peer_id", msg.PeerID, "error", err)
@@ -650,4 +663,62 @@ func largestPhoto(sizes []photoSize) *photoSize {
 		}
 	}
 	return best
+}
+
+// quotedAssistantLabel names a community/bot's own quoted message; quotedUserLabel
+// is the coarse label for a human participant. Both keep the folded context author
+// coarse — VK gives us only a from_id, and we deliberately avoid an extra users.get
+// call to resolve a name.
+const (
+	quotedAssistantLabel = "the assistant"
+	quotedUserLabel      = "a participant"
+)
+
+// quotedContext extracts a quoted original from a VK message so it can be folded
+// into the prompt (via chat.QuotedPrompt). It prefers the replied-to message
+// (reply_message), else the first forwarded message (fwd_messages), reading ONE
+// level only — nested reply/forward chains are not traversed. The quoted text is the
+// source message's text, or a generic "[media]" placeholder when that message
+// carries only attachments, so the reference is never silently dropped. An empty
+// text means the message is neither a reply nor a forward, which keeps a normal
+// message byte-for-byte unchanged. The author is coarse (no users.get lookup): a
+// community/bot source (from_id < 0) is the assistant, a human (from_id > 0) is a
+// participant, and an unknown source yields an empty label.
+func quotedContext(msg messageObject) (author, text string) {
+	quoted, ok := firstQuoted(msg)
+	if !ok {
+		return "", ""
+	}
+	text = strings.TrimSpace(quoted.Text)
+	if text == "" && len(quoted.Attachments) > 0 {
+		text = "[media]"
+	}
+	return quotedAuthorLabel(quoted.FromID), text
+}
+
+// firstQuoted returns the single quoted source of a message — the replied-to
+// message if present, else the first forwarded message — and whether one exists.
+// It intentionally does not recurse into the quoted message's own reply/forwards.
+func firstQuoted(msg messageObject) (messageObject, bool) {
+	if msg.ReplyMessage != nil {
+		return *msg.ReplyMessage, true
+	}
+	if len(msg.FwdMessages) > 0 {
+		return msg.FwdMessages[0], true
+	}
+	return messageObject{}, false
+}
+
+// quotedAuthorLabel maps a quoted message's from_id to a coarse author label with
+// no users.get lookup: a negative id (a community / the bot) is the assistant, a
+// positive id is a human participant, and zero is unknown (empty).
+func quotedAuthorLabel(fromID int64) string {
+	switch {
+	case fromID < 0:
+		return quotedAssistantLabel
+	case fromID > 0:
+		return quotedUserLabel
+	default:
+		return ""
+	}
 }

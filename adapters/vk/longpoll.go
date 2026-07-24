@@ -73,6 +73,12 @@ type messageObject struct {
 	ConversationMessageID int64        `json:"conversation_message_id"` //nolint:tagliatelle // VK API uses snake_case.
 	Date                  int64        `json:"date"`
 	Attachments           []attachment `json:"attachments"`
+	// ReplyMessage is the message this one replies to; FwdMessages are forwarded
+	// messages. Both are quoted originals the user may be referring to. The
+	// self-referential pointer/slice is fine — only one level is ever read (nested
+	// reply_message/fwd_messages are not traversed).
+	ReplyMessage *messageObject  `json:"reply_message"` //nolint:tagliatelle // VK API uses snake_case.
+	FwdMessages  []messageObject `json:"fwd_messages"`  //nolint:tagliatelle // VK API uses snake_case.
 }
 
 // messageEventObject is the object of a message_event update (a callback button
