@@ -1408,7 +1408,10 @@ const testMaxTurnsEnv = "X_MAX_TURNS"
 // TestFinalTurnLimitStop covers the terminal message for a run that exhausted the
 // agent turn cap. It must state the cause, rule out a crash/timeout/API error,
 // keep the raw subtype token, and name the knob plus the value actually in force —
-// each clause appearing exactly when the limit behind it is known.
+// each clause appearing exactly when the limit behind it is known. The reported
+// turn count rides along ONLY when it equals the cap (num_turns semantics are
+// unverified, so a count that contradicts the sentence is dropped, not shown), and
+// the knob name — operator-supplied — can never break out of its code span.
 func TestFinalTurnLimitStop(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1418,40 +1421,30 @@ func TestFinalTurnLimitStop(t *testing.T) {
 		notWant []string
 	}{
 		{
-			name:   "cap and knob known",
-			res:    &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 7},
+			// The count corroborates the cap exactly, so it is safe to show.
+			name:   "reported turns match the cap",
+			res:    &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 40},
 			limits: RunLimits{MaxTurns: 40, MaxTurnsEnv: testMaxTurnsEnv},
 			want: []string{
-				"turn limit", "not a crash, timeout or API error",
-				"(7 of 40 turns)", "`" + testMaxTurnsEnv + "`", "current: 40", turnLimitSubtype,
+				"turn limit", "not a crash, timeout or API error", "restate anything you want continued",
+				"(40 of 40 turns)", "`" + testMaxTurnsEnv + "`", "current: 40", turnLimitSubtype,
 			},
+			// A stopped run's session is cleared when it was resuming, so the message
+			// must not promise the next one picks up where this one left off.
+			notWant: []string{"starts a new run"},
 		},
 		{
-			name:    "cap known but provider has no knob",
-			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 7},
-			limits:  RunLimits{MaxTurns: 40},
-			want:    []string{"turn limit", "not a crash, timeout or API error", "(7 of 40 turns)", turnLimitSubtype},
-			notWant: []string{testMaxTurnsEnv, "current:"},
+			// num_turns semantics are unverified and the counter can undershoot the
+			// cap; "3 of 40 turns" under a sentence that says the cap was reached reads
+			// as a bug, so the count is dropped while the cap itself still shows.
+			name:    "reported turns fall short of the cap",
+			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 3},
+			limits:  RunLimits{MaxTurns: 40, MaxTurnsEnv: testMaxTurnsEnv},
+			want:    []string{"turn limit", "`" + testMaxTurnsEnv + "`", "current: 40", turnLimitSubtype},
+			notWant: []string{" of ", "3"},
 		},
 		{
-			// No cap was passed to the provider, so its built-in limit applied: never
-			// print a cap of 0, and say the variable is unset instead.
-			name:    "knob known but no cap configured",
-			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 7},
-			limits:  RunLimits{MaxTurnsEnv: testMaxTurnsEnv},
-			want:    []string{"turn limit", "built-in", "`" + testMaxTurnsEnv + "`", turnLimitSubtype},
-			notWant: []string{"0", "current:", " of "},
-		},
-		{
-			name:    "neither cap nor knob known",
-			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 7},
-			limits:  RunLimits{},
-			want:    []string{"turn limit", "not a crash, timeout or API error", turnLimitSubtype},
-			notWant: []string{testMaxTurnsEnv, "current:", " of ", "0"},
-		},
-		{
-			// num_turns is the provider's own counter and may exceed the cap; a
-			// "501 of 250" clause would read as a bug, so it is dropped entirely.
+			// The same counter can also exceed the cap: "501 of 250" reads as a bug too.
 			name:    "reported turns exceed the cap",
 			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 501},
 			limits:  RunLimits{MaxTurns: 250, MaxTurnsEnv: testMaxTurnsEnv},
@@ -1466,10 +1459,53 @@ func TestFinalTurnLimitStop(t *testing.T) {
 			notWant: []string{" of "},
 		},
 		{
+			name:    "cap known but provider has no knob",
+			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 40},
+			limits:  RunLimits{MaxTurns: 40},
+			want:    []string{"turn limit", "not a crash, timeout or API error", "(40 of 40 turns)", turnLimitSubtype},
+			notWant: []string{testMaxTurnsEnv, "current:", "`"},
+		},
+		{
+			// No cap is configured, so never print a cap of 0 and never corroborate it
+			// with a count: only the knob to set is actionable here.
+			name:    "knob known but no cap configured",
+			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 7},
+			limits:  RunLimits{MaxTurnsEnv: testMaxTurnsEnv},
+			want:    []string{"turn limit", "No turn cap is configured", "`" + testMaxTurnsEnv + "`", turnLimitSubtype},
+			notWant: []string{"0", "7", "current:", " of ", "raise"},
+		},
+		{
+			name:    "neither cap nor knob known",
+			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 7},
+			limits:  RunLimits{},
+			want:    []string{"turn limit", "not a crash, timeout or API error", turnLimitSubtype},
+			notWant: []string{testMaxTurnsEnv, "current:", " of ", "0", "7", "`"},
+		},
+		{
+			// chat.Config.MaxTurnsEnv is exported, so the knob name is whatever an
+			// embedder set: a backtick in it would leave an odd count and take the
+			// WHOLE message off the rich-markdown path. Backticks are stripped and
+			// surrounding whitespace/newlines collapsed, so the code span always closes.
+			name:    "hostile knob name cannot break the code span",
+			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 40},
+			limits:  RunLimits{MaxTurns: 40, MaxTurnsEnv: "  X`_MAX`_TURNS\n"},
+			want:    []string{"raise `" + testMaxTurnsEnv + "` (current: 40)", turnLimitSubtype},
+			notWant: []string{"X`", "\n"},
+		},
+		{
+			// A knob name that is nothing BUT metacharacters names no variable, so the
+			// clause is dropped rather than rendered as empty backticks.
+			name:    "knob name left empty by sanitizing drops the clause",
+			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 40},
+			limits:  RunLimits{MaxTurns: 40, MaxTurnsEnv: " `` "},
+			want:    []string{"turn limit", "(40 of 40 turns)", turnLimitSubtype},
+			notWant: []string{"`", "current:", "raise"},
+		},
+		{
 			// Text that came with the result used to be swallowed by the generic
 			// wording; it is now kept and the explanation follows it.
 			name:   "result text is kept and explained",
-			res:    &agent.RunResult{Text: "partial answer", IsError: true, Subtype: turnLimitSubtype, NumTurns: 7},
+			res:    &agent.RunResult{Text: "partial answer", IsError: true, Subtype: turnLimitSubtype, NumTurns: 40},
 			limits: RunLimits{MaxTurns: 40, MaxTurnsEnv: testMaxTurnsEnv},
 			want:   []string{"⚠️ partial answer\n\nThe run stopped", "current: 40", turnLimitSubtype},
 		},
