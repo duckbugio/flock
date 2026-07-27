@@ -671,6 +671,57 @@ func TestProgressEditsRespectMinInterval(t *testing.T) {
 	close(gate)
 }
 
+// TestRunExplainsTurnLimitWithRuntimeCap asserts the turn-limit message a user
+// actually receives carries the cap and knob THIS deployment runs with, end to
+// end from chat.Config through the run loop. Printing a compiled-in default
+// instead would be actively misleading: deployments override the cap.
+func TestRunExplainsTurnLimitWithRuntimeCap(t *testing.T) {
+	const (
+		maxTurns = 7
+		envName  = "X_MAX_TURNS"
+	)
+	fc := newFakeChat()
+	fr := &fakeRunner{events: []agent.Event{
+		{Type: agent.SystemInit, SessionID: "s1"},
+		{Type: agent.Result, Result: &agent.RunResult{
+			IsError: true, Subtype: "error_max_turns", NumTurns: maxTurns, SessionID: "s1",
+		}},
+	}}
+	d := dispatch.New(4)
+	defer d.Close()
+	svc := New(Config{
+		Runner:      fr,
+		Transport:   fc,
+		Dispatcher:  d,
+		Workspace:   &fakeWorkspace{},
+		Opts:        agent.Options{MaxTurns: maxTurns},
+		MaxTurnsEnv: envName,
+		Logger:      slog.New(slog.DiscardHandler),
+	})
+	svc.tick = 5 * time.Millisecond
+
+	svc.Handle(context.Background(), "100", 100, "1", "go")
+
+	waitUntil(t, func() bool {
+		text, stop := fc.snapshot()
+		return strings.Contains(text, "error_max_turns") && !stop
+	})
+
+	text, _ := fc.snapshot()
+	for _, want := range []string{"turn limit", strconv.Itoa(maxTurns), envName} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("delivered turn-limit message = %q, want it to contain %q", text, want)
+		}
+	}
+	// Neither the compiled-in default nor the deploy role's value may leak in: the
+	// message must report the cap this Service was actually built with.
+	for _, notWant := range []string{"40", "250"} {
+		if strings.Contains(text, notWant) {
+			t.Fatalf("delivered turn-limit message = %q, want it NOT to contain %q", text, notWant)
+		}
+	}
+}
+
 func TestRunChunksLongFinal(t *testing.T) {
 	long := strings.Repeat("x", TelegramMaxMessage+500)
 	fc := newFakeChat()
