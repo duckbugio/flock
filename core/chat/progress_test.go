@@ -1387,6 +1387,17 @@ func assertCodeSpanSafe(t *testing.T, msg string) {
 			t.Fatalf("newline inside a code span (%q) breaks it: %q", parts[i], msg)
 		}
 	}
+	// Even indices are OUTSIDE every span, where the metacharacters are NOT inert and
+	// the stage line's balance rule still applies. Only the span interior earned the
+	// exemption above, so anything a future clause interpolates outside one stays held
+	// to it.
+	for i := 0; i < len(parts); i += 2 {
+		for _, meta := range []string{"*", "_", "~", "|"} {
+			if c := strings.Count(parts[i], meta); c%2 != 0 {
+				t.Fatalf("unbalanced %q outside a code span (%d occurrences): %q", meta, c, msg)
+			}
+		}
+	}
 }
 
 func TestFinalSuccess(t *testing.T) {

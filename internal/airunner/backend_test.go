@@ -142,7 +142,9 @@ const testTurnCap = 40
 // yet the terminal message would stay silent about the knob that raises it, and
 // every other test would still pass. Asserting the biconditional over the whole
 // registry also covers providers that do not exist yet: enforcing a cap and naming
-// its env var must always come together, in both directions.
+// its env var must always come together, in both directions — provided the new
+// provider's cap field follows turnCapFieldSuffix. A cap wired from a differently
+// named field reads back as zero from the probe config and is NOT covered.
 func TestTurnLimitEnvMatchesProviderTurnCap(t *testing.T) {
 	registry := DefaultRegistry()
 	if len(registry.providers) == 0 {
@@ -194,18 +196,23 @@ func turnCapProbeConfig(t *testing.T) config.Config {
 	}
 	value := reflect.ValueOf(&cfg).Elem()
 	fields := value.Type()
-	filled := 0
 	for i := 0; i < fields.NumField(); i++ {
 		field := fields.Field(i)
-		if !strings.HasSuffix(field.Name, turnCapFieldSuffix) || field.Type.Kind() != reflect.Int {
+		if !field.IsExported() || !strings.HasSuffix(field.Name, turnCapFieldSuffix) ||
+			field.Type.Kind() != reflect.Int {
 			continue
 		}
 		value.Field(i).SetInt(testTurnCap)
-		filled++
 	}
-	if filled == 0 {
-		t.Fatalf("no config field ends in %q: the turn-cap naming convention changed, "+
-			"so this config no longer feeds any provider a cap", turnCapFieldSuffix)
+	// Counting the fields filled above cannot catch a rename: GoalEvalMaxTurns — the
+	// goal evaluator's own cap — matches the suffix while feeding no provider, so the
+	// count never reaches zero. Assert the one field that DOES feed a provider today,
+	// so renaming it away from the convention fails here, naming the cause, instead of
+	// surfacing as a Claude backend that mysteriously stopped capping turns.
+	if cfg.ClaudeMaxTurns != testTurnCap {
+		t.Fatalf("ClaudeMaxTurns = %d, want %d: no field named <Provider>%s fed the Claude backend, "+
+			"so the turn-cap naming convention changed and this probe no longer sets a cap",
+			cfg.ClaudeMaxTurns, testTurnCap, turnCapFieldSuffix)
 	}
 	return cfg
 }
