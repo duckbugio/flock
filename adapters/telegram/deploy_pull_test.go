@@ -10,7 +10,7 @@ package telegram_test
 import (
 	"io/fs"
 	"os"
-	"path/filepath"
+	"path"
 	"regexp"
 	"strings"
 	"testing"
@@ -567,27 +567,29 @@ type varSetting struct {
 // tells operators to copy — outranks it, so `bot_image_pull: true` there would put the
 // implicit update back into every derived deployment while the default still reads false.
 func TestBotImagePullIsOptIn(t *testing.T) {
-	sources, err := shippedVarSources(deployRoot)
+	deploy := os.DirFS(deployRoot)
+	sources, err := shippedVarSources(deploy)
 	if err != nil {
 		t.Fatalf("walk %s: %v", deployRoot, err)
 	}
 	defaulted := false
-	for _, path := range sources {
-		raw, err := os.ReadFile(path)
+	for _, rel := range sources {
+		name := path.Join(deployRoot, rel)
+		raw, err := fs.ReadFile(deploy, rel)
 		if err != nil {
 			// Keep going: one unreadable file must not hide a setting in the others.
-			t.Errorf("read %s: %v", path, err)
+			t.Errorf("read %s: %v", name, err)
 			continue
 		}
 		for _, set := range botImagePullSettings(string(raw)) {
-			if filepath.ToSlash(path) == botImagePullDefault {
+			if name == botImagePullDefault {
 				defaulted = true
 			}
 			if isFalseValue(set.value) {
 				continue
 			}
 			t.Errorf("%s:%d sets bot_image_pull to %q, want a false value — updating must stay "+
-				"opt-in, otherwise every playbook run fetches images again", path, set.line+1, set.value)
+				"opt-in, otherwise every playbook run fetches images again", name, set.line+1, set.value)
 		}
 	}
 	if !defaulted {
@@ -596,23 +598,22 @@ func TestBotImagePullIsOptIn(t *testing.T) {
 	}
 }
 
-// shippedVarSources returns every tracked file under root that Ansible could read a
+// shippedVarSources returns every tracked file in the deploy tree that Ansible could read a
 // variable from. It walks instead of listing: group_vars, host_vars, a second inventory and
 // a play's own `vars:` all outrank a role default, so a fixed list would be one forgotten
 // file away from letting the switch back on. Inventories other than the example are skipped
 // — .gitignore keeps them out of the repo, so they are the operator's, not ours.
-func shippedVarSources(root string) ([]string, error) {
-	inventories := filepath.Join(root, "inventories")
+func shippedVarSources(deploy fs.FS) ([]string, error) {
 	var files []string
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(deploy, ".", func(name string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if !d.IsDir() {
-			files = append(files, path)
+			files = append(files, name)
 			return nil
 		}
-		if filepath.Dir(path) == inventories && d.Name() != exampleInventory {
+		if path.Dir(name) == "inventories" && d.Name() != exampleInventory {
 			return fs.SkipDir
 		}
 		return nil
