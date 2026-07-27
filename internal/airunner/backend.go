@@ -133,6 +133,24 @@ func (claudeProvider) Build(cfg config.Config) (agent.Runner, agent.Options, err
 	}, nil
 }
 
+// TurnLimitEnv names the environment variable that configures the agent turn cap
+// for the given AI_BACKEND name or alias, or "" when that provider has no such
+// knob. An empty name resolves to the default provider, exactly as an unset
+// AI_BACKEND does; an unrecognized one yields "" rather than a guess.
+//
+// Only the Claude backend passes a turn cap down to its CLI — codexProvider and
+// openAICompatProvider leave agent.Options.MaxTurns zero — so it is the only
+// provider whose knob can be named truthfully. This is a plain function rather
+// than a Provider method because two of the three implementations would do
+// nothing but return "".
+func TurnLimitEnv(provider string) string {
+	p, err := DefaultRegistry().Provider(provider)
+	if err != nil || p.Name() != config.AIBackendClaude {
+		return ""
+	}
+	return config.ClaudeMaxTurnsEnv
+}
+
 type codexProvider struct{}
 
 func (codexProvider) Name() string        { return config.AIBackendCodex }

@@ -81,6 +81,12 @@ var (
 	ErrOpenAICompatUnknownAuthMode = errors.New("unknown OPENAI_COMPAT_AUTH_MODE")
 )
 
+// ClaudeMaxTurnsEnv is the environment variable that configures the Claude
+// backend's agent turn cap. It is exported so a user-facing message can name the
+// knob that raises the cap without hardcoding the string outside this package.
+// It must stay equal to the ClaudeMaxTurns struct tag below; a test asserts it.
+const ClaudeMaxTurnsEnv = "CLAUDE_MAX_TURNS"
+
 // Config holds all runtime configuration sourced from the environment. Field
 // names and env keys mirror adapters/telegram/.env.example for deploy parity.
 // The per-transport tokens are parsed but NOT marked env-required: each binary

@@ -97,6 +97,33 @@ func TestBuildProviderAliases(t *testing.T) {
 	}
 }
 
+// TestTurnLimitEnv checks the turn-cap knob is named only for the provider that
+// actually applies one, so a message can never point at a variable that does
+// nothing for the configured backend.
+func TestTurnLimitEnv(t *testing.T) {
+	tests := []struct {
+		provider string
+		want     string
+	}{
+		{config.AIBackendClaude, config.ClaudeMaxTurnsEnv},
+		{"claude-cli", config.ClaudeMaxTurnsEnv},
+		{"  CLAUDE  ", config.ClaudeMaxTurnsEnv},
+		{"", config.ClaudeMaxTurnsEnv}, // unset AI_BACKEND defaults to claude
+		{config.AIBackendCodex, ""},
+		{"codex-cli", ""},
+		{config.AIBackendOpenAICompat, ""},
+		{"openai", ""},
+		{"qwen", ""}, // unknown provider names no knob
+	}
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			if got := TurnLimitEnv(tt.provider); got != tt.want {
+				t.Fatalf("TurnLimitEnv(%q) = %q, want %q", tt.provider, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildRejectsUnknownProvider(t *testing.T) {
 	runner, opts, info, err := Build(config.Config{AIBackend: "qwen"})
 	if !errors.Is(err, ErrUnknownProvider) {
