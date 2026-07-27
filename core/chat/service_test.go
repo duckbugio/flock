@@ -928,6 +928,19 @@ func TestCompletionNoticeStatusWords(t *testing.T) {
 			&agent.RunResult{IsError: true, Subtype: turnLimitSubtype},
 			errors.New("boom"), nil, false, "⚠️ Failed after 4m 12s",
 		},
+		{
+			// A ctxErr must NOT soften the turn-limit wording, which is why that case
+			// deliberately does not guard on ctxErr == nil. run reads ctx.Err() only
+			// after the event loop drained, so a Stop press or the per-run timeout
+			// landing once the Result was already captured reaches finish with BOTH a
+			// turn-limit result and a ctxErr — and finish then falls through to its
+			// default branch and renders the turn-limit explanation. The notice sits
+			// directly under that bubble, so it has to read "Turn limit reached" too;
+			// "Stopped" here would contradict the answer.
+			"turn limit result with a stop that landed after it",
+			&agent.RunResult{IsError: true, Subtype: turnLimitSubtype},
+			nil, context.Canceled, false, "⏹ Turn limit reached after 4m 12s",
+		},
 		{"user stop", nil, nil, context.Canceled, false, "⏹ Stopped after 4m 12s"},
 		{"deploy shutdown resumes", nil, nil, context.Canceled, true, "⏳ Paused after 4m 12s — will resume after restart"},
 	}
