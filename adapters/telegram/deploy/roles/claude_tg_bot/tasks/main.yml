@@ -136,9 +136,14 @@
     mode: "0600"
   no_log: true
 
-- name: Pull image and (re)start the bot
+# No --pull: moving to a new image is an explicit operator action (`docker compose pull`),
+# not a side effect of running this playbook — a run made for a token rotation or a limit
+# change must not also roll the version forward. --force-recreate stays: with the tag held
+# still it only rebuilds the container (so a changed .env is picked up even on compose
+# versions older than v2.14, which don't detect that themselves), never the image.
+- name: (Re)start the bot on its current image
   ansible.builtin.command:
-    cmd: docker compose up -d --pull always --force-recreate
+    cmd: docker compose up -d --force-recreate
     chdir: "{{ app_dir }}"
   async: 1800
   poll: 15
