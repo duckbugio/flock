@@ -55,14 +55,15 @@ jobs:
           #                          once at install and moves only on an explicit pull
           #   :vX.Y.Z              — milestone release: push a git tag vX.Y.Z and it lands
           #   :sha-<commit>        — exact, immutable pin for traceability/rollback
-          # The order is load-bearing: metadata-action sorts tags by priority (both raw
-          # entries share the default 200, so the listing below decides) and stamps the
-          # FIRST one into org.opencontainers.image.version. With :latest leading, every
-          # image carried version="latest" — worthless for telling which build a host is
-          # running — so the immutable 0.1.<run_number> goes first. A vX.Y.Z tag push
-          # still overrides it (type=ref outranks raw) and the pushed tags are unchanged.
+          # metadata-action stamps the highest-priority tag into
+          # org.opencontainers.image.version. priority=250 lifts the immutable
+          # 0.1.<run_number> above :latest (type=raw defaults to 200) so that label names
+          # the exact build instead of a worthless "latest". Stated explicitly rather than
+          # left to the listing order, which only breaks ties and would silently regress on
+          # a reshuffle. A vX.Y.Z tag push still wins (type=ref defaults to 600) and the
+          # pushed tag set is unchanged.
           tags: |
-            type=raw,value=0.1.${{ github.run_number }},enable={{is_default_branch}}
+            type=raw,value=0.1.${{ github.run_number }},enable={{is_default_branch}},priority=250
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
             type=sha,format=short
