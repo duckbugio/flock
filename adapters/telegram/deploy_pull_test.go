@@ -17,9 +17,9 @@ import (
 // deployManifest is a shipped file that can make a deploy fetch an image.
 type deployManifest struct {
 	path string
-	// ansible marks a file whose tasks can carry a `when:`. A pull gated by one is the
-	// opt-in update path (bot_image_pull) and is allowed. A compose file has no such
-	// gate — a directive there fires on every `up`, so none is allowed.
+	// ansible marks a file whose tasks can carry a `when:`. A pull whose OWN task is
+	// gated on bot_image_pull is the opt-in update path and is allowed. A compose file
+	// has no such gate — a directive there fires on every `up`, so none is allowed.
 	ansible bool
 }
 
@@ -41,21 +41,42 @@ var deployManifests = []deployManifest{
 var pullDirectives = []*regexp.Regexp{
 	regexp.MustCompile(`--pull["']?[\s,=]*["']?always`),
 	regexp.MustCompile(`pull_policy:\s*["']?always`),
+	// The compose module's own fetch option. `\b` keeps this off `bot_image_pull:`, where
+	// the preceding `_` is a word character and so leaves no boundary.
+	regexp.MustCompile(`\bpull:\s*["']?always`),
 	regexp.MustCompile(`docker(?:[\s,"']+compose|-compose)?[\s,"']+pull\b`),
 	regexp.MustCompile(`\b(?:community\.docker\.)?docker_image(?:_pull)?\s*:`),
+	// The compose modules themselves: whether they fetch depends on their `pull:` option
+	// and on the compose file's own policy, so a switch to one has to be reviewed here
+	// (and gated, or this guard widened) rather than slipped in.
+	regexp.MustCompile(`\b(?:community\.docker\.)?docker_compose(?:_v2)?\s*:`),
 }
 
 var (
-	yamlListItem = regexp.MustCompile(`^(\s*)-\s`)
-	yamlWhenKey  = regexp.MustCompile(`^\s*when:`)
+	yamlListItem = regexp.MustCompile(`^(\s*)-(?:\s|$)`)
+	yamlKey      = regexp.MustCompile(`^\s*([\w.-]+):(?:\s|$)`)
+	// The opt-in knob a pull's own condition has to name (see defaults/main.yml).
+	gateVariable = regexp.MustCompile(`\bbot_image_pull\b`)
 )
 
+// pullFinding is one line that fetches an image without the opt-in gate.
+type pullFinding struct {
+	line int // 0-based index into the document's lines
+	re   *regexp.Regexp
+	text string
+}
+
 // TestDeployNeverPullsImplicitly asserts that no shipped compose file and no Ansible task
-// fetches an image on its own. Updating the bot is the operator's decision — a run with
+// fetches an image on its own. Updating is the operator's decision — a run with
 // `-e bot_image_pull=true`, or an explicit pull on the host — never a side effect of a
-// playbook run made for something else, like a token rotation or a limit change. An
-// UNCONDITIONAL pull fails; a pull that its own task's `when:` gates is that opt-in and
-// passes, so the guard catches the return of the implicit behaviour, not the update path.
+// playbook run made for something else, like a token rotation or a limit change.
+//
+// What it checks, exactly: a pull is accepted only when it sits in an Ansible task whose
+// OWN `when:` (a key at the task's own indentation, not one inherited from an enclosing
+// `block:`) names bot_image_pull, whose default TestBotImagePullIsOptIn pins to false.
+// What it does NOT check: that the condition is semantically equivalent to that knob —
+// `when: bot_image_pull | bool or true` names it and would pass. It catches an ungated
+// pull, and a pull gated on the wrong variable or on a constant; it is not an evaluator.
 func TestDeployNeverPullsImplicitly(t *testing.T) {
 	for _, m := range deployManifests {
 		raw, err := os.ReadFile(m.path)
@@ -64,49 +85,148 @@ func TestDeployNeverPullsImplicitly(t *testing.T) {
 			t.Errorf("read %s: %v", m.path, err)
 			continue
 		}
-		lines := strings.Split(string(raw), "\n")
-		for i, line := range lines {
-			// Comments may name a directive to explain why it is absent.
-			if strings.HasPrefix(strings.TrimSpace(line), "#") {
-				continue
-			}
-			for _, re := range pullDirectives {
-				if !re.MatchString(line) {
-					continue
-				}
-				if m.ansible && taskHasWhen(lines, i) {
-					continue // the opt-in update path
-				}
-				t.Errorf("%s:%d matches %q: %s\ndeploys must not pull implicitly — moving to a new "+
-					"image is an explicit operator action, so a pull has to sit in a task gated by "+
-					"its own `when:` (see bot_image_pull)", m.path, i+1, re, strings.TrimSpace(line))
-			}
+		for _, f := range findUngatedPulls(string(raw), m.ansible) {
+			t.Errorf("%s:%d matches %q: %s\ndeploys must not pull implicitly — moving to a new "+
+				"image is an explicit operator action, so a pull has to sit in a task whose own "+
+				"`when:` gates it on bot_image_pull", m.path, f.line+1, f.re, f.text)
 		}
 	}
 }
 
-// taskHasWhen reports whether the Ansible task holding line i carries its own `when:`. The
-// task spans from the list item opening it to the next list item at the same or shallower
-// indentation. Deliberately strict: a condition inherited from an enclosing `block:` does
-// not count, because someone reading the task cannot see that it is gated.
-func taskHasWhen(lines []string, i int) bool {
+// findUngatedPulls returns every line of a deploy manifest that fetches an image without
+// the opt-in gate. ansible enables the gate: in a compose file nothing can gate a pull.
+func findUngatedPulls(content string, ansible bool) []pullFinding {
+	lines := strings.Split(content, "\n")
+	var found []pullFinding
+	for i, raw := range lines {
+		// A comment may name a directive to explain why it is absent — whole-line or
+		// trailing — so drop comments before matching instead of only skipping lines
+		// that are entirely one.
+		line := stripComment(raw)
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		for _, re := range pullDirectives {
+			if !re.MatchString(line) {
+				continue
+			}
+			if ansible && pullIsGated(lines, i) {
+				continue // the opt-in update path
+			}
+			found = append(found, pullFinding{line: i, re: re, text: strings.TrimSpace(line)})
+		}
+	}
+	return found
+}
+
+// pullIsGated reports whether the Ansible task holding line i is gated on the opt-in knob.
+func pullIsGated(lines []string, i int) bool {
+	cond, ok := taskOwnCondition(lines, i)
+	return ok && gateVariable.MatchString(cond)
+}
+
+// taskOwnCondition returns the `when:` expression of the task that DIRECTLY contains line
+// i. "Directly" is what makes the answer independent of key order: the task is the nearest
+// list item at or above line i, and only keys at that item's own indentation are its own —
+// so a `when:` on an enclosing `block:` is not picked up whether it is written before or
+// after the block, and the module arguments (or a nested block's tasks) below the key line
+// cannot smuggle one in. A condition inherited from a block deliberately does not count:
+// someone reading the task cannot see that it is gated, and the gate is the invariant.
+func taskOwnCondition(lines []string, i int) (string, bool) {
 	start := i
 	for start >= 0 && !yamlListItem.MatchString(lines[start]) {
 		start--
 	}
 	if start < 0 {
-		return false
+		return "", false
 	}
-	indent := len(yamlListItem.FindStringSubmatch(lines[start])[1])
+	dash := len(yamlListItem.FindStringSubmatch(lines[start])[1])
+	keyIndent, ok := taskKeyIndent(lines, start, dash)
+	if !ok {
+		return "", false
+	}
+
+	var cond []string
+	inWhen := false
+	for j := start; j < len(lines); j++ {
+		line := stripComment(lines[j])
+		if j == start {
+			// Blank out the "-" so the item's first key is read like any other key line.
+			line = strings.Repeat(" ", dash+1) + line[dash+1:]
+		}
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		if m := yamlListItem.FindStringSubmatch(line); m != nil && len(m[1]) <= dash {
+			break // a sibling task (or a shallower list) starts
+		}
+		if indent < keyIndent {
+			break // back out to the enclosing mapping: this task ended
+		}
+		if indent > keyIndent {
+			if inWhen {
+				cond = append(cond, strings.TrimSpace(line)) // a block scalar or a list value
+			}
+			continue // module arguments, or a nested block's tasks
+		}
+		key := yamlKey.FindStringSubmatch(line)
+		if key == nil {
+			if inWhen {
+				cond = append(cond, strings.TrimSpace(line)) // a list value at key indentation
+			}
+			continue
+		}
+		if key[1] == "when" {
+			inWhen = true
+			_, value, _ := strings.Cut(line, ":")
+			cond = append(cond, strings.TrimSpace(value))
+			continue
+		}
+		inWhen = false
+	}
+	if len(cond) == 0 {
+		return "", false
+	}
+	return strings.Join(cond, " "), true
+}
+
+// taskKeyIndent returns the column at which the keys of the list item on line start begin.
+func taskKeyIndent(lines []string, start, dash int) (int, bool) {
+	rest := lines[start][dash+1:]
+	if trimmed := strings.TrimLeft(rest, " \t"); trimmed != "" {
+		return dash + 1 + len(rest) - len(trimmed), true
+	}
+	// A bare "-": the item's keys start on the next non-blank line.
 	for j := start + 1; j < len(lines); j++ {
-		if m := yamlListItem.FindStringSubmatch(lines[j]); m != nil && len(m[1]) <= indent {
-			return false // next task started
+		if strings.TrimSpace(lines[j]) == "" {
+			continue
 		}
-		if yamlWhenKey.MatchString(lines[j]) {
-			return true
+		indent := len(lines[j]) - len(strings.TrimLeft(lines[j], " \t"))
+		return indent, indent > dash
+	}
+	return 0, false
+}
+
+// stripComment removes a YAML end-of-line comment: a "#" that starts the line or follows
+// whitespace, and is not inside a quoted scalar. Quote tracking keeps a "#" that is part
+// of a value (e.g. a colour or a fragment URL in quotes) from truncating a real directive.
+func stripComment(line string) string {
+	var quote byte
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		case c == '#' && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t'):
+			return line[:i]
 		}
 	}
-	return false
+	return line
 }
 
 // TestPullDirectivesMatchKnownSpellings pins what the guard above promises to catch, so a
@@ -118,6 +238,8 @@ func TestPullDirectivesMatchKnownSpellings(t *testing.T) {
 		`    argv: ["docker", "compose", "up", "-d", "--pull", "always"]`,
 		`    pull_policy: always`,
 		`    pull_policy: "always"`,
+		`    pull: always`,
+		`    pull: "always"`,
 		`    cmd: docker compose pull`,
 		`    cmd: docker-compose pull bot`,
 		`    cmd: docker pull ghcr.io/duckbugio/flock-telegram:latest`,
@@ -125,6 +247,8 @@ func TestPullDirectivesMatchKnownSpellings(t *testing.T) {
 		`  community.docker.docker_image:`,
 		`  community.docker.docker_image_pull:`,
 		`  docker_image:`,
+		`  community.docker.docker_compose_v2:`,
+		`  docker_compose:`,
 	}
 	for _, line := range pulls {
 		if !matchesPullDirective(line) {
@@ -139,7 +263,9 @@ func TestPullDirectivesMatchKnownSpellings(t *testing.T) {
 		`    cmd: docker compose restart`,
 		`    image: {{ bot_image }}`,
 		`bot_image_pull: false`,
+		`  when: bot_image_pull | bool`,
 		`    pull_policy: missing`,
+		`    pull: never`,
 	}
 	for _, line := range clean {
 		if matchesPullDirective(line) {
@@ -157,9 +283,172 @@ func matchesPullDirective(line string) bool {
 	return false
 }
 
+// TestPullGateAcceptsOnlyTheOptInTask pins the gate itself: which spellings of a gated
+// pull the guard accepts, and — the part that carries the invariant — which near-misses
+// it still reports. Every case holds exactly one `docker compose pull`, so "no finding"
+// means "accepted as the opt-in path".
+func TestPullGateAcceptsOnlyTheOptInTask(t *testing.T) {
+	cases := []struct {
+		name     string
+		doc      string
+		accepted bool
+	}{
+		{
+			name: "the role's own opt-in task",
+			doc: `---
+- name: Fetch the images (opt-in update)
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: "{{ app_dir }}"
+  when: bot_image_pull | bool
+  changed_when: false
+`,
+			accepted: true,
+		},
+		{
+			name: "when: written above the module keys",
+			doc: `---
+- name: Fetch the images (opt-in update)
+  when: bot_image_pull | bool
+  ansible.builtin.command:
+    cmd: docker compose pull
+`,
+			accepted: true, // key order in a YAML mapping carries no meaning
+		},
+		{
+			name: "when: as a list",
+			doc: `---
+- name: Fetch the images (opt-in update)
+  ansible.builtin.command:
+    cmd: docker compose pull
+  when:
+    - bot_image_pull | bool
+    - app_dir | length > 0
+`,
+			accepted: true,
+		},
+		{
+			name: "gated by an enclosing block, when: after it",
+			doc: `---
+- name: Update
+  block:
+    - name: Fetch the images
+      ansible.builtin.command:
+        cmd: docker compose pull
+  when: bot_image_pull | bool
+`,
+			accepted: false, // the gate has to be visible on the task that pulls
+		},
+		{
+			name: "gated by an enclosing block, when: before it",
+			doc: `---
+- name: Update
+  when: bot_image_pull | bool
+  block:
+    - name: Fetch the images
+      ansible.builtin.command:
+        cmd: docker compose pull
+`,
+			accepted: false, // same verdict as above: the answer cannot depend on order
+		},
+		{
+			name: "gate on a constant",
+			doc: `---
+- name: Fetch the images
+  ansible.builtin.command:
+    cmd: docker compose pull
+  when: true
+`,
+			accepted: false,
+		},
+		{
+			name: "gate on an unrelated variable",
+			doc: `---
+- name: Fetch the images
+  ansible.builtin.command:
+    cmd: docker compose pull
+  when: enable_dind | bool
+`,
+			accepted: false,
+		},
+		{
+			name: "the knob named only in a comment",
+			doc: `---
+- name: Fetch the images
+  ansible.builtin.command:
+    cmd: docker compose pull
+  when: enable_dind | bool   # bot_image_pull
+`,
+			accepted: false,
+		},
+		{
+			name: "no condition at all",
+			doc: `---
+- name: Fetch the images
+  ansible.builtin.command:
+    cmd: docker compose pull
+`,
+			accepted: false,
+		},
+		{
+			name: "the next task's gate does not reach back",
+			doc: `---
+- name: Fetch the images
+  ansible.builtin.command:
+    cmd: docker compose pull
+
+- name: Something else
+  ansible.builtin.command:
+    cmd: docker compose up -d
+  when: bot_image_pull | bool
+`,
+			accepted: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			found := findUngatedPulls(tc.doc, true)
+			if tc.accepted && len(found) > 0 {
+				t.Errorf("gated pull reported as implicit: line %d, %s", found[0].line+1, found[0].text)
+			}
+			if !tc.accepted && len(found) == 0 {
+				t.Error("ungated pull accepted as the opt-in path")
+			}
+		})
+	}
+}
+
+// TestStripCommentKeepsDirectivesVisible pins the comment handling the guard relies on: a
+// commented-out directive must not fail the build, and a comment appended to a real line
+// must not hide the directive on it.
+func TestStripCommentKeepsDirectivesVisible(t *testing.T) {
+	hidden := []string{
+		`# No --pull always here: updating is opt-in`,
+		`    # cmd: docker compose pull`,
+	}
+	for _, line := range hidden {
+		if matchesPullDirective(stripComment(line)) {
+			t.Errorf("a comment naming a directive fails the guard: %s", line)
+		}
+	}
+
+	visible := []string{
+		`    cmd: docker compose pull   # opt-in update`,
+		`    pull_policy: always  # keep us current`,
+		`    cmd: echo "nothing # here" && docker compose pull`,
+	}
+	for _, line := range visible {
+		if !matchesPullDirective(stripComment(line)) {
+			t.Errorf("a trailing comment hides a directive: %s", line)
+		}
+	}
+}
+
 // TestBotImagePullIsOptIn asserts the knob the pull task is gated on defaults to false.
 // A default of true would make that `when:` always fire, which is an unconditional pull
-// wearing a gate — exactly the behaviour the guard above exists to keep out.
+// wearing a gate — exactly the behaviour the guard above exists to keep out. The guard
+// checks that the gate NAMES this knob; this test is what makes naming it mean "off".
 func TestBotImagePullIsOptIn(t *testing.T) {
 	const path = "deploy/roles/claude_tg_bot/defaults/main.yml"
 	raw, err := os.ReadFile(path)
@@ -170,8 +459,11 @@ func TestBotImagePullIsOptIn(t *testing.T) {
 	if m == nil {
 		t.Fatalf("%s: no bot_image_pull default — the pull task's `when:` gate must have one", path)
 	}
-	if got := strings.Trim(m[1], `"'`); got != "false" {
-		t.Errorf("%s: bot_image_pull defaults to %q, want \"false\" — updating must stay opt-in, "+
-			"otherwise every playbook run pulls again", path, got)
+	// Every spelling Ansible reads as false: the YAML 1.1 booleans in any case, plus 0,
+	// which `| bool` (how the task consumes it) also treats as false.
+	falsey := map[string]bool{"false": true, "no": true, "n": true, "off": true, "0": true}
+	if got := strings.Trim(m[1], `"'`); !falsey[strings.ToLower(got)] {
+		t.Errorf("%s: bot_image_pull defaults to %q, want a false value — updating must stay "+
+			"opt-in, otherwise every playbook run pulls again", path, got)
 	}
 }
