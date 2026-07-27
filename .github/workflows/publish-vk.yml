@@ -48,15 +48,21 @@ jobs:
         with:
           images: ghcr.io/duckbugio/flock-vk
           # Tags produced per build:
-          #   :latest              — rolling, default branch only (what deploys track)
           #   :0.1.<run_number>    — ordered, human-readable auto-version for every main
           #                          build (no manual step); the number increments per
           #                          publish run so images sort and read sanely
+          #   :latest              — rolling, default branch only (what deploys track)
           #   :vX.Y.Z              — milestone release: push a git tag vX.Y.Z and it lands
           #   :sha-<commit>        — exact, immutable pin for traceability/rollback
+          # The order is load-bearing: metadata-action sorts tags by priority (both raw
+          # entries share the default 200, so the listing below decides) and stamps the
+          # FIRST one into org.opencontainers.image.version. With :latest leading, every
+          # image carried version="latest" — worthless for telling which build a host is
+          # running — so the immutable 0.1.<run_number> goes first. A vX.Y.Z tag push
+          # still overrides it (type=ref outranks raw) and the pushed tags are unchanged.
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=0.1.${{ github.run_number }},enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
             type=sha,format=short
 
