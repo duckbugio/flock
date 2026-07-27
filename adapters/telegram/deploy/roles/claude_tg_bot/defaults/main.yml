@@ -15,8 +15,21 @@ container_prefix: claude-tg
 legacy_volume_project: ""
 
 # Prebuilt image — pulled, not built (agents/CLAUDE.md are baked in by CI).
-# Pin a tag (e.g. :v1) for reproducibility, or :latest to track main.
+# The tag is resolved against the registry ONCE, on the first install; afterwards the
+# host keeps the image it already has. So :latest does NOT track main by itself — an
+# ordinary playbook run (token rotation, a limit change) never moves the version.
+# Pin a tag (e.g. :v1) to make the version explicit in the inventory; to move a
+# deployment forward, re-run with -e bot_image_pull=true (see below).
 bot_image: "ghcr.io/duckbugio/flock-telegram:latest"
+
+# Update switch. false (default) = the run reuses the image the host already has;
+# true = fetch what {{ bot_image }} currently points to first, so the (re)start below
+# lands on the new build. Updating is therefore a deliberate operator action:
+#   ansible-playbook -i inventories/<name>/inventory.ini playbook.yml -e bot_image_pull=true
+# It is a variable rather than an Ansible tag on purpose — a tag would be a second,
+# partly overlapping switch, and selecting only the pull task with --tags would skip the
+# (re)start that actually puts the new image into service.
+bot_image_pull: false
 
 # Node major version for the bundled `claude` CLI
 node_major: 22

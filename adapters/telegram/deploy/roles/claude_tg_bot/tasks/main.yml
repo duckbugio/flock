@@ -136,11 +136,26 @@
     mode: "0600"
   no_log: true
 
-# No --pull: moving to a new image is an explicit operator action (`docker compose pull`),
-# not a side effect of running this playbook — a run made for a token rotation or a limit
-# change must not also roll the version forward. --force-recreate stays: with the tag held
-# still it only rebuilds the container (so a changed .env is picked up even on compose
-# versions older than v2.14, which don't detect that themselves), never the image.
+# The update path, off unless the operator asks for it with -e bot_image_pull=true.
+# Only the bot service is fetched: this switch is about the bot image, and the pinned
+# sidecars (dind, caddy) stay on whatever the host already has. The (re)start below then
+# recreates the container on the fetched image. changed_when: false because the fetch
+# alone changes nothing on the host — the (re)start task reports whether the deployment
+# actually moved.
+- name: Fetch the bot image (opt-in update)
+  ansible.builtin.command:
+    cmd: docker compose pull bot
+    chdir: "{{ app_dir }}"
+  when: bot_image_pull | bool
+  async: 1800
+  poll: 15
+  changed_when: false
+
+# No --pull here: moving to a new image is the explicit action above, not a side effect of
+# running this playbook — a run made for a token rotation or a limit change must not also
+# roll the version forward. --force-recreate stays: with the tag held still it only rebuilds
+# the container (so a changed .env is picked up even on compose versions older than v2.14,
+# which don't detect that themselves), never the image.
 - name: (Re)start the bot on its current image
   ansible.builtin.command:
     cmd: docker compose up -d --force-recreate
