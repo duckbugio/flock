@@ -107,7 +107,7 @@ GITEA_POLL_INTERVAL=90
 - **音声メッセージ:** `ENABLE_VOICE_MESSAGES=true`、`VOICE_PROVIDER=mistral|openai|local`、加えて `MISTRAL_API_KEY`（または `OPENAI_API_KEY`）。文字起こしされてコマンドとして実行されます。
 - **dind サイドカー:** `docker compose --profile dind up -d` で、Docker 化されたリンター/テストをチームに提供します（`DOCKER_HOST=tcp://dind:2375` を設定）。
 - **チャットごとの隔離:** 各チャットには `/workspace/chat_<id>` が割り当てられます（1:1 → プライベート、グループ → 1 つの共有ワークスペース）。チャットは完全に隔離され、`MAX_CONCURRENT_CHAT_RUNS` を上限として並列実行されます。グループでは `REQUIRE_GROUP_MENTION=true` を設定すると、@メンションまたは返信されたときのみ応答します。
-- **Ansible デプロイ**（Telegram）: `adapters/telegram/deploy` からワンコマンドで VPS をプロビジョニングします。`inventories/example` を自分用の `inventories/<name>/`（gitignore 対象）にコピーし、inventory/vars/vault を埋めてから `ansible-playbook -i inventories/<name>/inventory.ini playbook.yml` を実行します。ロールはビルド済みイメージを取得します。タグを固定するには `bot_image` を設定してください。
+- **Ansible デプロイ**（Telegram）: `adapters/telegram/deploy` からワンコマンドで VPS をプロビジョニングします。`inventories/example` を自分用の `inventories/<name>/`（gitignore 対象）にコピーし、inventory/vars/vault を埋めてから `ansible-playbook -i inventories/<name>/inventory.ini playbook.yml` を実行します。ロールは初回実行でビルド済みイメージを取得し、その後はそのイメージを保持します。通常の再実行では稼働中のバージョンは変わりません。更新するには `-e bot_image_pull=true` を付けて再実行してください。タグを固定するには `bot_image` を設定します。
 
 ## セキュリティ
 
