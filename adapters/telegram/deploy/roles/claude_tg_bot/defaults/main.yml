@@ -128,9 +128,12 @@ gitea_poll_interval: 90
 enable_dind: true
 dind_image: "docker:27-dind"
 
-# Weekly reclaim of unused Docker images + build cache via a systemd timer. Only prunes
-# things OLDER than docker_prune_keep_hours, so a recently-pulled image stays for rollback;
-# images in use by a running container are never touched. Set enable_docker_prune: false to skip.
+# Weekly reclaim of unused Docker images + build cache via a systemd timer. The age it
+# filters on is the image's CREATION time (when CI built it), not when this host pulled it,
+# so a just-pulled image is usually already past docker_prune_keep_hours and is reclaimed
+# once nothing runs it — after an update, rolling back to the previous image normally means
+# pulling that tag again. Images in use by a running container are never touched, so the
+# version in service always survives. Set enable_docker_prune: false to skip.
 enable_docker_prune: true
 docker_prune_schedule: "weekly"   # systemd OnCalendar (weekly | daily | "Sun *-*-* 04:00:00")
 docker_prune_keep_hours: 168      # keep anything newer than this many hours (168 = 7 days)

@@ -1,6 +1,7 @@
 ---
-# Convenience handler (e.g. for `--tags restart`). The main converge task
-# already runs `docker compose up -d --build`, which is idempotent.
+# Convenience handler (e.g. for `--tags restart`). The converge task
+# "(Re)start the bot on its current image" already runs
+# `docker compose up -d --force-recreate`, which is idempotent.
 - name: Restart claude-tg-bot
   ansible.builtin.command:
     cmd: docker compose restart
