@@ -3,6 +3,8 @@ package airunner
 
 import (
 	"errors"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/duckbugio/flock/internal/config"
@@ -122,6 +124,90 @@ func TestTurnLimitEnv(t *testing.T) {
 			}
 		})
 	}
+}
+
+// turnCapFieldSuffix is the naming convention every turn-cap config field
+// follows (ClaudeMaxTurns today), so turnCapProbeConfig can fill the ones a
+// provider added later brings with it.
+const turnCapFieldSuffix = "MaxTurns"
+
+// testTurnCap is the positive cap fed to every turn-cap config field.
+const testTurnCap = 40
+
+// TestTurnLimitEnvMatchesProviderTurnCap guards the fact TurnLimitEnv hardcodes:
+// that Claude is the only backend actually passing a turn cap down. That fact
+// lives in the providers' Build methods, while TurnLimitEnv and TestTurnLimitEnv
+// both just repeat it — so nothing today notices the two drifting apart. Concretely:
+// a provider that starts setting agent.Options.MaxTurns really does enforce a cap,
+// yet the terminal message would stay silent about the knob that raises it, and
+// every other test would still pass. Asserting the biconditional over the whole
+// registry also covers providers that do not exist yet: enforcing a cap and naming
+// its env var must always come together, in both directions.
+func TestTurnLimitEnvMatchesProviderTurnCap(t *testing.T) {
+	registry := DefaultRegistry()
+	if len(registry.providers) == 0 {
+		t.Fatal("DefaultRegistry() registered no providers")
+	}
+	for name, p := range registry.providers {
+		t.Run(name, func(t *testing.T) {
+			cfg := turnCapProbeConfig(t)
+			cfg.AIBackend = name
+			_, opts, _, err := registry.Build(cfg)
+			if err != nil {
+				// A provider that fails to build proves nothing: opts.MaxTurns stays zero
+				// and the assertion below would pass vacuously. Every provider registered
+				// today builds from turnCapProbeConfig; one that needs more (real
+				// credentials, say) must either get them there or be skipped right here
+				// with the reason spelled out — never let the error slide.
+				t.Fatalf("Build(%q) error = %v, want a provider that builds from turnCapProbeConfig", name, err)
+			}
+			capped := opts.MaxTurns > 0
+			knob := TurnLimitEnv(p.Name())
+			if capped != (knob != "") {
+				t.Fatalf("provider %q: Options.MaxTurns = %d, TurnLimitEnv = %q — a provider that caps turns must "+
+					"name the env var that sets it, and only such a provider may name one",
+					p.Name(), opts.MaxTurns, knob)
+			}
+		})
+	}
+}
+
+// turnCapProbeConfig returns a config every registered provider can build from,
+// with EVERY turn-cap field set to a positive value. Those fields are filled by
+// reflection rather than named one by one on purpose: a provider that gains a cap
+// brings its own <Provider>MaxTurns field, and a probe config that only sets
+// ClaudeMaxTurns would read back a zero cap for it and pass vacuously — missing
+// exactly the drift the caller exists to catch. The credentials are the same
+// throwaway values the other Build tests use.
+func turnCapProbeConfig(t *testing.T) config.Config {
+	t.Helper()
+	cfg := config.Config{
+		ClaudeBin:              "claude",
+		CodexBin:               "codex",
+		CodexAuthMode:          config.CodexAuthSubscription,
+		CodexRequireAuth:       false,
+		OpenAICompatBaseURL:    "https://example.test/v1",
+		OpenAICompatModel:      "qwen-plus",
+		OpenAICompatAuthMode:   config.OpenAICompatAuthAPIKey,
+		OpenAICompatAPIKey:     "sk-test",
+		OpenAICompatBillingAck: true,
+	}
+	value := reflect.ValueOf(&cfg).Elem()
+	fields := value.Type()
+	filled := 0
+	for i := 0; i < fields.NumField(); i++ {
+		field := fields.Field(i)
+		if !strings.HasSuffix(field.Name, turnCapFieldSuffix) || field.Type.Kind() != reflect.Int {
+			continue
+		}
+		value.Field(i).SetInt(testTurnCap)
+		filled++
+	}
+	if filled == 0 {
+		t.Fatalf("no config field ends in %q: the turn-cap naming convention changed, "+
+			"so this config no longer feeds any provider a cap", turnCapFieldSuffix)
+	}
+	return cfg
 }
 
 func TestBuildRejectsUnknownProvider(t *testing.T) {
