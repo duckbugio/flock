@@ -1405,13 +1405,26 @@ func TestFinalErrorResult(t *testing.T) {
 // must never hardcode a provider env name, so the tests do not name one either.
 const testMaxTurnsEnv = "X_MAX_TURNS"
 
+// turnLimitProviderText is the result text a real provider ships with an
+// error_max_turns envelope, copied verbatim from core/claude/testdata/error.jsonl
+// (which also reports num_turns 5). It is fixed boilerplate that says what the
+// explanation says, which is why the message does not echo it back.
+const turnLimitProviderText = "Reached the maximum number of turns."
+
+// turnLimitOpener is the explanation's first clause. It must appear exactly once in
+// every turn-limit message: twice would mean a provider result was echoed alongside
+// it, stating the same fact in two consecutive lines.
+const turnLimitOpener = "The run stopped because it reached its turn limit"
+
 // TestFinalTurnLimitStop covers the terminal message for a run that exhausted the
 // agent turn cap. It must state the cause, rule out a crash/timeout/API error,
 // keep the raw subtype token, and name the knob plus the value actually in force —
 // each clause appearing exactly when the limit behind it is known. The reported
 // turn count rides along ONLY when it equals the cap (num_turns semantics are
-// unverified, so a count that contradicts the sentence is dropped, not shown), and
-// the knob name — operator-supplied — can never break out of its code span.
+// unverified, so a count that contradicts the sentence is dropped, not shown), the
+// provider's own result text is never echoed alongside it (it only restates the
+// cause), and the knob name — operator-supplied — can never break out of its code
+// span.
 func TestFinalTurnLimitStop(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1507,12 +1520,25 @@ func TestFinalTurnLimitStop(t *testing.T) {
 			notWant: []string{"`", "current:", "raise"},
 		},
 		{
-			// Text that came with the result used to be swallowed by the generic
-			// wording; it is now kept and the explanation follows it.
-			name:   "result text is kept and explained",
-			res:    &agent.RunResult{Text: "partial answer", IsError: true, Subtype: turnLimitSubtype, NumTurns: 40},
-			limits: RunLimits{MaxTurns: 40, MaxTurnsEnv: testMaxTurnsEnv},
-			want:   []string{"⚠️ partial answer\n\nThe run stopped", "current: 40", turnLimitSubtype},
+			// The realistic payload: the provider fills the result with fixed boilerplate
+			// for this subtype. It states exactly what the explanation's first sentence
+			// states, so echoing it would open the message with a duplicate of its own
+			// next line — the explanation stands alone instead.
+			name:    "provider boilerplate is not echoed back",
+			res:     &agent.RunResult{Text: turnLimitProviderText, IsError: true, Subtype: turnLimitSubtype, NumTurns: 5},
+			limits:  RunLimits{MaxTurns: 5, MaxTurnsEnv: testMaxTurnsEnv},
+			want:    []string{"⚠️ " + turnLimitOpener, "(5 of 5 turns)", "current: 5", turnLimitSubtype},
+			notWant: []string{turnLimitProviderText},
+		},
+		{
+			// The rule is gated on the subtype, not on matching the boilerplate sentence,
+			// so ANY text arriving with this subtype is dropped and a reworded provider
+			// message cannot start leaking back in.
+			name:    "result text is dropped whatever it says",
+			res:     &agent.RunResult{Text: "partial answer", IsError: true, Subtype: turnLimitSubtype, NumTurns: 40},
+			limits:  RunLimits{MaxTurns: 40, MaxTurnsEnv: testMaxTurnsEnv},
+			want:    []string{"⚠️ " + turnLimitOpener, "current: 40", turnLimitSubtype},
+			notWant: []string{"partial answer"},
 		},
 	}
 
@@ -1521,6 +1547,10 @@ func TestFinalTurnLimitStop(t *testing.T) {
 			got := Final(tt.res, tt.limits)
 			if !strings.HasPrefix(got, "⚠️") {
 				t.Fatalf("turn-limit stop not flagged: %q", got)
+			}
+			// The cause is stated once and only once, whatever the result carried.
+			if n := strings.Count(got, turnLimitOpener); n != 1 {
+				t.Fatalf("Final() = %q, want the explanation exactly once, got %d", got, n)
 			}
 			for _, want := range tt.want {
 				if !strings.Contains(got, want) {

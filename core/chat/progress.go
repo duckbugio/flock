@@ -886,11 +886,14 @@ func Final(res *agent.RunResult, limits RunLimits) string {
 func errorBody(res *agent.RunResult, limits RunLimits, text string) string {
 	switch res.Subtype {
 	case turnLimitSubtype:
-		// Keep whatever the run did produce and append the explanation after it: the
-		// generic wording used to replace that text outright.
-		if text != "" {
-			return text + "\n\n" + turnLimitExplanation(res, limits)
-		}
+		// The result text this subtype carries is a fixed boilerplate sentence from the
+		// provider ("Reached the maximum number of turns." — see
+		// core/claude/testdata/error.jsonl) that states exactly what the explanation's
+		// own first sentence states, minus the actionable knob and the raw subtype
+		// token. Echoing it would open the message with a duplicate of its own next
+		// line, so it is dropped. The rule is gated on the SUBTYPE, never on matching
+		// the sentence: a reworded boilerplate must not start leaking back in, and
+		// every OTHER subtype still keeps whatever text came with the result.
 		return turnLimitExplanation(res, limits)
 	default:
 		if text != "" {
