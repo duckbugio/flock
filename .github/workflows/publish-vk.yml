@@ -10,8 +10,9 @@ on:
     # sources (cmd/, internal/, core/, go.mod/go.sum) or the adapter build
     # (Dockerfile/.dockerignore). Docs, the Ansible deploy dir and Go test files
     # don't affect the image (.dockerignore keeps _test.go out of the build context),
-    # so they don't trigger a build. Negations come last: the final matching pattern
-    # wins.
+    # so they don't trigger a build. The last matching pattern wins, so each negation
+    # has to sit after the pattern it carves out of; the entries below them overlap
+    # with neither negation.
     paths:
       - 'cmd/**'
       - 'internal/**'
@@ -55,7 +56,7 @@ jobs:
           #                          build (no manual step); the number increments per
           #                          publish run so images sort and read sanely
           #   :latest              — rolling, default branch only; a deploy resolves it
-          #                          once at install and moves only on an explicit pull
+          #                          once at install and moves only after an explicit pull
           #   :vX.Y.Z              — milestone release: push a git tag vX.Y.Z and it lands
           #   :sha-<commit>        — exact, immutable pin for traceability/rollback
           # metadata-action stamps the highest-priority tag into
