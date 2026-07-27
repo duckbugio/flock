@@ -142,10 +142,13 @@
 # would leave a privileged container with no path to a security fix at all. Nothing here is
 # automatic; the operator still picks the moment. The (re)start below then recreates the
 # containers on whatever was fetched.
-# changed_when: false — a fetch on its own changes nothing that is in service. What it did
-# is reported verbatim by "Report status" instead: the (re)start always reports changed
-# (--force-recreate recreates the container on every run), so its flag cannot tell the
-# operator whether a new image actually arrived.
+# changed_when is where the answer to "did a new image arrive?" belongs: compose prints
+# "Pull complete" once per layer it actually downloaded, and prints none of those lines when
+# every tag already resolved to the local image. (A "Pulling"/"Pulled" pair is printed per
+# service either way, so it answers nothing.) The narrow case this misses is a fetch that
+# only re-points a tag at layers the host already has: nothing is downloaded, so it reports
+# ok. The (re)start below recreates the container on every run (--force-recreate), so it
+# reports changed whether or not the image moved — its flag says nothing about that.
 - name: Fetch the current images (opt-in update)
   ansible.builtin.command:
     cmd: docker compose pull
@@ -154,7 +157,8 @@
   register: image_fetch
   async: 1800
   poll: 15
-  changed_when: false
+  changed_when: >-
+    'Pull complete' in (image_fetch.stderr + image_fetch.stdout)
 
 # No --pull here: this task does not go looking for a newer build, so a run made for a token
 # rotation or a limit change recreates the container on whatever the tag points to on THIS
@@ -187,13 +191,16 @@
 
 - name: Report status
   vars:
-    # Verbatim and uninterpreted: the fetch's own output is the only honest answer to
-    # "did a new image arrive?", since the (re)start above always reports changed.
+    # Restates the fetch task's own changed flag (see its comment above) rather than echoing
+    # its output: compose prints a line per layer and per status transition, so quoting it
+    # here would put hundreds of progress lines into one debug string and still leave the
+    # reader to interpret them.
     image_fetch_report: >-
-      {{ 'not requested (bot_image_pull=false) — the registry was not contacted'
+      {{ 'not requested (bot_image_pull=false) — no update fetch ran'
          if ((image_fetch is not defined) or (image_fetch.skipped | default(false)))
-         else (((image_fetch.stderr_lines | default([])) + (image_fetch.stdout_lines | default([])))
-               | map('trim') | select | join(' | ') | default('no output', true)) }}
+         else ('a new image was downloaded; the (re)start above recreated the stack on it'
+               if (image_fetch.changed | default(false))
+               else 'nothing downloaded — the tags already resolved to the local images') }}
   ansible.builtin.debug:
     msg:
       - "{{ container_prefix }}-bot is {{ bot_state.stdout }} on the local copy of {{ bot_image }}"
