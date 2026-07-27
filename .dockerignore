@@ -16,3 +16,7 @@ adapters/telegram/.env
 .gocache
 .cache
 flock-telegram
+
+# Go tests: `go build` ignores them, so they only add churn — a test-only edit would
+# otherwise invalidate the COPY layers and force a full rebuild of an identical image.
+**/*_test.go

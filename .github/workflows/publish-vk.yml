@@ -8,8 +8,10 @@ on:
     tags: ["v*"]
     # Only rebuild when something that actually lands in the image changes: the Go
     # sources (cmd/, internal/, core/, go.mod/go.sum) or the adapter build
-    # (Dockerfile/.dockerignore). Docs and the Ansible deploy dir don't affect the
-    # image, so they don't trigger a build.
+    # (Dockerfile/.dockerignore). Docs, the Ansible deploy dir and Go test files
+    # don't affect the image (.dockerignore keeps _test.go out of the build context),
+    # so they don't trigger a build. Negations come last: the final matching pattern
+    # wins.
     paths:
       - 'cmd/**'
       - 'internal/**'
@@ -18,6 +20,7 @@ on:
       - 'go.sum'
       - 'adapters/vk/**'
       - '!adapters/vk/deploy/**'
+      - '!**/*_test.go'
       - '.dockerignore'
       - '.github/workflows/publish-vk.yml'
   workflow_dispatch:
