@@ -157,8 +157,12 @@
   register: image_fetch
   async: 1800
   poll: 15
+  # The defaults are for the timeout case: an async job that did not finish in time comes
+  # back without stdout/stderr, and reading them straight raises "'dict object' has no
+  # attribute 'stderr'", which replaces Ansible's own "did not complete within 1800s" with
+  # a puzzle. Present output is unaffected.
   changed_when: >-
-    'Pull complete' in (image_fetch.stderr + image_fetch.stdout)
+    'Pull complete' in ((image_fetch.stderr | default('')) + (image_fetch.stdout | default('')))
 
 # No --pull here: this task does not go looking for a newer build, so a run made for a token
 # rotation or a limit change recreates the container on whatever the tag points to on THIS
