@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -831,6 +832,11 @@ func (p *Progress) Frame() string {
 	return assemble([]string{capLine(lines[0], budget)})
 }
 
+// turnLimitSubtype is the provider result subtype for a run the agent turn cap
+// cut short. It is the only error subtype whose cause we can state truthfully,
+// so it is the only one with dedicated wording.
+const turnLimitSubtype = "error_max_turns"
+
 // RunLimits carries the run-level caps the terminal renderer needs to explain a
 // stop that was caused by a configured limit rather than by a failure. The zero
 // value means "unknown": the renderer then omits every clause it cannot state
@@ -850,27 +856,74 @@ type RunLimits struct {
 // a short placeholder so the user is never left with an empty message. limits
 // describes the caps the run ran under; the zero value renders the generic
 // wording.
-func Final(res *agent.RunResult, _ RunLimits) string {
+func Final(res *agent.RunResult, limits RunLimits) string {
 	if res == nil {
 		return "(no result)"
 	}
 	text := strings.TrimSpace(res.Text)
 	if res.IsError {
-		if text == "" {
-			// Surface the result subtype (e.g. "error_max_turns") when present so the
-			// cause isn't fully opaque; fall back to the plain message otherwise.
-			if res.Subtype != "" {
-				text = "the run ended with an error (" + res.Subtype + ")"
-			} else {
-				text = "the run ended with an error"
-			}
-		}
-		return "⚠️ " + text
+		return "⚠️ " + errorBody(res, limits, text)
 	}
 	if text == "" {
 		return "(empty response)"
 	}
 	return text
+}
+
+// errorBody renders the terminal message body (everything after the warning sign)
+// for an error result, where text is the result's already-trimmed text. Only a
+// subtype whose cause we can state truthfully gets dedicated wording; every other
+// one keeps the generic message with the raw subtype appended, so the cause is at
+// least not fully opaque.
+func errorBody(res *agent.RunResult, limits RunLimits, text string) string {
+	switch res.Subtype {
+	case turnLimitSubtype:
+		// Keep whatever the run did produce and append the explanation after it: the
+		// generic wording used to replace that text outright.
+		if text != "" {
+			return text + "\n\n" + turnLimitExplanation(res, limits)
+		}
+		return turnLimitExplanation(res, limits)
+	default:
+		if text != "" {
+			return text
+		}
+		if res.Subtype != "" {
+			return "the run ended with an error (" + res.Subtype + ")"
+		}
+		return "the run ended with an error"
+	}
+}
+
+// turnLimitExplanation spells out a stop caused by the agent turn cap: that it is
+// a configured cutoff rather than a failure, what survived it, and which knob
+// raises it — reporting the value actually in force rather than any default, since
+// deployments override it. Every clause whose limit is unknown is dropped, so a
+// zero RunLimits still yields a truthful (if shorter) message.
+func turnLimitExplanation(res *agent.RunResult, limits RunLimits) string {
+	// strings.Builder writes never return an error, so the results are discarded.
+	var b strings.Builder
+	_, _ = b.WriteString("The run stopped because it reached its turn limit")
+	// The provider's own turn counter has unverified semantics and can exceed the
+	// cap; "501 of 250 turns" would read as a bug, so only a consistent pair shows.
+	if res.NumTurns > 0 && res.NumTurns <= limits.MaxTurns {
+		_, _ = b.WriteString(" (" + strconv.Itoa(res.NumTurns) + " of " + strconv.Itoa(limits.MaxTurns) + " turns)")
+	}
+	_, _ = b.WriteString(" — not a crash, timeout or API error.")
+	_, _ = b.WriteString(" Everything already written, committed or pushed is kept in the workspace,")
+	_, _ = b.WriteString(" and the next message starts a new run.")
+	if env := strings.TrimSpace(limits.MaxTurnsEnv); env != "" {
+		if limits.MaxTurns > 0 {
+			_, _ = b.WriteString(" To allow longer runs, raise `" + env + "` (current: " +
+				strconv.Itoa(limits.MaxTurns) + ") and restart the bot.")
+		} else {
+			_, _ = b.WriteString(" No turn cap is configured, so the provider's built-in limit applied —" +
+				" set `" + env + "` and restart the bot to raise it.")
+		}
+	}
+	// Keep the raw token: it is what an operator greps for in the logs.
+	_, _ = b.WriteString(" (" + turnLimitSubtype + ")")
+	return b.String()
 }
 
 // FinalError renders the terminal message text when a run fails without a

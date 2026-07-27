@@ -1381,10 +1381,11 @@ func TestFinalErrorResult(t *testing.T) {
 		t.Fatalf("empty error result not flagged: %q", empty)
 	}
 
-	// Diagnostic: an empty-bodied error Result surfaces the subtype so the cause
-	// isn't fully opaque.
-	withSub := Final(&agent.RunResult{Text: "", IsError: true, Subtype: "error_max_turns"}, RunLimits{})
-	if !strings.Contains(withSub, "error_max_turns") {
+	// Diagnostic: the raw subtype survives into the message so the cause isn't
+	// fully opaque, including for the subtype that has dedicated wording
+	// (TestFinalTurnLimitStop covers what that wording says).
+	withSub := Final(&agent.RunResult{Text: "", IsError: true, Subtype: turnLimitSubtype}, RunLimits{})
+	if !strings.Contains(withSub, turnLimitSubtype) {
 		t.Fatalf("empty error result should include the subtype: %q", withSub)
 	}
 	// With no subtype the plain fallback is kept (no empty parentheses).
@@ -1397,6 +1398,138 @@ func TestFinalErrorResult(t *testing.T) {
 	}
 	if got := Final(nil, RunLimits{}); got != "(no result)" {
 		t.Fatalf("nil result: %q", got)
+	}
+}
+
+// testMaxTurnsEnv stands in for the deployment's real turn-cap variable. core/chat
+// must never hardcode a provider env name, so the tests do not name one either.
+const testMaxTurnsEnv = "X_MAX_TURNS"
+
+// TestFinalTurnLimitStop covers the terminal message for a run that exhausted the
+// agent turn cap. It must state the cause, rule out a crash/timeout/API error,
+// keep the raw subtype token, and name the knob plus the value actually in force —
+// each clause appearing exactly when the limit behind it is known.
+func TestFinalTurnLimitStop(t *testing.T) {
+	tests := []struct {
+		name    string
+		res     *agent.RunResult
+		limits  RunLimits
+		want    []string
+		notWant []string
+	}{
+		{
+			name:   "cap and knob known",
+			res:    &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 7},
+			limits: RunLimits{MaxTurns: 40, MaxTurnsEnv: testMaxTurnsEnv},
+			want: []string{
+				"turn limit", "not a crash, timeout or API error",
+				"(7 of 40 turns)", "`" + testMaxTurnsEnv + "`", "current: 40", turnLimitSubtype,
+			},
+		},
+		{
+			name:    "cap known but provider has no knob",
+			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 7},
+			limits:  RunLimits{MaxTurns: 40},
+			want:    []string{"turn limit", "not a crash, timeout or API error", "(7 of 40 turns)", turnLimitSubtype},
+			notWant: []string{testMaxTurnsEnv, "current:"},
+		},
+		{
+			// No cap was passed to the provider, so its built-in limit applied: never
+			// print a cap of 0, and say the variable is unset instead.
+			name:    "knob known but no cap configured",
+			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 7},
+			limits:  RunLimits{MaxTurnsEnv: testMaxTurnsEnv},
+			want:    []string{"turn limit", "built-in", "`" + testMaxTurnsEnv + "`", turnLimitSubtype},
+			notWant: []string{"0", "current:", " of "},
+		},
+		{
+			name:    "neither cap nor knob known",
+			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 7},
+			limits:  RunLimits{},
+			want:    []string{"turn limit", "not a crash, timeout or API error", turnLimitSubtype},
+			notWant: []string{testMaxTurnsEnv, "current:", " of ", "0"},
+		},
+		{
+			// num_turns is the provider's own counter and may exceed the cap; a
+			// "501 of 250" clause would read as a bug, so it is dropped entirely.
+			name:    "reported turns exceed the cap",
+			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 501},
+			limits:  RunLimits{MaxTurns: 250, MaxTurnsEnv: testMaxTurnsEnv},
+			want:    []string{"turn limit", "current: 250", turnLimitSubtype},
+			notWant: []string{"501", " of "},
+		},
+		{
+			name:    "no turn count reported",
+			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype},
+			limits:  RunLimits{MaxTurns: 40, MaxTurnsEnv: testMaxTurnsEnv},
+			want:    []string{"turn limit", "current: 40", turnLimitSubtype},
+			notWant: []string{" of "},
+		},
+		{
+			// Text that came with the result used to be swallowed by the generic
+			// wording; it is now kept and the explanation follows it.
+			name:   "result text is kept and explained",
+			res:    &agent.RunResult{Text: "partial answer", IsError: true, Subtype: turnLimitSubtype, NumTurns: 7},
+			limits: RunLimits{MaxTurns: 40, MaxTurnsEnv: testMaxTurnsEnv},
+			want:   []string{"⚠️ partial answer\n\nThe run stopped", "current: 40", turnLimitSubtype},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Final(tt.res, tt.limits)
+			if !strings.HasPrefix(got, "⚠️") {
+				t.Fatalf("turn-limit stop not flagged: %q", got)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("Final() = %q, want it to contain %q", got, want)
+				}
+			}
+			for _, notWant := range tt.notWant {
+				if strings.Contains(got, notWant) {
+					t.Fatalf("Final() = %q, want it NOT to contain %q", got, notWant)
+				}
+			}
+			assertMarkdownSafe(t, got)
+		})
+	}
+}
+
+// TestFinalKeepsWordingOutsideTurnLimit pins the exact terminal text for every
+// result the turn-limit wording does not own, so threading RunLimits through
+// Final cannot silently reword an unrelated message. The limits must make no
+// difference to any of them.
+func TestFinalKeepsWordingOutsideTurnLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		res  *agent.RunResult
+		want string
+	}{
+		{"success text is trimmed", &agent.RunResult{Text: "  the answer is 42  "}, "the answer is 42"},
+		{"empty success", &agent.RunResult{}, "(empty response)"},
+		{"nil result", nil, "(no result)"},
+		{"error with text", &agent.RunResult{Text: "boom", IsError: true}, "⚠️ boom"},
+		{"error without subtype", &agent.RunResult{IsError: true}, "⚠️ the run ended with an error"},
+		{
+			// Another subtype's cause cannot be stated truthfully, so it keeps the
+			// generic message with the raw token appended.
+			"other error subtype",
+			&agent.RunResult{IsError: true, Subtype: "error_during_execution"},
+			"⚠️ the run ended with an error (error_during_execution)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Final(tt.res, RunLimits{}); got != tt.want {
+				t.Fatalf("Final() with zero limits = %q, want %q", got, tt.want)
+			}
+			limits := RunLimits{MaxTurns: 40, MaxTurnsEnv: testMaxTurnsEnv}
+			if got := Final(tt.res, limits); got != tt.want {
+				t.Fatalf("Final() with limits = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
