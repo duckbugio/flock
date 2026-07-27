@@ -1467,11 +1467,16 @@ func TestFinalTurnLimitStop(t *testing.T) {
 		},
 		{
 			// No cap is configured, so never print a cap of 0 and never corroborate it
-			// with a count: only the knob to set is actionable here.
-			name:    "knob known but no cap configured",
-			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 7},
-			limits:  RunLimits{MaxTurnsEnv: testMaxTurnsEnv},
-			want:    []string{"turn limit", "No turn cap is configured", "`" + testMaxTurnsEnv + "`", turnLimitSubtype},
+			// with a count: only the knob to set is actionable here. The clause also has
+			// to say WHOSE limit then bound the run, or it contradicts the opening
+			// sentence — without claiming to know what that limit is.
+			name:   "knob known but no cap configured",
+			res:    &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 7},
+			limits: RunLimits{MaxTurnsEnv: testMaxTurnsEnv},
+			want: []string{
+				"turn limit", "No turn cap is configured for this bot, so the run was bound by" +
+					" whatever default the provider applies", "`" + testMaxTurnsEnv + "`", turnLimitSubtype,
+			},
 			notWant: []string{"0", "7", "current:", " of ", "raise"},
 		},
 		{

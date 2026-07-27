@@ -962,11 +962,14 @@ func turnLimitExplanation(res *agent.RunResult, limits RunLimits) string {
 			_, _ = b.WriteString(" To allow longer runs, raise `" + env + "` (current: " +
 				strconv.Itoa(limits.MaxTurns) + ") and restart the bot.")
 		} else {
-			// Nothing is claimed about WHY a run without a configured cap still stopped:
-			// the provider's own fallback behaviour is unverified. "Raise it" would be
-			// wrong too — the only way to reach this branch is an explicitly zeroed cap.
-			_, _ = b.WriteString(" No turn cap is configured for this bot — set `" + env +
-				"` and restart the bot to add one.")
+			// Still nothing is claimed about WHAT the provider's fallback cap is — that
+			// behaviour is unverified — only that the limit which bound this run was not
+			// one this bot set. Without that connective the sentence reads as a
+			// contradiction of the opening one ("reached its turn limit" / "no turn cap
+			// is configured"). "Raise it" would be wrong too: the only way to reach this
+			// branch is an explicitly zeroed cap.
+			_, _ = b.WriteString(" No turn cap is configured for this bot, so the run was bound by" +
+				" whatever default the provider applies. Set `" + env + "` and restart the bot to control it.")
 		}
 	}
 	// Keep the raw token: it is what an operator greps for in the logs.
