@@ -63,6 +63,8 @@ var (
 	yamlKey      = regexp.MustCompile(`^\s*([\w.-]+):(?:\s|$)`)
 	// The opt-in knob a pull's own condition has to name (see defaults/main.yml).
 	gateVariable = regexp.MustCompile(`\bbot_image_pull\b`)
+	// The module whose arguments are text for the operator rather than a command to run.
+	debugModule = regexp.MustCompile(`^(?:ansible\.builtin\.)?debug$`)
 )
 
 // pullFinding is one line that fetches an image without the opt-in gate.
@@ -73,13 +75,16 @@ type pullFinding struct {
 }
 
 // TestDeployNeverPullsImplicitly asserts that no shipped compose file and no Ansible task
-// fetches an image on its own. Updating is the operator's decision — a run with
-// `-e bot_image_pull=true`, or an explicit pull on the host — never a side effect of a
-// playbook run made for something else, like a token rotation or a limit change.
+// asks for a newer image on its own. Moving a deployment onto another build is the
+// operator's decision — a run with `-e bot_image_pull=true`, or a pull on the host — rather
+// than a by-product of a run made for something else, like a token rotation or a limit
+// change. What it cannot promise is that a run never reaches the registry: compose's default
+// policy still fetches a tag this host has no image for (see defaults/main.yml).
 //
 // What it checks, exactly: a pull is accepted only when it sits in an Ansible task whose
 // OWN `when:` (a key at the task's own indentation, not one inherited from an enclosing
-// `block:`) names bot_image_pull, whose default TestBotImagePullIsOptIn pins to false.
+// `block:`) names bot_image_pull, whose default TestBotImagePullIsOptIn pins to false — or
+// in a debug task, which executes nothing and only prints a command for the operator.
 // What it does NOT check: that the condition is semantically equivalent to that knob —
 // `when: bot_image_pull | bool or true` names it and would pass. It catches an ungated
 // pull, and a pull gated on the wrong variable or on a constant; it is not an evaluator.
@@ -116,8 +121,8 @@ func findUngatedPulls(content string, ansible bool) []pullFinding {
 			if !re.MatchString(line) {
 				continue
 			}
-			if ansible && pullIsGated(lines, i) {
-				continue // the opt-in update path
+			if ansible && pullIsAllowed(lines, i) {
+				continue
 			}
 			found = append(found, pullFinding{line: i, re: re, text: strings.TrimSpace(line)})
 		}
@@ -125,35 +130,52 @@ func findUngatedPulls(content string, ansible bool) []pullFinding {
 	return found
 }
 
-// pullIsGated reports whether the Ansible task holding line i is gated on the opt-in knob.
-func pullIsGated(lines []string, i int) bool {
-	cond, ok := taskOwnCondition(lines, i)
-	return ok && gateVariable.MatchString(cond)
+// pullIsAllowed reports whether a directive on line i is one the invariant permits. Exactly
+// two shapes are:
+//   - the opt-in update path: the task DIRECTLY holding the line has its own `when:` naming
+//     bot_image_pull;
+//   - operator-facing text: the line belongs to a debug task, which executes nothing. Its
+//     msg is the role TALKING about a command — "to update by hand, run …" — and a guard
+//     that reddens CI over the sentence documenting the manual path is a guard people
+//     delete. The whole task is skipped rather than only its msg, which is the readable
+//     rule; the price is that a `vars:` on a debug task is unscanned too, so a command
+//     smuggled through a `lookup('pipe', …)` there would pass. This catches accidents, not
+//     evasion — as the guard's own docblock says, it is not an evaluator.
+func pullIsAllowed(lines []string, i int) bool {
+	keys := taskOwnKeys(lines, i)
+	for key := range keys {
+		if debugModule.MatchString(key) {
+			return true
+		}
+	}
+	return gateVariable.MatchString(keys["when"])
 }
 
-// taskOwnCondition returns the `when:` expression of the task that DIRECTLY contains line
-// i. "Directly" is what makes the answer independent of key order: the task is the nearest
-// list item at or above line i, and only keys at that item's own indentation are its own —
-// so a `when:` on an enclosing `block:` is not picked up whether it is written before or
-// after the block, and the module arguments (or a nested block's tasks) below the key line
-// cannot smuggle one in. A condition inherited from a block deliberately does not count:
-// someone reading the task cannot see that it is gated, and the gate is the invariant.
-func taskOwnCondition(lines []string, i int) (string, bool) {
+// taskOwnKeys returns the keys of the task that DIRECTLY contains line i, each mapped to
+// its value with any continuation lines appended. "Directly" is what makes the answer
+// independent of key order: the task is the nearest list item at or above line i, and only
+// keys at that item's own indentation are its own — so a `when:` on an enclosing `block:` is
+// not picked up whether it is written before or after the block, and the module arguments
+// (or a nested block's tasks) below the key line cannot smuggle one in. A condition
+// inherited from a block deliberately does not count: someone reading the task cannot see
+// that it is gated, and the gate is the invariant. Returns nil when line i is not inside a
+// list item at all, so a caller reading a key off the result gets the empty string.
+func taskOwnKeys(lines []string, i int) map[string]string {
 	start := i
-	for start >= 0 && !yamlListItem.MatchString(lines[start]) {
+	for start >= 0 && !startsMapping(lines[start]) {
 		start--
 	}
 	if start < 0 {
-		return "", false
+		return nil
 	}
 	dash := len(yamlListItem.FindStringSubmatch(lines[start])[1])
 	keyIndent, ok := taskKeyIndent(lines, start, dash)
 	if !ok {
-		return "", false
+		return nil
 	}
 
-	var cond []string
-	inWhen := false
+	keys := map[string]string{}
+	current := ""
 	for j := start; j < len(lines); j++ {
 		line := stripComment(lines[j])
 		if j == start {
@@ -171,30 +193,43 @@ func taskOwnCondition(lines []string, i int) (string, bool) {
 			break // back out to the enclosing mapping: this task ended
 		}
 		if indent > keyIndent {
-			if inWhen {
-				cond = append(cond, strings.TrimSpace(line)) // a block scalar or a list value
-			}
-			continue // module arguments, or a nested block's tasks
+			// A block scalar, a list value, module arguments, or a nested block's tasks.
+			appendKeyValue(keys, current, line)
+			continue
 		}
 		key := yamlKey.FindStringSubmatch(line)
 		if key == nil {
-			if inWhen {
-				cond = append(cond, strings.TrimSpace(line)) // a list value at key indentation
-			}
+			appendKeyValue(keys, current, line) // a list value at key indentation
 			continue
 		}
-		if key[1] == "when" {
-			inWhen = true
-			_, value, _ := strings.Cut(line, ":")
-			cond = append(cond, strings.TrimSpace(value))
-			continue
-		}
-		inWhen = false
+		current = key[1]
+		_, value, _ := strings.Cut(line, ":")
+		appendKeyValue(keys, current, value)
 	}
-	if len(cond) == 0 {
-		return "", false
+	return keys
+}
+
+// startsMapping reports whether a line opens a list item that is a MAPPING — "- key:", or a
+// bare "-" whose keys follow below. A task is always one; a list item holding a scalar
+// ("- to update by hand: run …", an entry of a debug msg list) is a VALUE, and the task it
+// belongs to is further up. Walking past those is what lets a directive named inside a msg
+// list be attributed to the debug task printing it.
+func startsMapping(line string) bool {
+	m := yamlListItem.FindStringSubmatch(line)
+	if m == nil {
+		return false
 	}
-	return strings.Join(cond, " "), true
+	rest := strings.TrimLeft(stripComment(line)[len(m[1])+1:], " \t")
+	return rest == "" || yamlKey.MatchString(rest)
+}
+
+// appendKeyValue adds a line to the value collected for key, ignoring text that belongs to
+// no key yet.
+func appendKeyValue(keys map[string]string, key, value string) {
+	if key == "" {
+		return
+	}
+	keys[key] = strings.TrimSpace(keys[key] + " " + strings.TrimSpace(value))
 }
 
 // taskKeyIndent returns the column at which the keys of the list item on line start begin.
@@ -214,9 +249,20 @@ func taskKeyIndent(lines []string, start, dash int) (int, bool) {
 	return 0, false
 }
 
+// quoteOpener is where a quoted scalar can START: the beginning of the line, or after
+// whitespace or one of the flow punctuators. Anywhere else — inside a word — a quote is the
+// literal character YAML reads it as, which is what makes "the operator's call" prose and
+// not an unterminated scalar.
+const quoteOpener = " \t[{,:"
+
 // stripComment removes a YAML end-of-line comment: a "#" that starts the line or follows
-// whitespace, and is not inside a quoted scalar. Quote tracking keeps a "#" that is part
-// of a value (e.g. a colour or a fragment URL in quotes) from truncating a real directive.
+// whitespace, and is not inside a quoted scalar. Quote tracking keeps a "#" that is part of
+// a value (e.g. a colour or a fragment URL in quotes) from truncating a real directive, and
+// the opener rule keeps an apostrophe in a word from opening a scalar that never closes —
+// which would leave the comment on the line and fail the build over a sentence saying the
+// directive is NOT used. Both mistakes are worth avoiding, but not symmetrically: cutting
+// too early hides a real directive, so the rule stays "a quote only quotes where a scalar
+// can begin" rather than "stop tracking quotes when one is left open".
 func stripComment(line string) string {
 	var quote byte
 	for i := 0; i < len(line); i++ {
@@ -226,7 +272,7 @@ func stripComment(line string) string {
 			if c == quote {
 				quote = 0
 			}
-		case c == '\'' || c == '"':
+		case (c == '\'' || c == '"') && (i == 0 || strings.IndexByte(quoteOpener, line[i-1]) >= 0):
 			quote = c
 		case c == '#' && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t'):
 			return line[:i]
@@ -397,6 +443,34 @@ func TestPullGateAcceptsOnlyTheOptInTask(t *testing.T) {
 			accepted: false,
 		},
 		{
+			name: "a debug task telling the operator how to update by hand",
+			doc: `---
+- name: Report status
+  ansible.builtin.debug:
+    msg:
+      - "to update by hand: docker compose pull && docker compose up -d"
+`,
+			accepted: true, // debug runs nothing; this is the role TALKING about the command
+		},
+		{
+			name: "the short module name is a debug task too",
+			doc: `---
+- name: Report status
+  debug:
+    msg: "update by hand with: docker compose pull"
+`,
+			accepted: true,
+		},
+		{
+			name: "a command task is not excused by quoting the same instruction",
+			doc: `---
+- name: Report status
+  ansible.builtin.command:
+    cmd: docker compose pull && docker compose up -d
+`,
+			accepted: false,
+		},
+		{
 			name: "the next task's gate does not reach back",
 			doc: `---
 - name: Fetch the images
@@ -432,6 +506,10 @@ func TestStripCommentKeepsDirectivesVisible(t *testing.T) {
 	hidden := []string{
 		`# No --pull always here: updating is opt-in`,
 		`    # cmd: docker compose pull`,
+		// An apostrophe inside a word is the literal character YAML reads it as, not the
+		// start of a quoted scalar — treating it as one leaves the quote open to the end of
+		// the line, so the comment is never cut off and the guard fires on prose.
+		`    msg: Updating is the operator's call   # not a docker compose pull`,
 	}
 	for _, line := range hidden {
 		if matchesPullDirective(stripComment(line)) {
@@ -443,6 +521,10 @@ func TestStripCommentKeepsDirectivesVisible(t *testing.T) {
 		`    cmd: docker compose pull   # opt-in update`,
 		`    pull_policy: always  # keep us current`,
 		`    cmd: echo "nothing # here" && docker compose pull`,
+		// Cutting too early is the worse failure: it hides a real directive. A quoted "#"
+		// still has to be skipped on a line that also contains an apostrophe, so the fix
+		// for the case above cannot be "give up and cut at the first # after a space".
+		`    cmd: echo "it's # here" && docker compose pull`,
 	}
 	for _, line := range visible {
 		if !matchesPullDirective(stripComment(line)) {
