@@ -123,7 +123,7 @@ enable_pr_review: false
 # Webhook PR-monitoring (enabled when webhook_domain is set in group_vars/all/vars.yml)
 webhook_domain: ""
 notification_chat_ids: ""
-# Floats within major 2; like dind it moves only on an -e bot_image_pull=true run.
+# Floats within major 2; like dind, the role moves it only on an -e bot_image_pull=true run.
 caddy_image: "caddy:2-alpine"
 
 # PR poller cadence (seconds). The bot polls Gitea for new PR comments — the reliable
@@ -133,8 +133,8 @@ gitea_poll_interval: 90
 
 # Docker-in-Docker sidecar so the team can run dockerized linters/tests. ON by
 # default; set to false on hosts that cannot run a privileged container.
-# The tag floats within major 27, and this container is privileged: it takes upstream
-# fixes only when a run with -e bot_image_pull=true fetches the stack.
+# The tag floats within major 27, and this container is privileged: the role moves it
+# only when a run with -e bot_image_pull=true fetches the stack.
 enable_dind: true
 dind_image: "docker:27-dind"
 
