@@ -15,17 +15,24 @@ container_prefix: claude-tg
 legacy_volume_project: ""
 
 # Prebuilt image — pulled, not built (agents/CLAUDE.md are baked in by CI).
-# The tag is resolved against the registry ONCE, on the first install; afterwards the
-# host keeps the image it already has. So :latest does NOT track main by itself — an
-# ordinary playbook run (token rotation, a limit change) never moves the version.
+# The tag is resolved against the registry ONCE, on the first install. Afterwards an
+# ordinary playbook run (token rotation, a limit change) does NOT contact the registry, so
+# it cannot pick up a new build: it (re)starts the container on whatever this tag points to
+# LOCALLY on that host, and :latest therefore does not track main by itself. (If the local
+# tag has already been moved — by the opt-in fetch below whose (re)start did not complete,
+# or by a pull run by hand on the host — the next ordinary run does land on that image.
+# What a run never does is go looking for a newer one.)
 # Pin a tag (e.g. :v1) to make the version explicit in the inventory; to move a
 # deployment forward, re-run with -e bot_image_pull=true (see below).
 bot_image: "ghcr.io/duckbugio/flock-telegram:latest"
 
-# Update switch. false (default) = the run reuses the image the host already has;
-# true = fetch what {{ bot_image }} currently points to first, so the (re)start below
-# lands on the new build. Updating is therefore a deliberate operator action:
+# Update switch. false (default) = the run stays off the registry and the stack (re)starts
+# on the images this host already has; true = fetch what the tags currently point to first,
+# so the (re)start below lands on them. Updating is therefore a deliberate operator action:
 #   ansible-playbook -i inventories/<name>/inventory.ini playbook.yml -e bot_image_pull=true
+# The fetch covers the sidecars as well, not only {{ bot_image }}: their tags float within a
+# major too and dind runs privileged, so this switch is their only update path — a
+# privileged container has to have one.
 # It is a variable rather than an Ansible tag on purpose — a tag would be a second,
 # partly overlapping switch, and selecting only the pull task with --tags would skip the
 # (re)start that actually puts the new image into service.
@@ -116,6 +123,7 @@ enable_pr_review: false
 # Webhook PR-monitoring (enabled when webhook_domain is set in group_vars/all/vars.yml)
 webhook_domain: ""
 notification_chat_ids: ""
+# Floats within major 2; like dind it moves only on an -e bot_image_pull=true run.
 caddy_image: "caddy:2-alpine"
 
 # PR poller cadence (seconds). The bot polls Gitea for new PR comments — the reliable
@@ -125,6 +133,8 @@ gitea_poll_interval: 90
 
 # Docker-in-Docker sidecar so the team can run dockerized linters/tests. ON by
 # default; set to false on hosts that cannot run a privileged container.
+# The tag floats within major 27, and this container is privileged: it takes upstream
+# fixes only when a run with -e bot_image_pull=true fetches the stack.
 enable_dind: true
 dind_image: "docker:27-dind"
 
