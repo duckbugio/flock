@@ -1363,6 +1363,32 @@ func assertMarkdownSafe(t *testing.T, line string) {
 	}
 }
 
+// assertCodeSpanSafe checks a message that legitimately carries an inline-code
+// span: every span opens and closes (an even backtick count) and none is broken
+// by a newline, which also ends a code span and would leave the backticks
+// visible. It deliberately asserts LESS than assertMarkdownSafe: a stage line
+// strips every markdown metacharacter from its labels, whereas the turn-limit
+// message interpolates an operator-supplied env-var name that KEEPS "_"
+// (sanitizeEnvName strips only the backtick, because a knob name with its
+// underscores removed names no variable). Inside a code span "_" and "*" are
+// inert, so a realistic name like MAX_TURNS leaves an odd "_" count on a message
+// that is perfectly safe — demanding balance here would fail a correct message
+// and pressure the next reader into stripping "_".
+func assertCodeSpanSafe(t *testing.T, msg string) {
+	t.Helper()
+	parts := strings.Split(msg, "`")
+	if len(parts)%2 == 0 {
+		t.Fatalf("unbalanced backticks in message (%d occurrences): %q", len(parts)-1, msg)
+	}
+	// Odd indices are the contents of a code span: parts[1] sits between the
+	// first and second backtick, parts[3] between the third and fourth, and so on.
+	for i := 1; i < len(parts); i += 2 {
+		if strings.ContainsAny(parts[i], "\n\r") {
+			t.Fatalf("newline inside a code span (%q) breaks it: %q", parts[i], msg)
+		}
+	}
+}
+
 func TestFinalSuccess(t *testing.T) {
 	out := Final(&agent.RunResult{Text: "  the answer is 42  ", IsError: false}, RunLimits{})
 	if out != "the answer is 42" {
@@ -1432,6 +1458,11 @@ func TestFinalTurnLimitStop(t *testing.T) {
 		limits  RunLimits
 		want    []string
 		notWant []string
+		// oddUnderscores marks the case that exists to prove this message is checked
+		// as a code span rather than for emphasis balance: its rendered text must
+		// carry an ODD number of "_", which assertMarkdownSafe (right for a stage
+		// line) would reject even though every "_" here is inert.
+		oddUnderscores bool
 	}{
 		{
 			// The count corroborates the cap exactly, so it is safe to show.
@@ -1511,6 +1542,18 @@ func TestFinalTurnLimitStop(t *testing.T) {
 			notWant: []string{"X`", "\n"},
 		},
 		{
+			// The everyday case the code span exists for: "_" is legal in an env var
+			// name and sanitizeEnvName keeps it (a name with its underscores removed
+			// names no variable), so a realistic knob leaves an odd "_" count in the
+			// message. That is safe — the underscores sit inside a code span, where
+			// they are inert — and the assertion below must not demand otherwise.
+			name:           "knob name with an odd underscore count stays safe",
+			res:            &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 40},
+			limits:         RunLimits{MaxTurns: 40, MaxTurnsEnv: "MAX_TURNS"},
+			want:           []string{"raise `MAX_TURNS` (current: 40)", turnLimitSubtype},
+			oddUnderscores: true,
+		},
+		{
 			// A knob name that is nothing BUT metacharacters names no variable, so the
 			// clause is dropped rather than rendered as empty backticks.
 			name:    "knob name left empty by sanitizing drops the clause",
@@ -1562,7 +1605,13 @@ func TestFinalTurnLimitStop(t *testing.T) {
 					t.Fatalf("Final() = %q, want it NOT to contain %q", got, notWant)
 				}
 			}
-			assertMarkdownSafe(t, got)
+			// This message is NOT a stage line: it carries an inline-code span whose
+			// content keeps its underscores on purpose, so only the code-span
+			// invariant applies here (see assertCodeSpanSafe).
+			assertCodeSpanSafe(t, got)
+			if tt.oddUnderscores && strings.Count(got, "_")%2 == 0 {
+				t.Fatalf("Final() = %q, want an ODD underscore count so this case covers what assertMarkdownSafe rejects", got)
+			}
 		})
 	}
 }
