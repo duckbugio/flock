@@ -678,13 +678,18 @@ func TestProgressEditsRespectMinInterval(t *testing.T) {
 func TestRunExplainsTurnLimitWithRuntimeCap(t *testing.T) {
 	const (
 		maxTurns = 7
+		// Deliberately different from maxTurns, so the assertion on "7" below can
+		// only be satisfied by the CAP the Service was built with and never by the
+		// result's own counter. A count that does not corroborate the cap is omitted
+		// from the message entirely, which is exactly what makes "7" unambiguous.
+		numTurns = 3
 		envName  = "X_MAX_TURNS"
 	)
 	fc := newFakeChat()
 	fr := &fakeRunner{events: []agent.Event{
 		{Type: agent.SystemInit, SessionID: "s1"},
 		{Type: agent.Result, Result: &agent.RunResult{
-			IsError: true, Subtype: "error_max_turns", NumTurns: maxTurns, SessionID: "s1",
+			IsError: true, Subtype: "error_max_turns", NumTurns: numTurns, SessionID: "s1",
 		}},
 	}}
 	d := dispatch.New(4)
@@ -714,11 +719,20 @@ func TestRunExplainsTurnLimitWithRuntimeCap(t *testing.T) {
 		}
 	}
 	// Neither the compiled-in default nor the deploy role's value may leak in: the
-	// message must report the cap this Service was actually built with.
-	for _, notWant := range []string{"40", "250"} {
+	// message must report the cap this Service was actually built with. The result's
+	// own turn count must not appear either — it does not corroborate the cap.
+	for _, notWant := range []string{"40", "250", strconv.Itoa(numTurns)} {
 		if strings.Contains(text, notWant) {
 			t.Fatalf("delivered turn-limit message = %q, want it NOT to contain %q", text, notWant)
 		}
+	}
+
+	// The separate completion notice must not contradict the answer it follows: the
+	// answer says "not a crash, timeout or API error", so the notice cannot read
+	// "Failed".
+	waitUntil(t, func() bool { return fc.noticeCount("⏹ Turn limit reached after") == 1 })
+	if n := fc.noticeCount("⚠️ Failed after"); n != 0 {
+		t.Fatalf("turn-limit run sent %d failure notices, want 0", n)
 	}
 }
 
@@ -876,6 +890,9 @@ func TestCompletionNoticeOnStop(t *testing.T) {
 // TestCompletionNoticeStatusWords pins the status word + total for every terminal
 // case, including the deploy-shutdown "resuming" case that must read "paused …
 // will resume" (not "stopped"), since such a run keeps its marker and auto-resumes.
+// A turn-limit stop is a configured cutoff, not a failure — the answer bubble above
+// the notice says so, so the notice must not contradict it — while EVERY other
+// error subtype keeps the "failed" wording byte-identically.
 func TestCompletionNoticeStatusWords(t *testing.T) {
 	const total = 4*time.Minute + 12*time.Second
 	tests := []struct {
@@ -889,6 +906,28 @@ func TestCompletionNoticeStatusWords(t *testing.T) {
 		{"clean result", &agent.RunResult{}, nil, nil, false, "✅ Done in 4m 12s"},
 		{"run error", nil, errors.New("boom"), nil, false, "⚠️ Failed after 4m 12s"},
 		{"is_error result", &agent.RunResult{IsError: true}, nil, nil, false, "⚠️ Failed after 4m 12s"},
+		{
+			"is_error result with another subtype",
+			&agent.RunResult{IsError: true, Subtype: "error_during_execution"},
+			nil, nil, false, "⚠️ Failed after 4m 12s",
+		},
+		{
+			"turn limit result",
+			&agent.RunResult{IsError: true, Subtype: turnLimitSubtype},
+			nil, nil, false, "⏹ Turn limit reached after 4m 12s",
+		},
+		{
+			// The subtype alone never softens the notice: without is_error the run
+			// completed, and a RunError means finish rendered the failure text instead.
+			"turn limit subtype on a clean result",
+			&agent.RunResult{Subtype: turnLimitSubtype},
+			nil, nil, false, "✅ Done in 4m 12s",
+		},
+		{
+			"turn limit result alongside a run error",
+			&agent.RunResult{IsError: true, Subtype: turnLimitSubtype},
+			errors.New("boom"), nil, false, "⚠️ Failed after 4m 12s",
+		},
 		{"user stop", nil, nil, context.Canceled, false, "⏹ Stopped after 4m 12s"},
 		{"deploy shutdown resumes", nil, nil, context.Canceled, true, "⏳ Paused after 4m 12s — will resume after restart"},
 	}

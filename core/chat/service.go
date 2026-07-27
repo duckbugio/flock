@@ -943,7 +943,10 @@ func (s *Service) finish(
 // mirrors the terminal cases finish handles: a run cancelled by a deploy shutdown
 // (resuming) keeps its marker and auto-resumes, so it reads "paused … will resume";
 // a user Stop / per-run timeout (ctxErr set, no Result or error) reads "stopped"; a
-// RunError or an is_error Result reads "failed"; and a clean Result reads "done".
+// run the agent turn cap cut short reads "turn limit reached", because it is a
+// configured cutoff rather than a failure and the answer bubble right above says
+// so — "failed" here would contradict it; any OTHER RunError or is_error Result
+// reads "failed"; and a clean Result reads "done".
 func completionNotice(res *agent.RunResult, runErr, ctxErr error, total time.Duration, resuming bool) string {
 	elapsed := formatElapsed(int64(total / time.Second))
 	switch {
@@ -951,6 +954,11 @@ func completionNotice(res *agent.RunResult, runErr, ctxErr error, total time.Dur
 		return "⏳ Paused after " + elapsed + " — will resume after restart"
 	case ctxErr != nil && res == nil && runErr == nil:
 		return "⏹ Stopped after " + elapsed
+	// runErr must be nil to claim a clean turn-limit stop: with one set, finish
+	// renders FinalError instead of the turn-limit explanation, so the notice keeps
+	// the failure wording that matches the delivered answer.
+	case runErr == nil && res != nil && res.IsError && res.Subtype == turnLimitSubtype:
+		return "⏹ Turn limit reached after " + elapsed
 	case runErr != nil || (res != nil && res.IsError):
 		return "⚠️ Failed after " + elapsed
 	default:
