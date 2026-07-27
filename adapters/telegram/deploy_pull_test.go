@@ -8,7 +8,9 @@ package telegram_test
 // host it, and `task tests` is the only gate CI runs — a Go test is what gets executed.
 
 import (
+	"io/fs"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -23,7 +25,11 @@ type deployManifest struct {
 	ansible bool
 }
 
-// Every file that decides whether a deploy may replace the running image.
+// Every shipped file that can NAME a pull directive. It is not the whole surface that
+// decides whether a deploy may replace the running image: the files that can flip the
+// opt-in knob those directives are gated on are a moving set (group_vars, host_vars, a
+// second inventory, a play's own `vars:`), so TestBotImagePullIsOptIn walks for them
+// instead of listing them here.
 var deployManifests = []deployManifest{
 	{path: "docker-compose.yml"},
 	{path: "deploy/roles/claude_tg_bot/templates/docker-compose.yml.j2"},
@@ -445,25 +451,109 @@ func TestStripCommentKeepsDirectivesVisible(t *testing.T) {
 	}
 }
 
-// TestBotImagePullIsOptIn asserts the knob the pull task is gated on defaults to false.
-// A default of true would make that `when:` always fire, which is an unconditional pull
-// wearing a gate — exactly the behaviour the guard above exists to keep out. The guard
+const (
+	// deployRoot is the shipped deploy tree: the role plus the example inventory.
+	deployRoot = "deploy"
+	// exampleInventory is the only inventory this repo ships; .gitignore keeps every other
+	// inventories/<name>/ out, and an operator's local copy is not this test's business.
+	exampleInventory = "example"
+	// botImagePullDefault is where the knob has to be defined, so the gate has a value to
+	// read when no inventory mentions it.
+	botImagePullDefault = "deploy/roles/claude_tg_bot/defaults/main.yml"
+)
+
+// botImagePullSetting matches a shipped ASSIGNMENT of the opt-in knob, in either syntax
+// Ansible reads one from: a YAML mapping key (role defaults, group_vars, host_vars, a
+// play's `vars:`) or an INI entry in an inventory's [group:vars] section. Anchoring it at
+// the start of the line is what keeps `-e bot_image_pull=true` inside a documented command
+// line, and `when: bot_image_pull | bool` (whose key is `when`), from reading as one.
+var botImagePullSetting = regexp.MustCompile(`^\s*bot_image_pull\s*[:=]\s*(\S+)`)
+
+// varSetting is one assignment of a variable in a shipped file.
+type varSetting struct {
+	line  int // 0-based index into the document's lines
+	value string
+}
+
+// TestBotImagePullIsOptIn asserts that nothing this repo ships turns the update switch on.
+// A true value would make the pull task's `when:` always fire, which is an unconditional
+// pull wearing a gate — exactly the behaviour the guard above exists to keep out. The guard
 // checks that the gate NAMES this knob; this test is what makes naming it mean "off".
+//
+// It checks every shipped file, not just the role default, because a role default is the
+// weakest source Ansible has: the example inventory's group_vars — the directory the README
+// tells operators to copy — outranks it, so `bot_image_pull: true` there would put the
+// implicit update back into every derived deployment while the default still reads false.
 func TestBotImagePullIsOptIn(t *testing.T) {
-	const path = "deploy/roles/claude_tg_bot/defaults/main.yml"
-	raw, err := os.ReadFile(path)
+	sources, err := shippedVarSources(deployRoot)
 	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+		t.Fatalf("walk %s: %v", deployRoot, err)
 	}
-	m := regexp.MustCompile(`(?m)^bot_image_pull:\s*(\S+)`).FindStringSubmatch(string(raw))
-	if m == nil {
-		t.Fatalf("%s: no bot_image_pull default — the pull task's `when:` gate must have one", path)
+	defaulted := false
+	for _, path := range sources {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			// Keep going: one unreadable file must not hide a setting in the others.
+			t.Errorf("read %s: %v", path, err)
+			continue
+		}
+		for _, set := range botImagePullSettings(string(raw)) {
+			if filepath.ToSlash(path) == botImagePullDefault {
+				defaulted = true
+			}
+			if isFalseValue(set.value) {
+				continue
+			}
+			t.Errorf("%s:%d sets bot_image_pull to %q, want a false value — updating must stay "+
+				"opt-in, otherwise every playbook run fetches images again", path, set.line+1, set.value)
+		}
 	}
-	// Every spelling Ansible reads as false: the YAML 1.1 booleans in any case, plus 0,
-	// which `| bool` (how the task consumes it) also treats as false.
+	if !defaulted {
+		t.Errorf("%s: no bot_image_pull default — the pull task's `when:` gate must have one",
+			botImagePullDefault)
+	}
+}
+
+// shippedVarSources returns every tracked file under root that Ansible could read a
+// variable from. It walks instead of listing: group_vars, host_vars, a second inventory and
+// a play's own `vars:` all outrank a role default, so a fixed list would be one forgotten
+// file away from letting the switch back on. Inventories other than the example are skipped
+// — .gitignore keeps them out of the repo, so they are the operator's, not ours.
+func shippedVarSources(root string) ([]string, error) {
+	inventories := filepath.Join(root, "inventories")
+	var files []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			files = append(files, path)
+			return nil
+		}
+		if filepath.Dir(path) == inventories && d.Name() != exampleInventory {
+			return fs.SkipDir
+		}
+		return nil
+	})
+	return files, err
+}
+
+// botImagePullSettings returns every assignment of the opt-in knob in a shipped file.
+// Comments come off first, so the update command quoted in the role's own documentation is
+// not read as an assignment.
+func botImagePullSettings(content string) []varSetting {
+	var found []varSetting
+	for i, raw := range strings.Split(content, "\n") {
+		if m := botImagePullSetting.FindStringSubmatch(stripComment(raw)); m != nil {
+			found = append(found, varSetting{line: i, value: m[1]})
+		}
+	}
+	return found
+}
+
+// isFalseValue reports whether Ansible reads the value as false: the YAML 1.1 booleans in
+// any case, plus 0, which `| bool` (how the task consumes the knob) also treats as false.
+func isFalseValue(value string) bool {
 	falsey := map[string]bool{"false": true, "no": true, "n": true, "off": true, "0": true}
-	if got := strings.Trim(m[1], `"'`); !falsey[strings.ToLower(got)] {
-		t.Errorf("%s: bot_image_pull defaults to %q, want a false value — updating must stay "+
-			"opt-in, otherwise every playbook run pulls again", path, got)
-	}
+	return falsey[strings.ToLower(strings.Trim(value, `"'`))]
 }
