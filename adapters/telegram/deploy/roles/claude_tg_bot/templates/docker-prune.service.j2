@@ -3,7 +3,9 @@
 # pulled it, so a freshly pulled image can already be older than {{ docker_prune_keep_hours }}h
 # and is reclaimed as soon as nothing runs it: after an update the image you rolled off
 # is normally gone by the next run, and rolling back means pulling that tag again.
-# Images in use by a container are never touched, so the running version always survives.
+# The prune skips any image a container still references, so the version in service stays;
+# once nothing references it — e.g. after a `docker compose down` — it is reclaimed, and the
+# next ordinary playbook run fetches that tag again to bring the stack up.
 [Unit]
 Description=Prune unused Docker images and build cache
 

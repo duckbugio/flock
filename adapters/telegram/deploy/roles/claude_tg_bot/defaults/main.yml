@@ -15,24 +15,29 @@ container_prefix: claude-tg
 legacy_volume_project: ""
 
 # Prebuilt image — pulled, not built (agents/CLAUDE.md are baked in by CI).
-# The tag is resolved against the registry ONCE, on the first install. Afterwards an
-# ordinary playbook run (token rotation, a limit change) does NOT contact the registry, so
-# it cannot pick up a new build: it (re)starts the container on whatever this tag points to
-# LOCALLY on that host, and :latest therefore does not track main by itself. (If the local
-# tag has already been moved — by the opt-in fetch below whose (re)start did not complete,
-# or by a pull run by hand on the host — the next ordinary run does land on that image.
-# What a run never does is go looking for a newer one.)
+# The tag is resolved against the registry on the first install. Afterwards an ordinary
+# playbook run (token rotation, a limit change) does not go looking for a newer build: it
+# (re)starts the container on whatever this tag points to LOCALLY on that host, so :latest
+# does not track main by itself. Three things still move a deployment onto another image:
+#   - the opt-in fetch below (-e bot_image_pull=true) — the intended update path;
+#   - the local tag having been moved out of band, by a pull run by hand on the host or by
+#     an opt-in fetch whose (re)start did not complete: the next ordinary run lands on it;
+#   - the host no longer having an image for the tag — the first install, or a `compose down`
+#     that left it unreferenced until the weekly prune reclaimed it. Compose fetches what is
+#     missing in order to start the stack, which resolves the tag against the registry again.
 # Pin a tag (e.g. :v1) to make the version explicit in the inventory; to move a
 # deployment forward, re-run with -e bot_image_pull=true (see below).
 bot_image: "ghcr.io/duckbugio/flock-telegram:latest"
 
-# Update switch. false (default) = the run stays off the registry and the stack (re)starts
-# on the images this host already has; true = fetch what the tags currently point to first,
-# so the (re)start below lands on them. Updating is therefore a deliberate operator action:
+# Update switch. false (default) = the run does not go looking for a newer image; the stack
+# (re)starts on what this host already has (compose still fetches an image that is missing
+# locally — the first install, or one the prune reclaimed). true = fetch what the tags
+# currently point to first, so the (re)start below lands on them. Updating is therefore a
+# deliberate operator action:
 #   ansible-playbook -i inventories/<name>/inventory.ini playbook.yml -e bot_image_pull=true
 # The fetch covers the sidecars as well, not only {{ bot_image }}: their tags float within a
-# major too and dind runs privileged, so this switch is their only update path — a
-# privileged container has to have one.
+# major too and dind runs privileged, so within the role this switch is their only update
+# path — a privileged container has to have one.
 # It is a variable rather than an Ansible tag on purpose — a tag would be a second,
 # partly overlapping switch, and selecting only the pull task with --tags would skip the
 # (re)start that actually puts the new image into service.
@@ -123,7 +128,8 @@ enable_pr_review: false
 # Webhook PR-monitoring (enabled when webhook_domain is set in group_vars/all/vars.yml)
 webhook_domain: ""
 notification_chat_ids: ""
-# Floats within major 2; like dind, the role moves it only on an -e bot_image_pull=true run.
+# Floats within major 2; like dind, the role moves it on an -e bot_image_pull=true run — or,
+# as with bot_image above, when the host has no copy of the tag left to start from.
 caddy_image: "caddy:2-alpine"
 
 # PR poller cadence (seconds). The bot polls Gitea for new PR comments — the reliable
@@ -133,8 +139,9 @@ gitea_poll_interval: 90
 
 # Docker-in-Docker sidecar so the team can run dockerized linters/tests. ON by
 # default; set to false on hosts that cannot run a privileged container.
-# The tag floats within major 27, and this container is privileged: the role moves it
-# only when a run with -e bot_image_pull=true fetches the stack.
+# The tag floats within major 27, and this container is privileged: the role moves it when a
+# run with -e bot_image_pull=true fetches the stack, or when the host has no copy of the tag
+# left to start from (see bot_image above).
 enable_dind: true
 dind_image: "docker:27-dind"
 
@@ -142,8 +149,10 @@ dind_image: "docker:27-dind"
 # filters on is the image's CREATION time (when CI built it), not when this host pulled it,
 # so a just-pulled image is usually already past docker_prune_keep_hours and is reclaimed
 # once nothing runs it — after an update, rolling back to the previous image normally means
-# pulling that tag again. Images in use by a running container are never touched, so the
-# version in service always survives. Set enable_docker_prune: false to skip.
+# pulling that tag again. The prune skips any image a container still references, so the
+# version in service stays; an image nothing references — e.g. after a `compose down` — is
+# reclaimed, and the next ordinary run fetches that tag again to bring the stack up.
+# Set enable_docker_prune: false to skip.
 enable_docker_prune: true
 docker_prune_schedule: "weekly"   # systemd OnCalendar (weekly | daily | "Sun *-*-* 04:00:00")
 docker_prune_keep_hours: 168      # keep anything newer than this many hours (168 = 7 days)

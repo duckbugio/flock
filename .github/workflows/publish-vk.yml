@@ -55,8 +55,9 @@ jobs:
           #   :0.1.<run_number>    — ordered, human-readable auto-version for every main
           #                          build (no manual step); the number increments per
           #                          publish run so images sort and read sanely
-          #   :latest              — rolling, default branch only; a deploy resolves it
-          #                          once at install and moves only after an explicit pull
+          #   :latest              — rolling, default branch only; an Ansible deploy resolves
+          #                          it at install and follows it again on an operator's pull,
+          #                          or when the host has no copy of the tag left to start from
           #   :vX.Y.Z              — milestone release: push a git tag vX.Y.Z and it lands
           #   :sha-<commit>        — exact, immutable pin for traceability/rollback
           # metadata-action stamps the highest-priority tag into

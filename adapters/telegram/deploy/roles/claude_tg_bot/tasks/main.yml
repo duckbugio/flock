@@ -156,12 +156,14 @@
   poll: 15
   changed_when: false
 
-# No --pull here: this task never contacts the registry, so a run made for a token rotation
-# or a limit change cannot pick up a new build — it recreates the container on whatever the
-# tag points to on THIS host. Moving to a new image is the explicit fetch above (or the
-# operator's own pull). --force-recreate stays: with the local tag held still it only
-# rebuilds the container (so a changed .env is picked up even on compose versions older
-# than v2.14, which don't detect that themselves), never the image.
+# No --pull here: this task does not go looking for a newer build, so a run made for a token
+# rotation or a limit change recreates the container on whatever the tag points to on THIS
+# host. Compose's default policy does fetch an image the host has none of (first install, or
+# one the weekly prune reclaimed after a `compose down`), which resolves the tag again; short
+# of that, moving to a new image is the explicit fetch above or the operator's own pull.
+# --force-recreate stays: with the local image unchanged it recreates the container only (so
+# a changed .env is picked up even on compose versions older than v2.14, which don't detect
+# that themselves), not the image.
 - name: (Re)start the bot on its current image
   ansible.builtin.command:
     cmd: docker compose up -d --force-recreate
