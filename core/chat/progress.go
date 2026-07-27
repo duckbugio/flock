@@ -831,10 +831,26 @@ func (p *Progress) Frame() string {
 	return assemble([]string{capLine(lines[0], budget)})
 }
 
+// RunLimits carries the run-level caps the terminal renderer needs to explain a
+// stop that was caused by a configured limit rather than by a failure. The zero
+// value means "unknown": the renderer then omits every clause it cannot state
+// truthfully, so callers that have no limits to report lose nothing.
+type RunLimits struct {
+	// MaxTurns is the agent turn cap actually in force for the run. Non-positive
+	// means no cap was passed to the provider, so its built-in limit applied.
+	MaxTurns int
+	// MaxTurnsEnv names the environment variable that configures MaxTurns, so a
+	// message can point at the knob without core/chat knowing any env name.
+	// Empty means the active provider has no such knob and none is mentioned.
+	MaxTurnsEnv string
+}
+
 // Final renders the terminal message text for a successful run result. A
 // result that carries no text (e.g. an error subtype with an empty body) yields
-// a short placeholder so the user is never left with an empty message.
-func Final(res *agent.RunResult) string {
+// a short placeholder so the user is never left with an empty message. limits
+// describes the caps the run ran under; the zero value renders the generic
+// wording.
+func Final(res *agent.RunResult, _ RunLimits) string {
 	if res == nil {
 		return "(no result)"
 	}

@@ -1364,26 +1364,26 @@ func assertMarkdownSafe(t *testing.T, line string) {
 }
 
 func TestFinalSuccess(t *testing.T) {
-	out := Final(&agent.RunResult{Text: "  the answer is 42  ", IsError: false})
+	out := Final(&agent.RunResult{Text: "  the answer is 42  ", IsError: false}, RunLimits{})
 	if out != "the answer is 42" {
 		t.Fatalf("got %q", out)
 	}
 }
 
 func TestFinalErrorResult(t *testing.T) {
-	out := Final(&agent.RunResult{Text: "max turns exceeded", IsError: true})
+	out := Final(&agent.RunResult{Text: "max turns exceeded", IsError: true}, RunLimits{})
 	if !strings.HasPrefix(out, "⚠️") || !strings.Contains(out, "max turns exceeded") {
 		t.Fatalf("error result not flagged: %q", out)
 	}
 
-	empty := Final(&agent.RunResult{Text: "", IsError: true})
+	empty := Final(&agent.RunResult{Text: "", IsError: true}, RunLimits{})
 	if !strings.HasPrefix(empty, "⚠️") {
 		t.Fatalf("empty error result not flagged: %q", empty)
 	}
 
 	// Diagnostic: an empty-bodied error Result surfaces the subtype so the cause
 	// isn't fully opaque.
-	withSub := Final(&agent.RunResult{Text: "", IsError: true, Subtype: "error_max_turns"})
+	withSub := Final(&agent.RunResult{Text: "", IsError: true, Subtype: "error_max_turns"}, RunLimits{})
 	if !strings.Contains(withSub, "error_max_turns") {
 		t.Fatalf("empty error result should include the subtype: %q", withSub)
 	}
@@ -1392,10 +1392,10 @@ func TestFinalErrorResult(t *testing.T) {
 		t.Fatalf("empty error result without subtype should use the plain fallback: %q", empty)
 	}
 
-	if got := Final(&agent.RunResult{Text: "", IsError: false}); got != "(empty response)" {
+	if got := Final(&agent.RunResult{Text: "", IsError: false}, RunLimits{}); got != "(empty response)" {
 		t.Fatalf("empty success placeholder: %q", got)
 	}
-	if got := Final(nil); got != "(no result)" {
+	if got := Final(nil, RunLimits{}); got != "(no result)" {
 		t.Fatalf("nil result: %q", got)
 	}
 }
