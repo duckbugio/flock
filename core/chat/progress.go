@@ -975,7 +975,10 @@ func turnLimitExplanation(res *agent.RunResult, limits RunLimits) string {
 				" whatever default the provider applies. Set `" + env + "` and restart the bot to control it.")
 		}
 	}
-	// Keep the raw token: it is what an operator greps for in the logs.
+	// Keep the raw token: it is the provider's stable, unlocalized name for this
+	// stop, so it is what an operator matches against provider docs and issue
+	// reports — and nothing on this path logs it, so the delivered message is the
+	// only place it ever surfaces.
 	_, _ = b.WriteString(" (" + turnLimitSubtype + ")")
 	return b.String()
 }
