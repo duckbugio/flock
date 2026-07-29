@@ -75,6 +75,11 @@ const helpCommands = "/help — show this message\n" +
 	"/goal <criterion> — arm a goal an independent evaluator re-checks after every run " +
 	"(/goal off to disarm)\n"
 
+// WelcomeGreeting opens the /start reply, ahead of the same help both adapters
+// render. It lives here for the reason HelpBody does: two byte-identical copies
+// share no link but a habit, and drift without anything failing.
+const WelcomeGreeting = "Hi! I'm the Flock assistant.\n\n"
+
 // helpTail closes the usage message.
 const helpTail = "\nSend any other message to run it through the assistant."
 

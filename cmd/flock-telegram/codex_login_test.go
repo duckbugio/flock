@@ -27,16 +27,7 @@ import (
 // returns that home so a test can "complete" the login by planting the file.
 func unauthorizedCodexAuth(t *testing.T) (*codexauth.Manager, string) {
 	t.Helper()
-	home := t.TempDir()
-	return codexauth.NewManager(codexauth.Config{
-		Backend:     codexauth.BackendCodex,
-		AuthMode:    codexauth.AuthSubscription,
-		RequireAuth: true,
-		Home:        home,
-		// A deliberately absent binary, so no case can start the REAL codex and sit
-		// polling for the full DeviceCodeTTL.
-		Bin: filepath.Join(home, "no-such-codex"),
-	}), home
+	return logintest.Unauthorized(t)
 }
 
 // The allowed sender and the private chat every case in this file uses.
@@ -186,14 +177,7 @@ func groupCommandUpdate(text string, cmdLen int) *models.Update {
 func TestLoginRefusedInGroupChat(t *testing.T) {
 	// A deliberately unusable CODEX_BIN: if the refusal failed to short-circuit,
 	// the manager would try to run it, which the status assertion below catches.
-	home := t.TempDir()
-	auth := codexauth.NewManager(codexauth.Config{
-		Backend:     codexauth.BackendCodex,
-		AuthMode:    codexauth.AuthSubscription,
-		RequireAuth: true,
-		Home:        home,
-		Bin:         filepath.Join(home, "no-such-codex"),
-	})
+	auth, _ := logintest.Unauthorized(t)
 
 	got := groupCommandReplies(t, auth, "/login")
 	if len(got) != 1 {

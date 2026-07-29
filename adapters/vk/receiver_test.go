@@ -681,18 +681,8 @@ func isContextErr(err error) bool {
 // own plumbing instead of reaching past it into the private field.
 func unauthorizedCodexReceiver(t *testing.T, svc Service, notices NoticeSender) *Receiver {
 	t.Helper()
-	home := t.TempDir()
-	return newTestReceiverWithAuth(svc, notices, codexauth.NewManager(codexauth.Config{
-		Backend:     codexauth.BackendCodex,
-		AuthMode:    codexauth.AuthSubscription,
-		RequireAuth: true,
-		Home:        home,
-		// A deliberately absent binary. No case here reaches a sign-in start today,
-		// but that is a property of the current set: one future /login from a direct
-		// message would otherwise run the REAL codex on a developer's machine and sit
-		// polling for the full DeviceCodeTTL.
-		Bin: filepath.Join(home, "no-such-codex"),
-	}))
+	auth, _ := logintest.Unauthorized(t)
+	return newTestReceiverWithAuth(svc, notices, auth)
 }
 
 // TestReceiverBlocksRunsWhileCodexUnauthorized: a Codex deploy with no completed
@@ -991,5 +981,29 @@ func TestClassifyCarriesTheAttachment(t *testing.T) {
 	}
 	if got.doc == nil {
 		t.Fatal("classify returned workDoc with no document; the handler would panic")
+	}
+}
+
+// TestWorkKindString: the dispatch switch's default branch exists to report a
+// kind nobody handled, so it has to name it — a bare ordinal sends the operator
+// to the source to decode their own log line.
+func TestWorkKindString(t *testing.T) {
+	tests := []struct {
+		kind workKind
+		want string
+	}{
+		{workNone, "workNone"},
+		{workText, "workText"},
+		{workVoice, "workVoice"},
+		{workDoc, "workDoc"},
+		{workPhoto, "workPhoto"},
+		{workKind(42), "workKind(42)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			if got := tt.kind.String(); got != tt.want {
+				t.Errorf("String() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

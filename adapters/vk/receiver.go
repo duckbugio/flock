@@ -358,10 +358,12 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 	// /login.
 	w := r.classify(text, msg)
 
-	if notice, blocked := r.auth.BlockedNotice(); blocked && w.kind != workNone {
-		r.logger.Debug("vk: codex unauthorized — blocking run", "peer_id", peerID)
-		r.notify(ctx, peerID, notice)
-		return
+	if w.kind != workNone {
+		if notice, blocked := r.auth.BlockedNotice(); blocked {
+			r.logger.Debug("vk: codex unauthorized — blocking run", "peer_id", peerID)
+			r.notify(ctx, peerID, notice)
+			return
+		}
 	}
 
 	switch w.kind {
@@ -410,6 +412,26 @@ const (
 	workDoc
 	workPhoto
 )
+
+// String names the kind, so the diagnostic in the dispatch switch reads
+// "kind=workPhoto" instead of a bare ordinal an operator would have to look up in
+// this file — the branch exists precisely to report a kind nobody handled.
+func (k workKind) String() string {
+	switch k {
+	case workNone:
+		return "workNone"
+	case workText:
+		return "workText"
+	case workVoice:
+		return "workVoice"
+	case workDoc:
+		return "workDoc"
+	case workPhoto:
+		return "workPhoto"
+	default:
+		return "workKind(" + strconv.Itoa(int(k)) + ")"
+	}
+}
 
 // work is what an accepted message would submit: its kind, and the attachment the
 // matching handler needs. Carrying the attachment is the point — the handlers

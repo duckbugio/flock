@@ -15,7 +15,7 @@ func HelpText(login chat.LoginVisibility) string { return helpTitle + chat.HelpB
 // welcomeText is the reply to /start: a short greeting + the usage help,
 // mirroring the Telegram adapter's WelcomeText.
 func welcomeText(login chat.LoginVisibility) string {
-	return "Hi! I'm the Flock assistant.\n\n" + HelpText(login)
+	return chat.WelcomeGreeting + HelpText(login)
 }
 
 // goalUsageText is the /goal usage reply, mirroring the Telegram adapter.

@@ -99,5 +99,5 @@ func HelpText(login chat.LoginVisibility) string { return helpTitle + chat.HelpB
 // it. Like HelpText it never reaches the Runner — the duck greeting comes from
 // the model on a real message.
 func WelcomeText(login chat.LoginVisibility) string {
-	return "Hi! I'm the Flock assistant.\n\n" + HelpText(login)
+	return chat.WelcomeGreeting + HelpText(login)
 }

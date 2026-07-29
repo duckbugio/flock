@@ -12,6 +12,7 @@ package logintest
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/duckbugio/flock/core/codexauth"
@@ -21,6 +22,29 @@ import (
 // noticeBuffer holds the notices a pending login delivers before the code, so a
 // slow reader cannot block the manager's broadcast.
 const noticeBuffer = 8
+
+// Unauthorized returns a Manager for a deployment that has never been signed in,
+// and the scratch CODEX_HOME it watches, so a test can complete the sign-in by
+// planting auth.json there.
+//
+// Bin points at a path that does not exist ON PURPOSE. Every caller previously
+// set that by hand, and forgetting it in one future case would run the REAL
+// `codex login --device-auth` on a developer's machine and leave it polling for
+// the whole DeviceCodeTTL. Making it the default removes the chance to forget.
+//
+// (Here rather than in codexauthtest because this returns a codexauth type, and
+// codexauthtest must not import codexauth — see the package doc.)
+func Unauthorized(t *testing.T) (*codexauth.Manager, string) {
+	t.Helper()
+	home := t.TempDir()
+	return codexauth.NewManager(codexauth.Config{
+		Backend:     codexauth.BackendCodex,
+		AuthMode:    codexauth.AuthSubscription,
+		RequireAuth: true,
+		Home:        home,
+		Bin:         filepath.Join(home, "no-such-codex"),
+	}), home
+}
 
 // PendingLogin returns a Manager whose device login is under way and whose
 // one-time code has already been issued, with a scratch CODEX_HOME holding no

@@ -132,3 +132,15 @@ func TestLoginHelpLineNamesTheDirectMessageRequirement(t *testing.T) {
 		}
 	}
 }
+
+// TestWelcomeGreetingHasOneHome: both adapters open /start with this line, so it
+// lives beside the help body they also share. Two byte-identical copies share no
+// link but a habit.
+func TestWelcomeGreetingHasOneHome(t *testing.T) {
+	if chat.WelcomeGreeting == "" {
+		t.Fatal("WelcomeGreeting is empty")
+	}
+	if !strings.HasSuffix(chat.WelcomeGreeting, "\n\n") {
+		t.Errorf("WelcomeGreeting = %q, want it to end with a blank line before the help", chat.WelcomeGreeting)
+	}
+}
