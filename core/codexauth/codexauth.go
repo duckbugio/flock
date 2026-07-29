@@ -378,7 +378,7 @@ func promptText(p Prompt) string {
 	_, _ = b.WriteString("\n\n2. Enter this one-time code there:\n")
 	_, _ = b.WriteString(p.Code)
 	if p.ExpiresIn > 0 {
-		_, _ = b.WriteString(fmt.Sprintf("\n\nThe code expires in %s.", humanDuration(p.ExpiresIn)))
+		_, _ = fmt.Fprintf(&b, "\n\nThe code expires in %s.", humanDuration(p.ExpiresIn))
 	}
 	_, _ = b.WriteString("\n\nI'll confirm here as soon as it goes through. /login cancel aborts it.")
 	return b.String()

@@ -1,3 +1,4 @@
+//nolint:testpackage // intentionally whitebox to test the device-login parser and manager internals
 package codexauth
 
 import (
@@ -244,6 +245,7 @@ func TestDispatchReshowsPendingPrompt(t *testing.T) {
 		t.Errorf("second /login = %q, want it to say a login is already pending", again)
 	}
 
+	//nolint:gosec // the path is a test-owned temp file
 	data, err := os.ReadFile(runs)
 	if err != nil {
 		t.Fatalf("read run log: %v", err)

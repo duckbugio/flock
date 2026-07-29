@@ -46,6 +46,13 @@ const killGrace = 500 * time.Millisecond
 // outputTailBytes is how much CLI output we keep to enrich a failure message.
 const outputTailBytes = 4096
 
+// initScanBuf is the line scanner's initial buffer size, and maxScanLine caps a
+// single output line so a pathological stream cannot grow it without bound.
+const (
+	initScanBuf = 4096
+	maxScanLine = 1 << 20
+)
+
 // ErrDeviceAuthUnsupported reports a Codex CLI too old to know --device-auth.
 // Without it there is no headless login path at all, so the operator has to
 // upgrade the CLI rather than retry.
@@ -223,7 +230,7 @@ func condense(output string) string {
 // It returns when rd hits EOF.
 func scanLines(rd io.Reader, onLine func(string)) {
 	sc := bufio.NewScanner(rd)
-	sc.Buffer(make([]byte, 0, 4096), 1<<20)
+	sc.Buffer(make([]byte, 0, initScanBuf), maxScanLine)
 	sc.Split(splitLines)
 	for sc.Scan() {
 		line := stripANSI(sc.Text())
@@ -365,7 +372,7 @@ type tail struct {
 	buf []byte
 }
 
-func newTail(max int) *tail { return &tail{max: max} }
+func newTail(limit int) *tail { return &tail{max: limit} }
 
 // WriteString appends s, dropping the oldest bytes past the cap.
 func (t *tail) WriteString(s string) {

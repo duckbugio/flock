@@ -1,3 +1,4 @@
+//nolint:testpackage // intentionally whitebox to test the device-login parser and manager internals
 package codexauth
 
 import (

@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/duckbugio/flock/core/agent"
-
 	"github.com/duckbugio/flock/internal/config"
 )
 
@@ -226,7 +225,7 @@ func TestBuildWithPendingLoginAuthorizedDeploy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte("{}"), 0o600); err != nil {
 		t.Fatalf("write auth.json: %v", err)
 	}
-	_, _, _, pendingLogin, err := BuildWithPendingLogin(config.Config{
+	runner, _, _, pendingLogin, err := BuildWithPendingLogin(config.Config{
 		AIBackend: config.AIBackendCodex, CodexAuthMode: config.CodexAuthSubscription,
 		CodexRequireAuth: true, CodexHome: home,
 	})
@@ -235,6 +234,9 @@ func TestBuildWithPendingLoginAuthorizedDeploy(t *testing.T) {
 	}
 	if pendingLogin {
 		t.Error("pendingLogin = true for an authorized deploy")
+	}
+	if runner == nil {
+		t.Error("runner = nil for an authorized deploy")
 	}
 }
 

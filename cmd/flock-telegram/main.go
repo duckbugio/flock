@@ -58,33 +58,22 @@ func main() {
 	os.Exit(run())
 }
 
-// run holds the adapter's startup and serve logic, returning a process exit code.
-// Splitting it out of main lets deferred cleanups (signal context, dispatcher
-// drain) run before the process exits, which a direct os.Exit in main would skip.
-func run() int {
-	cfg, err := config.Load()
-	if err != nil {
-		slog.Error("load config", "error", err)
-		return 1
-	}
-	if err := cfg.ValidateTelegram(); err != nil {
-		slog.Error("invalid telegram config", "error", err)
-		return 1
-	}
-
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: cfg.SlogLevel(),
-	}))
-	slog.SetDefault(logger)
-
-	// A Codex subscription deploy that has never been signed in starts anyway, in a
-	// "needs login" state: the /login command is the ONLY way to complete that
-	// sign-in headlessly, so refusing to boot would make it unreachable. Runs stay
-	// blocked (with an actionable notice) until the login lands.
+// buildProvider resolves the configured AI provider, its run defaults, and the
+// Codex sign-in manager that serves /login, logging what came up.
+//
+// A Codex subscription deploy that has never been signed in is NOT a startup
+// failure: /login is the only way to complete that sign-in headlessly, so
+// refusing to boot would make it unreachable. Such a deploy comes up flagged,
+// with runs blocked (by an actionable notice) until the login lands. Every other
+// provider misconfiguration is still fatal. The error is logged here; the caller
+// only needs to know to exit.
+func buildProvider(cfg config.Config, logger *slog.Logger) (
+	agent.Runner, agent.Options, agent.ProviderInfo, *codexauth.Manager, error,
+) {
 	runner, opts, provider, pendingLogin, err := airunner.BuildWithPendingLogin(cfg)
 	if err != nil {
 		logger.Error("invalid ai provider config", "provider", cfg.AIBackend, "error", err)
-		return 1
+		return nil, agent.Options{}, agent.ProviderInfo{}, nil, err
 	}
 	auth := codexauth.NewManager(airunner.CodexAuthConfig(cfg, provider))
 	if pendingLogin {
@@ -109,6 +98,32 @@ func run() int {
 			"model", opts.Model,
 			"capabilities", provider.Capabilities,
 		)
+	}
+	return runner, opts, provider, auth, nil
+}
+
+// run holds the adapter's startup and serve logic, returning a process exit code.
+// Splitting it out of main lets deferred cleanups (signal context, dispatcher
+// drain) run before the process exits, which a direct os.Exit in main would skip.
+func run() int {
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Error("load config", "error", err)
+		return 1
+	}
+	if err := cfg.ValidateTelegram(); err != nil {
+		slog.Error("invalid telegram config", "error", err)
+		return 1
+	}
+
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: cfg.SlogLevel(),
+	}))
+	slog.SetDefault(logger)
+
+	runner, opts, provider, auth, err := buildProvider(cfg, logger)
+	if err != nil {
+		return 1
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

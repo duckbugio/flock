@@ -29,13 +29,19 @@ func unauthorizedCodexAuth(t *testing.T) (*codexauth.Manager, string) {
 	}), home
 }
 
-// textMessage builds a plain private-chat text message from userID in chatID.
-func textMessage(userID, chatID int64, text string) *models.Message {
+// The allowed sender and the private chat every case in this file uses.
+const (
+	loginTestUserID int64 = 42
+	loginTestChatID int64 = 200
+)
+
+// textMessage builds a plain private-chat text message from the allowed sender.
+func textMessage(text string) *models.Message {
 	return &models.Message{
 		ID:   1,
 		Text: text,
-		From: &models.User{ID: userID},
-		Chat: models.Chat{ID: chatID, Type: models.ChatTypePrivate},
+		From: &models.User{ID: loginTestUserID},
+		Chat: models.Chat{ID: loginTestChatID, Type: models.ChatTypePrivate},
 	}
 }
 
@@ -60,10 +66,10 @@ func quietBot(t *testing.T) *bot.Bot {
 func TestHandleMessageBlockedWhileCodexUnauthorized(t *testing.T) {
 	auth, _ := unauthorizedCodexAuth(t)
 	svc := &recordingSubmitter{}
-	cfg := config.Config{AllowedUsers: []int64{42}}
+	cfg := config.Config{AllowedUsers: []int64{loginTestUserID}}
 	deps := messageDeps{cfg: cfg, service: svc, auth: auth}
 
-	handleMessage(context.Background(), deps, quietBot(t), textMessage(42, 200, "build it"), false)
+	handleMessage(context.Background(), deps, quietBot(t), textMessage("build it"), false)
 
 	if got := svc.seen(); len(got) != 0 {
 		t.Errorf("submitted %v while Codex was unauthorized, want nothing", got)
@@ -76,11 +82,11 @@ func TestHandleMessageBlockedWhileCodexUnauthorized(t *testing.T) {
 func TestHandleMessageUnblocksAfterLogin(t *testing.T) {
 	auth, home := unauthorizedCodexAuth(t)
 	svc := &recordingSubmitter{}
-	cfg := config.Config{AllowedUsers: []int64{42}}
+	cfg := config.Config{AllowedUsers: []int64{loginTestUserID}}
 	deps := messageDeps{cfg: cfg, service: svc, auth: auth}
 	b := quietBot(t)
 
-	handleMessage(context.Background(), deps, b, textMessage(42, 200, "build it"), false)
+	handleMessage(context.Background(), deps, b, textMessage("build it"), false)
 	if got := svc.seen(); len(got) != 0 {
 		t.Fatalf("submitted %v before the login, want nothing", got)
 	}
@@ -89,9 +95,11 @@ func TestHandleMessageUnblocksAfterLogin(t *testing.T) {
 		t.Fatalf("write auth.json: %v", err)
 	}
 
-	handleMessage(context.Background(), deps, b, textMessage(42, 200, "build it"), false)
-	if got := svc.seen(); len(got) != 1 || got[0] != "build it" {
-		t.Errorf("submitted %v after the login, want ['build it']", got)
+	// A distinct prompt, so the assertion cannot pass on the blocked one leaking
+	// through late.
+	handleMessage(context.Background(), deps, b, textMessage("ship it"), false)
+	if got := svc.seen(); len(got) != 1 || got[0] != "ship it" {
+		t.Errorf("submitted %v after the login, want ['ship it']", got)
 	}
 }
 
@@ -99,10 +107,10 @@ func TestHandleMessageUnblocksAfterLogin(t *testing.T) {
 // which must never block a message.
 func TestHandleMessageWithoutCodexAuthManager(t *testing.T) {
 	svc := &recordingSubmitter{}
-	cfg := config.Config{AllowedUsers: []int64{42}}
+	cfg := config.Config{AllowedUsers: []int64{loginTestUserID}}
 	deps := messageDeps{cfg: cfg, service: svc}
 
-	handleMessage(context.Background(), deps, quietBot(t), textMessage(42, 200, "build it"), false)
+	handleMessage(context.Background(), deps, quietBot(t), textMessage("build it"), false)
 
 	if got := svc.seen(); len(got) != 1 {
 		t.Errorf("submitted %v with no auth manager, want the message through", got)
@@ -115,7 +123,7 @@ func TestHandleMessageWithoutCodexAuthManager(t *testing.T) {
 func TestLoginCommandIsRoutedToItsHandler(t *testing.T) {
 	auth, _ := unauthorizedCodexAuth(t)
 	svc := &recordingSubmitter{}
-	cfg := config.Config{AllowedUsers: []int64{42}}
+	cfg := config.Config{AllowedUsers: []int64{loginTestUserID}}
 
 	defaultHandler := func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		if msg := update.Message; msg != nil {
@@ -135,7 +143,7 @@ func TestLoginCommandIsRoutedToItsHandler(t *testing.T) {
 		b.RegisterHandlerMatchFunc(commandMatch(name), h)
 	}
 
-	b.ProcessUpdate(context.Background(), privateCommandUpdate(42, 200, "/login status", len("/login")))
+	b.ProcessUpdate(context.Background(), privateCommandUpdate(loginTestUserID, loginTestChatID, "/login status", len("/login")))
 
 	if got := svc.seen(); len(got) != 0 {
 		t.Errorf("/login leaked to the model as %v, want it handled by the bot", got)
