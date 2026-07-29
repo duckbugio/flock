@@ -12,9 +12,15 @@ import (
 
 	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/chat"
+	"github.com/duckbugio/flock/core/codexauth"
 	"github.com/duckbugio/flock/core/goal"
 	"github.com/duckbugio/flock/core/schedule"
 )
+
+// loginNotifyTimeout bounds one background Codex-login notice delivery. The
+// device flow reports minutes after the /login update's own context is gone, so
+// each notice is sent on a fresh, bounded context of its own.
+const loginNotifyTimeout = 30 * time.Second
 
 // scheduleDisabledText is the reply when /schedule is used but the scheduler is
 // turned off (the default). It mirrors the Telegram adapter's notice.
@@ -115,6 +121,7 @@ type Receiver struct {
 	notices        NoticeSender
 	eventAck       eventAckFunc
 	sched          *schedule.Manager
+	auth           *codexauth.Manager
 	logger         *slog.Logger
 }
 
@@ -134,6 +141,10 @@ type ReceiverConfig struct {
 	// Scheduler serves the /schedule command. Nil when ENABLE_SCHEDULER is off, in
 	// which case /schedule replies with the disabled notice.
 	Scheduler *schedule.Manager
+	// CodexAuth serves /login and blocks runs while a Codex subscription deploy has
+	// no completed sign-in. A nil manager never blocks and reports /login as
+	// unnecessary.
+	CodexAuth *codexauth.Manager
 	Logger    *slog.Logger
 }
 
@@ -160,6 +171,7 @@ func NewReceiver(cfg ReceiverConfig) *Receiver {
 		notices:        cfg.Notices,
 		eventAck:       cfg.EventAck,
 		sched:          cfg.Scheduler,
+		auth:           cfg.CodexAuth,
 		logger:         log,
 	}
 }
@@ -328,6 +340,16 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 		return
 	}
 
+	// Codex with no completed sign-in cannot run anything. Say so once, after the
+	// gate (so an unaddressed community message stays silent) and before any paid
+	// work (transcription, downloads) or a run that would only fail inside the CLI.
+	// /login is dispatched above and stays reachable while this gate is closed.
+	if notice, blocked := r.auth.BlockedNotice(); blocked {
+		r.logger.Debug("vk: codex unauthorized — blocking run", "peer_id", peerID)
+		r.notify(ctx, peerID, notice)
+		return
+	}
+
 	if r.guards != nil {
 		if allow, reason := r.guards(msg.FromID); !allow {
 			r.logger.Debug("vk: guardrail denied message", "peer_id", peerID, "user_id", msg.FromID, "reason", reason)
@@ -395,7 +417,27 @@ func (r *Receiver) dispatchReserved(ctx context.Context, name string, msg messag
 		r.dispatchSchedule(ctx, msg)
 	case "goal":
 		r.dispatchGoal(ctx, msg)
+	case "login":
+		r.dispatchLogin(ctx, msg)
 	}
+}
+
+// dispatchLogin serves /login: start, report, or cancel the Codex device-code
+// sign-in. It stays available while the deployment is unauthorized — it is the
+// only way out of that state.
+//
+// The sign-in outlives this call: Dispatch replies immediately and keeps working
+// in the background, delivering the link, the one-time code, and the verdict
+// through notify. That callback builds its OWN context, because this update's is
+// long gone by the time a user finishes in a browser.
+func (r *Receiver) dispatchLogin(ctx context.Context, msg messageObject) {
+	peerID := msg.PeerID
+	notify := func(text string) {
+		sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginNotifyTimeout)
+		defer cancel()
+		r.notify(sendCtx, peerID, text)
+	}
+	r.notify(ctx, peerID, r.auth.Dispatch(ctx, commandArgs(msg.Text), notify))
 }
 
 // dispatchGoal serves /goal: arm, show, or disarm the calling chat's goal via

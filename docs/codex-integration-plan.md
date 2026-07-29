@@ -145,21 +145,25 @@ Accepted credential sources:
    printf '%s' "$CODEX_ACCESS_TOKEN" | codex login --with-access-token
    ```
 
-3. Manual one-time setup with device auth:
+3. In-chat device login: an allow-listed user sends `/login` and the bot relays
+   the verification link and one-time code (`core/codexauth`). This is the
+   primary path — it needs no shell on the host.
+4. Manual one-time setup with device auth, for operators who do have a shell:
 
    ```bash
    docker exec -it <bot-container> codex login --device-auth
    ```
 
-4. Manual copy of a local `auth.json` into the persistent `CODEX_HOME` volume.
+5. Manual copy of a local `auth.json` into the persistent `CODEX_HOME` volume.
 
 Validation rules:
 
 - If `CODEX_AUTH_MODE=subscription` and `CODEX_API_KEY` is non-empty, startup
   must fail with a clear error. This prevents accidental API billing.
 - If no persisted auth is present and no `CODEX_ACCESS_TOKEN` is supplied, the
-  bot may start only when `CODEX_REQUIRE_AUTH=false`; otherwise startup fails
-  with instructions to run `codex login --device-auth`.
+  bot starts in a "needs login" state rather than failing: runs are blocked with
+  a notice pointing at `/login`, which is the command that clears the state.
+  Failing startup here would be a deadlock — the login lives inside the bot.
 - `CODEX_ACCESS_TOKEN` must be treated as a secret and must never be copied into
   the per-chat workspace.
 
@@ -496,22 +500,27 @@ Acceptance:
   current Claude template.
 - Claude rendering remains byte-compatible where practical.
 
-### Stage 5 - Subscription Auth UX
+### Stage 5 - Subscription Auth UX (done)
 
-Goal: make subscription setup clear and observable for operators.
+Goal: make subscription setup completable and observable WITHOUT host shell
+access.
 
-Scope:
+Delivered:
 
-- Add startup checks for `CODEX_HOME/auth.json` when subscription mode is
-  required.
-- Add a clear error message with `codex login --device-auth` instructions.
-- Optionally add a health/log command that reports auth mode without exposing
-  secrets.
+- `core/codexauth` drives `codex login --device-auth`, parsing the verification
+  URL and one-time code off the live (ANSI-colored) output while the CLI is still
+  polling, and relaying them into the chat.
+- `/login` (reserved command, both adapters) starts, re-shows, reports, cancels,
+  or forces the sign-in.
+- Startup no longer fails when only the interactive login is missing
+  (`airunner.BuildWithPendingLogin`); runs are blocked with an actionable notice
+  until the login lands, re-checked from `auth.json` on every message so no
+  restart is needed.
 
 Acceptance:
 
-- Missing subscription auth fails with actionable instructions.
-- Present `auth.json` allows startup.
+- Missing subscription auth starts the bot and blocks runs with instructions.
+- Present `auth.json` allows runs immediately.
 - `CODEX_ACCESS_TOKEN` path logs only that access-token auth is configured,
   never the token.
 
@@ -553,16 +562,27 @@ Acceptance:
 ### Subscription Setup
 
 1. Deploy with `AI_BACKEND=codex` and `CODEX_AUTH_MODE=subscription`.
-2. Start the container once.
-3. Run:
+2. Start the container. With no persisted `auth.json` and no `CODEX_ACCESS_TOKEN`
+   the bot comes up in a "needs login" state: it logs a warning, serves `/login`,
+   and answers any other message with a notice pointing at it.
+3. From an allow-listed chat, send `/login`. The bot replies with a verification
+   link and a one-time code.
+4. Open the link, sign in, and enter the code. The bot confirms in the chat.
+5. Send a small prompt in a private allowed chat — no restart needed.
 
-   ```bash
-   docker exec -it <bot-container> codex login --device-auth
-   ```
+`/login status` reports the auth state, `/login cancel` aborts a pending sign-in,
+and `/login force` re-authenticates an already-authorized deployment.
 
-4. Complete browser/device login.
-5. Restart the bot.
-6. Send a small prompt in a private allowed chat.
+Why device code and not the shell recipe this plan originally carried
+(`docker exec -it <bot-container> codex login --device-auth`): that still works,
+but it needs shell access to the host, and the plain `codex login` an operator
+reaches for first cannot work in a container at all. Plain `codex login` starts a
+loopback OAuth server on `http://localhost:1455` and prints an authorize URL whose
+`redirect_uri` points back at that loopback — opened on a laptop, the callback
+lands on the laptop's own localhost, so the CLI waits forever for a callback that
+never arrives, having printed no code. `codex login --device-auth` instead prints
+a verification URL plus a one-time code and polls, which is what `core/codexauth`
+drives and relays into the chat.
 
 ### Billing Setup
 

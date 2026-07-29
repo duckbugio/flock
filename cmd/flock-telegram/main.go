@@ -28,6 +28,7 @@ import (
 	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/chat"
 	"github.com/duckbugio/flock/core/claude"
+	"github.com/duckbugio/flock/core/codexauth"
 	"github.com/duckbugio/flock/core/cost"
 	"github.com/duckbugio/flock/core/dispatch"
 	"github.com/duckbugio/flock/core/ghstar"
@@ -76,16 +77,26 @@ func run() int {
 	}))
 	slog.SetDefault(logger)
 
-	runner, opts, provider, err := airunner.Build(cfg)
+	// A Codex subscription deploy that has never been signed in starts anyway, in a
+	// "needs login" state: the /login command is the ONLY way to complete that
+	// sign-in headlessly, so refusing to boot would make it unreachable. Runs stay
+	// blocked (with an actionable notice) until the login lands.
+	runner, opts, provider, pendingLogin, err := airunner.BuildWithPendingLogin(cfg)
 	if err != nil {
 		logger.Error("invalid ai provider config", "provider", cfg.AIBackend, "error", err)
 		return 1
+	}
+	auth := codexauth.NewManager(airunner.CodexAuthConfig(cfg, provider))
+	if pendingLogin {
+		logger.Warn("codex is not authorized yet; runs are blocked until /login completes",
+			"codex_home", cfg.CodexHome)
 	}
 	if provider.Name == config.AIBackendCodex {
 		logger.Info("codex backend enabled",
 			"provider", provider.Name,
 			"display_name", provider.DisplayName,
 			"auth_mode", cfg.CodexAuthModeName(),
+			"authorized", auth.Authorized(),
 			"sandbox", cfg.CodexSandbox,
 			"approval_policy", cfg.CodexApprovalPolicy,
 			"codex_home", cfg.CodexHome,
@@ -221,7 +232,7 @@ func run() int {
 	guards := chat.GuardConfig{CostCapUSD: cfg.EffectiveCostCapUSD()}
 
 	opts2 := []bot.Option{
-		bot.WithDefaultHandler(textHandler(cfg, &svc, &vt, &up, limiter, costs, guards)),
+		bot.WithDefaultHandler(textHandler(cfg, &svc, &vt, &up, limiter, costs, guards, auth)),
 	}
 
 	b, err := bot.New(cfg.TelegramBotToken, opts2...)
@@ -348,7 +359,7 @@ func run() int {
 	// explicit address). The set of names handled here is asserted, by test, to equal
 	// the canonical chat.ReservedCommands so a new reserved command can never be
 	// published in the menu yet leak to the model for lack of a handler.
-	handlers := reservedHandlers(cfg, svc, mgr)
+	handlers := reservedHandlers(cfg, svc, mgr, auth)
 	for name, h := range handlers {
 		b.RegisterHandlerMatchFunc(commandMatch(name), h)
 	}
@@ -426,6 +437,7 @@ func textHandler(
 	limiter *ratelimit.Limiter,
 	costs *cost.Store,
 	guards chat.GuardConfig,
+	auth *codexauth.Manager,
 ) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		service := *svc
@@ -437,12 +449,15 @@ func textHandler(
 		// Voice and media uploads apply only to new messages, never edits, so
 		// neither the transcriber nor the uploader is threaded here.
 		if edited := update.EditedMessage; edited != nil {
-			deps := messageDeps{cfg: cfg, service: service, limiter: limiter, costs: costs, guards: guards}
+			deps := messageDeps{cfg: cfg, service: service, limiter: limiter, costs: costs, guards: guards, auth: auth}
 			handleMessage(ctx, deps, b, edited, true)
 			return
 		}
 		if msg := update.Message; msg != nil {
-			deps := messageDeps{cfg: cfg, service: service, vt: *vt, up: *up, limiter: limiter, costs: costs, guards: guards}
+			deps := messageDeps{
+				cfg: cfg, service: service, vt: *vt, up: *up,
+				limiter: limiter, costs: costs, guards: guards, auth: auth,
+			}
 			handleMessage(ctx, deps, b, msg, false)
 		}
 	}
@@ -478,6 +493,9 @@ type messageDeps struct {
 	limiter *ratelimit.Limiter
 	costs   *cost.Store
 	guards  chat.GuardConfig
+	// auth blocks runs while the Codex backend has no completed sign-in. Nil (and
+	// a nil *Manager) means "never blocks".
+	auth *codexauth.Manager
 }
 
 // handleMessage applies the allow-list and the group mention-gate to one message
@@ -531,6 +549,17 @@ func handleMessage(ctx context.Context, deps messageDeps, b *bot.Bot, msg *model
 	handle, cleaned := chat.ShouldHandle(in)
 	if !handle {
 		slog.Debug("group message not addressed to bot — ignoring", "chat_id", msg.Chat.ID)
+		return
+	}
+
+	// Codex with no completed sign-in cannot run anything. Say so once, here — after
+	// the gate (so an unaddressed group message stays silent) but before any paid
+	// work (transcription, downloads) or a run that would only fail deep inside the
+	// CLI. /login is a reserved command routed elsewhere, so it stays reachable
+	// while this gate is closed.
+	if notice, blocked := deps.auth.BlockedNotice(); blocked {
+		slog.Debug("codex unauthorized — blocking run", "chat_id", msg.Chat.ID)
+		sendCommandReply(ctx, b, msg.Chat.ID, notice)
 		return
 	}
 
@@ -969,7 +998,9 @@ func reservedBotCommands() []models.BotCommand {
 // asserts this map's key set equals chat.ReservedCommands. Adding a reserved command
 // is therefore a two-line change here (plus the canonical entry); forgetting the
 // handler fails the test rather than silently leaking the command to Claude.
-func reservedHandlers(cfg config.Config, svc *chat.Service, sched *schedule.Manager) map[string]bot.HandlerFunc {
+func reservedHandlers(
+	cfg config.Config, svc *chat.Service, sched *schedule.Manager, auth *codexauth.Manager,
+) map[string]bot.HandlerFunc {
 	return map[string]bot.HandlerFunc{
 		"start":    startHandler(cfg),
 		"help":     helpHandler(cfg),
@@ -977,8 +1008,37 @@ func reservedHandlers(cfg config.Config, svc *chat.Service, sched *schedule.Mana
 		"stop":     stopCommandHandler(cfg, svc),
 		"schedule": scheduleHandler(cfg, sched),
 		"goal":     goalHandler(cfg, svc),
+		"login":    loginHandler(cfg, auth),
 	}
 }
+
+// loginHandler serves /login: it starts (or reports, or cancels) the Codex
+// device-code sign-in. The command is deliberately available even while the
+// deployment is unauthorized — it is the only way out of that state — and, like
+// every reserved handler, is allow-list gated and never starts a run.
+//
+// The device flow outlives this handler: Dispatch returns an immediate reply and
+// keeps working in the background, delivering the link, the one-time code, and
+// the final verdict through the notify callback. That callback therefore builds
+// its OWN context: the update's ctx is cancelled as soon as the handler returns,
+// minutes before a user finishes signing in, and sending on it would fail.
+func loginHandler(cfg config.Config, auth *codexauth.Manager) bot.HandlerFunc {
+	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
+		chatID, ok := commandSender(cfg, update.Message)
+		if !ok {
+			return
+		}
+		notify := func(text string) {
+			sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginNotifyTimeout)
+			defer cancel()
+			sendCommandReply(sendCtx, b, chatID, text)
+		}
+		sendCommandReply(ctx, b, chatID, auth.Dispatch(ctx, commandArgs(update.Message.Text), notify))
+	}
+}
+
+// loginNotifyTimeout bounds one background login notice delivery.
+const loginNotifyTimeout = 30 * time.Second
 
 // commandMatch routes a message whose leading bot command is name, tolerating
 // the @botname suffix Telegram adds in groups (/new@duck_bot). It only routes;

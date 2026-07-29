@@ -10,6 +10,7 @@ import (
 	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/claude"
 	"github.com/duckbugio/flock/core/codex"
+	"github.com/duckbugio/flock/core/codexauth"
 	"github.com/duckbugio/flock/core/openaicompat"
 	"github.com/duckbugio/flock/internal/config"
 )
@@ -82,6 +83,56 @@ func (r Registry) Build(cfg config.Config) (agent.Runner, agent.Options, agent.P
 		DisplayName:  p.DisplayName(),
 		Capabilities: p.Capabilities(),
 	}, nil
+}
+
+// BuildWithPendingLogin is Build, except that the one provider error an END USER
+// can clear from chat — Codex subscription mode with no persisted login yet — is
+// not fatal. It rebuilds with the auth-presence check relaxed and reports
+// pendingLogin=true.
+//
+// Without this the deployment deadlocks: startup refuses to run until someone has
+// logged in, and the /login flow that performs the login only exists inside the
+// running bot. Starting in a "needs login" state breaks the cycle — the bot comes
+// up, serves /login, and blocks runs (see codexauth.Manager.BlockedNotice) until
+// the login lands. Every other validation error is still fatal, so a misconfigured
+// deploy (an API key in subscription mode, billing without acknowledgement) fails
+// exactly as loudly as before.
+func BuildWithPendingLogin(cfg config.Config) (
+	agent.Runner, agent.Options, agent.ProviderInfo, bool, error,
+) {
+	runner, opts, info, err := Build(cfg)
+	if err == nil || !IsPendingLogin(err) {
+		return runner, opts, info, false, err
+	}
+	relaxed := cfg
+	relaxed.CodexRequireAuth = false
+	runner, opts, info, err = Build(relaxed)
+	if err != nil {
+		return nil, agent.Options{}, agent.ProviderInfo{}, false, err
+	}
+	return runner, opts, info, true, nil
+}
+
+// IsPendingLogin reports whether err merely means "nobody has completed the
+// interactive Codex login yet", as opposed to a real misconfiguration.
+func IsPendingLogin(err error) bool {
+	return errors.Is(err, config.ErrCodexSubscriptionAuthRequired)
+}
+
+// CodexAuthConfig derives the /login driver's configuration from the deployment
+// config and the resolved provider. It passes the SAME child environment the
+// runner uses (CodexEnv), so the login writes auth.json into exactly the
+// CODEX_HOME later runs read.
+func CodexAuthConfig(cfg config.Config, info agent.ProviderInfo) codexauth.Config {
+	return codexauth.Config{
+		Backend:        info.Name,
+		AuthMode:       cfg.CodexAuthModeName(),
+		Bin:            cfg.CodexBin,
+		Home:           cfg.CodexHome,
+		Env:            CodexEnv(cfg),
+		HasAccessToken: strings.TrimSpace(cfg.CodexAccessToken) != "",
+		RequireAuth:    cfg.CodexRequireAuth,
+	}
 }
 
 // Provider resolves a configured provider name or alias.

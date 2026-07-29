@@ -17,7 +17,7 @@ type ReservedCommand struct {
 // /security-review) is forwarded verbatim so the provider's own slash-command and
 // skill system runs it. Both adapters (Telegram, VK) decide what to intercept
 // from this list, and Telegram builds its command menu from it. The order here is
-// the order the menu presents: start, help, new, stop, schedule, goal.
+// the order the menu presents: start, help, new, stop, schedule, goal, login.
 var ReservedCommands = []ReservedCommand{
 	{Name: "start", Description: "Show a short welcome and usage"},
 	{Name: "help", Description: "List the bot's own commands"},
@@ -25,6 +25,7 @@ var ReservedCommands = []ReservedCommand{
 	{Name: "stop", Description: "Stop the run currently in progress"},
 	{Name: "schedule", Description: "Manage scheduled jobs"},
 	{Name: "goal", Description: "Arm a goal an independent evaluator re-checks after every run"},
+	{Name: "login", Description: "Authorize the AI provider (Codex browser sign-in)"},
 }
 
 // IsReservedCommand reports whether name is one of the bot's reserved commands.

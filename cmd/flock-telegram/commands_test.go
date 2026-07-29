@@ -143,9 +143,9 @@ func TestStartWelcomeText(t *testing.T) {
 // Claude as free text. Keying both off the same source and asserting equality makes
 // that impossible.
 func TestReservedHandlersMatchCanonicalSet(t *testing.T) {
-	// A nil *chat.Service and nil *schedule.Manager are fine: we only inspect the
-	// map's key set, never invoke a handler closure.
-	handlers := reservedHandlers(config.Config{}, nil, nil)
+	// A nil *chat.Service, *schedule.Manager and *codexauth.Manager are fine: we
+	// only inspect the map's key set, never invoke a handler closure.
+	handlers := reservedHandlers(config.Config{}, nil, nil, nil)
 
 	if len(handlers) != len(chat.ReservedCommands) {
 		t.Fatalf("reservedHandlers has %d entries, want %d (chat.ReservedCommands)",
@@ -258,7 +258,7 @@ func newCommandTestBot(t *testing.T, cfg config.Config, svc messageSubmitter, re
 	// Register the reserved-command handlers from the SAME canonical source main uses,
 	// so the routing (reserved handler vs default) is identical to production. The
 	// scheduler is nil here (the pass-through tests do not exercise /schedule).
-	for name, h := range reservedHandlers(cfg, reservedSvc, nil) {
+	for name, h := range reservedHandlers(cfg, reservedSvc, nil, nil) {
 		b.RegisterHandlerMatchFunc(commandMatch(name), h)
 	}
 	return b
@@ -354,7 +354,7 @@ func TestScheduleCommandEnabledReachesDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build test bot: %v", err)
 	}
-	for name, h := range reservedHandlers(cfg, nil, mgr) {
+	for name, h := range reservedHandlers(cfg, nil, mgr, nil) {
 		b.RegisterHandlerMatchFunc(commandMatch(name), h)
 	}
 

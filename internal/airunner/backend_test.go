@@ -3,7 +3,12 @@ package airunner
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/duckbugio/flock/core/agent"
 
 	"github.com/duckbugio/flock/internal/config"
 )
@@ -134,5 +139,129 @@ func TestBuildOpenAICompatibleProvider(t *testing.T) {
 	}
 	if opts.Model != "qwen-plus" {
 		t.Fatalf("opts.Model = %q, want qwen-plus", opts.Model)
+	}
+}
+
+// TestBuildWithPendingLoginStartsUnauthorized: a Codex subscription deploy that
+// has never been signed in must still BOOT, flagged pendingLogin, because the
+// /login command that performs the sign-in only exists inside the running bot.
+// Failing startup here is what made headless Codex setup impossible.
+func TestBuildWithPendingLoginStartsUnauthorized(t *testing.T) {
+	cfg := config.Config{
+		AIBackend:        config.AIBackendCodex,
+		CodexBin:         "codex",
+		CodexAuthMode:    config.CodexAuthSubscription,
+		CodexRequireAuth: true,
+		CodexHome:        t.TempDir(), // no auth.json inside
+	}
+	if _, _, _, err := Build(cfg); !errors.Is(err, config.ErrCodexSubscriptionAuthRequired) {
+		t.Fatalf("Build() error = %v, want ErrCodexSubscriptionAuthRequired", err)
+	}
+
+	runner, _, info, pendingLogin, err := BuildWithPendingLogin(cfg)
+	if err != nil {
+		t.Fatalf("BuildWithPendingLogin() error = %v, want nil", err)
+	}
+	if !pendingLogin {
+		t.Error("pendingLogin = false, want true for a never-signed-in deploy")
+	}
+	if runner == nil {
+		t.Error("runner = nil; the bot must come up to serve /login")
+	}
+	if info.Name != config.AIBackendCodex {
+		t.Errorf("provider = %q, want codex", info.Name)
+	}
+}
+
+// TestBuildWithPendingLoginKeepsRealErrorsFatal: only the "nobody has logged in
+// yet" case is recoverable from chat. A misconfiguration — an API key in
+// subscription mode, billing without acknowledgement — must still refuse to boot.
+func TestBuildWithPendingLoginKeepsRealErrorsFatal(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  config.Config
+		want error
+	}{
+		{
+			name: "api key in subscription mode",
+			cfg: config.Config{
+				AIBackend: config.AIBackendCodex, CodexAuthMode: config.CodexAuthSubscription,
+				CodexAPIKey: "sk-live", CodexRequireAuth: true,
+			},
+			want: config.ErrCodexSubscriptionWithAPIKey,
+		},
+		{
+			name: "billing without acknowledgement",
+			cfg: config.Config{
+				AIBackend: config.AIBackendCodex, CodexAuthMode: config.CodexAuthBilling,
+				CodexAPIKey: "sk-live", CodexBillingAck: false,
+			},
+			want: config.ErrCodexBillingAckRequired,
+		},
+		{
+			name: "unknown auth mode",
+			cfg: config.Config{
+				AIBackend: config.AIBackendCodex, CodexAuthMode: "whatever",
+			},
+			want: config.ErrCodexUnknownAuthMode,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, _, pendingLogin, err := BuildWithPendingLogin(tt.cfg)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("error = %v, want %v", err, tt.want)
+			}
+			if pendingLogin {
+				t.Error("pendingLogin = true for a misconfiguration")
+			}
+		})
+	}
+}
+
+// TestBuildWithPendingLoginAuthorizedDeploy: with a persisted login nothing is
+// pending and the build is the plain one.
+func TestBuildWithPendingLoginAuthorizedDeploy(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write auth.json: %v", err)
+	}
+	_, _, _, pendingLogin, err := BuildWithPendingLogin(config.Config{
+		AIBackend: config.AIBackendCodex, CodexAuthMode: config.CodexAuthSubscription,
+		CodexRequireAuth: true, CodexHome: home,
+	})
+	if err != nil {
+		t.Fatalf("BuildWithPendingLogin() error = %v", err)
+	}
+	if pendingLogin {
+		t.Error("pendingLogin = true for an authorized deploy")
+	}
+}
+
+// TestCodexAuthConfigMirrorsTheRunner: the login must run with the SAME child
+// environment and CODEX_HOME the runner uses, or it would persist auth.json
+// where later runs never look. Subscription mode also keeps CODEX_API_KEY out.
+func TestCodexAuthConfigMirrorsTheRunner(t *testing.T) {
+	t.Setenv("CODEX_API_KEY", "sk-should-not-leak")
+	home := t.TempDir()
+	cfg := config.Config{
+		AIBackend: config.AIBackendCodex, CodexAuthMode: config.CodexAuthSubscription,
+		CodexBin: "/usr/local/bin/codex", CodexHome: home, CodexAccessToken: "tok",
+	}
+	got := CodexAuthConfig(cfg, agent.ProviderInfo{Name: config.AIBackendCodex})
+
+	if got.Backend != config.AIBackendCodex || got.AuthMode != config.CodexAuthSubscription {
+		t.Errorf("backend/auth mode = %q/%q, want codex/subscription", got.Backend, got.AuthMode)
+	}
+	if got.Bin != "/usr/local/bin/codex" || got.Home != home {
+		t.Errorf("bin/home = %q/%q, want the configured pair", got.Bin, got.Home)
+	}
+	if !got.HasAccessToken {
+		t.Error("HasAccessToken = false with CODEX_ACCESS_TOKEN set")
+	}
+	for _, kv := range got.Env {
+		if strings.HasPrefix(kv, "CODEX_API_KEY=") {
+			t.Fatal("CODEX_API_KEY leaked into the subscription-mode login environment")
+		}
 	}
 }

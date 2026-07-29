@@ -12,6 +12,7 @@ import (
 
 	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/chat"
+	"github.com/duckbugio/flock/core/codexauth"
 	"github.com/duckbugio/flock/core/goal"
 	"github.com/duckbugio/flock/core/schedule"
 )
@@ -622,4 +623,72 @@ func (f *fakeLongPoller) poll(_ context.Context, _ longPollServer) (longPollResp
 
 func isContextErr(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// unauthorizedCodexReceiver wires a receiver whose Codex backend has never been
+// signed in (an empty CODEX_HOME, so no auth.json).
+func unauthorizedCodexReceiver(t *testing.T, svc Service, notices NoticeSender) *Receiver {
+	t.Helper()
+	r := newTestReceiver(svc, notices, false, nil)
+	r.auth = codexauth.NewManager(codexauth.Config{
+		Backend:     codexauth.BackendCodex,
+		AuthMode:    codexauth.AuthSubscription,
+		RequireAuth: true,
+		Home:        t.TempDir(),
+	})
+	return r
+}
+
+// TestReceiverBlocksRunsWhileCodexUnauthorized: a Codex deploy with no completed
+// sign-in must answer with the actionable notice instead of starting a run that
+// could only fail inside the CLI.
+func TestReceiverBlocksRunsWhileCodexUnauthorized(t *testing.T) {
+	svc := &fakeService{}
+	notices := &fakeNotice{}
+	r := unauthorizedCodexReceiver(t, svc, notices)
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 200, Text: "build it"}))
+
+	if len(svc.handleCalls) != 0 {
+		t.Errorf("an unauthorized Codex deploy started %d runs, want 0", len(svc.handleCalls))
+	}
+	if len(notices.texts) != 1 || !strings.Contains(notices.texts[0], "/login") {
+		t.Errorf("notices = %v, want one notice pointing at /login", notices.texts)
+	}
+}
+
+// TestReceiverLoginCommandStaysReachableWhileUnauthorized is the escape hatch:
+// the very command that fixes the unauthorized state must not be blocked by it.
+func TestReceiverLoginCommandStaysReachableWhileUnauthorized(t *testing.T) {
+	svc := &fakeService{}
+	notices := &fakeNotice{}
+	r := unauthorizedCodexReceiver(t, svc, notices)
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 200, Text: "/login status"}))
+
+	if len(svc.handleCalls) != 0 {
+		t.Errorf("/login should not start a run, got %d Handle calls", len(svc.handleCalls))
+	}
+	if len(notices.texts) != 1 || !strings.Contains(notices.texts[0], "NOT authorized") {
+		t.Errorf("notices = %v, want the login status reply", notices.texts)
+	}
+}
+
+// TestReceiverLoginWithoutManagerIsInert: a deployment wired without a Codex auth
+// manager (the Claude default) answers /login instead of panicking, and never
+// blocks a run.
+func TestReceiverLoginWithoutManagerIsInert(t *testing.T) {
+	svc := &fakeService{}
+	notices := &fakeNotice{}
+	r := newTestReceiver(svc, notices, false, nil)
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 200, Text: "/login"}))
+	if len(notices.texts) != 1 || notices.texts[0] != codexauth.NoLoginNeededText {
+		t.Errorf("notices = %v, want the no-login-needed reply", notices.texts)
+	}
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 200, Text: "build it"}))
+	if len(svc.handleCalls) != 1 {
+		t.Errorf("Handle calls = %d, want 1 (no manager must never block)", len(svc.handleCalls))
+	}
 }

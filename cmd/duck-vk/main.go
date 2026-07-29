@@ -27,6 +27,7 @@ import (
 	"github.com/duckbugio/flock/adapters/vk"
 	"github.com/duckbugio/flock/core/chat"
 	"github.com/duckbugio/flock/core/claude"
+	"github.com/duckbugio/flock/core/codexauth"
 	"github.com/duckbugio/flock/core/cost"
 	"github.com/duckbugio/flock/core/dispatch"
 	"github.com/duckbugio/flock/core/ghstar"
@@ -78,16 +79,26 @@ func run() int {
 	}))
 	slog.SetDefault(logger)
 
-	runner, opts, provider, err := airunner.Build(cfg)
+	// A Codex subscription deploy that has never been signed in starts anyway, in a
+	// "needs login" state: /login is the only headless way to complete that sign-in,
+	// so refusing to boot would make it unreachable. Runs stay blocked (with an
+	// actionable notice) until the login lands.
+	runner, opts, provider, pendingLogin, err := airunner.BuildWithPendingLogin(cfg)
 	if err != nil {
 		logger.Error("invalid ai provider config", "provider", cfg.AIBackend, "error", err)
 		return 1
+	}
+	auth := codexauth.NewManager(airunner.CodexAuthConfig(cfg, provider))
+	if pendingLogin {
+		logger.Warn("codex is not authorized yet; runs are blocked until /login completes",
+			"codex_home", cfg.CodexHome)
 	}
 	if provider.Name == config.AIBackendCodex {
 		logger.Info("codex backend enabled",
 			"provider", provider.Name,
 			"display_name", provider.DisplayName,
 			"auth_mode", cfg.CodexAuthModeName(),
+			"authorized", auth.Authorized(),
 			"sandbox", cfg.CodexSandbox,
 			"approval_policy", cfg.CodexApprovalPolicy,
 			"codex_home", cfg.CodexHome,
@@ -266,6 +277,7 @@ func run() int {
 		Notices:   vk.NewNoticeSender(api, time.Now().UnixNano(), logger),
 		EventAck:  api.SendMessageEventAnswer,
 		Scheduler: mgr,
+		CodexAuth: auth,
 		Logger:    logger,
 	})
 
