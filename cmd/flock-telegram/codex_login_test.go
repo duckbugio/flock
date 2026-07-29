@@ -178,9 +178,8 @@ func groupCommandUpdate(text string, cmdLen int) *models.Update {
 // allow-listed or not — and whoever acts on the code first binds THEIR ChatGPT
 // account to the bot. The refusal must happen before any CLI is spawned.
 func TestLoginRefusedInGroupChat(t *testing.T) {
-	// A deliberately unusable CODEX_BIN: if the group check failed to short-circuit,
-	// the manager would try to run it and the test's assertions would still pass —
-	// so the manager is also asserted to have started nothing.
+	// A deliberately unusable CODEX_BIN: if the refusal failed to short-circuit,
+	// the manager would try to run it, which the status assertion below catches.
 	home := t.TempDir()
 	auth := codexauth.NewManager(codexauth.Config{
 		Backend:     codexauth.BackendCodex,
@@ -189,24 +188,8 @@ func TestLoginRefusedInGroupChat(t *testing.T) {
 		Home:        home,
 		Bin:         filepath.Join(home, "no-such-codex"),
 	})
-	cfg := config.Config{AllowedUsers: []int64{loginTestUserID}}
 
-	replies := &capturingHTTPClient{}
-	b, err := bot.New("123456:test-token",
-		bot.WithSkipGetMe(),
-		bot.WithNotAsyncHandlers(),
-		bot.WithHTTPClient(time.Minute, replies),
-	)
-	if err != nil {
-		t.Fatalf("build test bot: %v", err)
-	}
-	for name, h := range reservedHandlers(cfg, nil, nil, auth) {
-		b.RegisterHandlerMatchFunc(commandMatch(name), h)
-	}
-
-	b.ProcessUpdate(context.Background(), groupCommandUpdate("/login", len("/login")))
-
-	got := replies.seen()
+	got := groupCommandReplies(t, auth, "/login")
 	if len(got) != 1 {
 		t.Fatalf("replies = %v, want exactly one", got)
 	}
@@ -219,6 +202,111 @@ func TestLoginRefusedInGroupChat(t *testing.T) {
 	if auth.StatusText() != "Codex is NOT authorized. Send /login to sign in with your ChatGPT account." {
 		t.Errorf("a sign-in was started from a group chat: %q", auth.StatusText())
 	}
+}
+
+// TestLoginStatusInGroupHidesAPendingCode is the regression for the hole an
+// argument-based guard left: /login status ALSO re-shows a pending one-time code,
+// so refusing only the code-starting arguments let it into the group anyway.
+func TestLoginStatusInGroupHidesAPendingCode(t *testing.T) {
+	auth := pendingLoginManager(t)
+
+	got := groupCommandReplies(t, auth, "/login status")
+	if len(got) != 1 {
+		t.Fatalf("replies = %v, want exactly one", got)
+	}
+	if strings.Contains(got[0], "XER9-NWCA2") || strings.Contains(got[0], "http") {
+		t.Errorf("the pending code or link reached a group: %q", got[0])
+	}
+	if !strings.Contains(got[0], "in progress") {
+		t.Errorf("status = %q, want it to still report the pending sign-in", got[0])
+	}
+}
+
+// TestLoginStatusInPrivateShowsThePendingCode: the same command in a direct
+// message must still re-show the code — that is what makes a lost message
+// recoverable.
+func TestLoginStatusInPrivateShowsThePendingCode(t *testing.T) {
+	auth := pendingLoginManager(t)
+	cfg := config.Config{AllowedUsers: []int64{loginTestUserID}}
+	replies := &capturingHTTPClient{}
+	b := commandBot(t, cfg, auth, replies)
+
+	b.ProcessUpdate(context.Background(),
+		privateCommandUpdate(loginTestUserID, loginTestChatID, "/login status", len("/login")))
+
+	got := replies.seen()
+	if len(got) != 1 || !strings.Contains(got[0], "XER9-NWCA2") {
+		t.Errorf("replies = %v, want the pending code re-shown in a direct message", got)
+	}
+}
+
+// pendingLoginManager returns a manager with a device login already in flight,
+// its code issued, so a test can assert what each destination is allowed to see.
+func pendingLoginManager(t *testing.T) *codexauth.Manager {
+	t.Helper()
+	m := codexauth.NewManager(codexauth.Config{
+		Backend:     codexauth.BackendCodex,
+		AuthMode:    codexauth.AuthSubscription,
+		RequireAuth: true,
+		Home:        t.TempDir(),
+		Bin:         fakeCodexLogin(t),
+		Env:         []string{"PATH=" + os.Getenv("PATH")},
+	})
+	t.Cleanup(func() { m.Cancel() })
+
+	issued := make(chan string, 4)
+	m.Dispatch(context.Background(), "", codexauth.Subscriber{
+		ID: "dm", Private: true, Notify: func(text string) { issued <- text },
+	})
+	select {
+	case <-issued:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the fake login never issued a prompt")
+	}
+	return m
+}
+
+// fakeCodexLogin writes a stand-in Codex CLI that prints the real device-auth
+// prompt and then blocks, like the real one polling for the browser step.
+func fakeCodexLogin(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "codex")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' '1. Open this link' '   https://auth.openai.com/codex/device' \\\n" +
+		"  '2. Enter this one-time code (expires in 15 minutes)' '   XER9-NWCA2'\n" +
+		"sleep 30\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil { //nolint:gosec // test fixture must be executable
+		t.Fatalf("write fake codex: %v", err)
+	}
+	return path
+}
+
+// commandBot builds a bot with the reserved handlers registered and every API
+// call answered locally by http.
+func commandBot(t *testing.T, cfg config.Config, auth *codexauth.Manager, client bot.HttpClient) *bot.Bot {
+	t.Helper()
+	b, err := bot.New("123456:test-token",
+		bot.WithSkipGetMe(),
+		bot.WithNotAsyncHandlers(),
+		bot.WithHTTPClient(time.Minute, client),
+	)
+	if err != nil {
+		t.Fatalf("build test bot: %v", err)
+	}
+	for name, h := range reservedHandlers(cfg, nil, nil, auth) {
+		b.RegisterHandlerMatchFunc(commandMatch(name), h)
+	}
+	return b
+}
+
+// groupCommandReplies runs text as a group slash command and returns what the
+// bot replied.
+func groupCommandReplies(t *testing.T, auth *codexauth.Manager, text string) []string {
+	t.Helper()
+	replies := &capturingHTTPClient{}
+	b := commandBot(t, config.Config{AllowedUsers: []int64{loginTestUserID}}, auth, replies)
+	b.ProcessUpdate(context.Background(), groupCommandUpdate(text, len("/login")))
+	return replies.seen()
 }
 
 // capturingHTTPClient answers every Bot API call locally like stubHTTPClient,
@@ -249,33 +337,65 @@ func (c *capturingHTTPClient) seen() []string {
 	return append([]string(nil), c.texts...)
 }
 
-// TestLoginStatusAllowedInGroupChat: status reveals no code, so refusing it
-// everywhere would be noise rather than protection. It must answer with the real
-// state, not the direct-message refusal.
-func TestLoginStatusAllowedInGroupChat(t *testing.T) {
+// TestLoginStatusInGroupWithNothingPending: with no sign-in in flight there is
+// no code to withhold, so the group is simply told the state.
+func TestLoginStatusInGroupWithNothingPending(t *testing.T) {
 	auth, _ := unauthorizedCodexAuth(t)
-	cfg := config.Config{AllowedUsers: []int64{loginTestUserID}}
-	http := &capturingHTTPClient{}
 
-	b, err := bot.New("123456:test-token",
-		bot.WithSkipGetMe(),
-		bot.WithNotAsyncHandlers(),
-		bot.WithHTTPClient(time.Minute, http),
-	)
-	if err != nil {
-		t.Fatalf("build test bot: %v", err)
-	}
-	for name, h := range reservedHandlers(cfg, nil, nil, auth) {
-		b.RegisterHandlerMatchFunc(commandMatch(name), h)
-	}
-
-	b.ProcessUpdate(context.Background(), groupCommandUpdate("/login status", len("/login")))
-
-	got := http.seen()
+	got := groupCommandReplies(t, auth, "/login status")
 	if len(got) != 1 {
 		t.Fatalf("replies = %v, want exactly one", got)
 	}
 	if !strings.Contains(got[0], "NOT authorized") {
 		t.Errorf("reply = %q, want the status, not a refusal", got[0])
+	}
+}
+
+// codexAuthForMenu is a manager for a Codex subscription deploy, i.e. one where
+// every reserved command — including /login — applies.
+var codexAuthForMenu = codexauth.NewManager(codexauth.Config{
+	Backend:  codexauth.BackendCodex,
+	AuthMode: codexauth.AuthSubscription,
+})
+
+// TestMenuOmitsLoginWithoutAnInteractiveSignIn: on Claude, an API-key backend or
+// Codex billing there is no sign-in to complete, so advertising /login in the
+// menu would only lead a user to a command that answers "not needed". The
+// handler stays registered, so typing it still gets that answer.
+func TestMenuOmitsLoginWithoutAnInteractiveSignIn(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		auth *codexauth.Manager
+	}{
+		{"claude", codexauth.NewManager(codexauth.Config{Backend: "claude"})},
+		{"codex billing", codexauth.NewManager(codexauth.Config{
+			Backend: codexauth.BackendCodex, AuthMode: codexauth.AuthBilling,
+		})},
+		{"no manager", nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, c := range reservedBotCommands(tt.auth) {
+				if c.Command == "login" {
+					t.Errorf("/login is published in the menu on a deployment with no sign-in")
+				}
+			}
+			if got, want := len(reservedBotCommands(tt.auth)), len(chat.ReservedCommands)-1; got != want {
+				t.Errorf("menu has %d entries, want %d (everything but /login)", got, want)
+			}
+		})
+	}
+}
+
+// TestMenuKeepsLoginOnCodexSubscription is the other half: where the sign-in is
+// real, the command must be advertised.
+func TestMenuKeepsLoginOnCodexSubscription(t *testing.T) {
+	found := false
+	for _, c := range reservedBotCommands(codexAuthForMenu) {
+		if c.Command == "login" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("/login is missing from the menu on a Codex subscription deployment")
 	}
 }

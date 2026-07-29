@@ -425,22 +425,16 @@ func (r *Receiver) dispatchReserved(ctx context.Context, name string, msg messag
 	}
 }
 
-// loginGroupChatText refuses to start a sign-in in a community conversation.
-const loginGroupChatText = "Send /login in a direct message with me, not in a conversation.\n\n" +
-	"The sign-in reply carries a one-time code that authorizes an account for the whole bot, " +
-	"and everyone in this conversation would see it."
-
 // dispatchLogin serves /login: start, report, or cancel the Codex device-code
 // sign-in. It stays available while the deployment is unauthorized — it is the
 // only way out of that state. The sender is already allow-list gated by
 // onMessageNew, which returns before any reserved command is dispatched.
 //
-// Starting a sign-in is refused in a community conversation. The reply goes to
-// the PEER, not the sender, so in a conversation the verification link and the
-// one-time code would be readable by every participant, allow-listed or not —
-// and whoever acts on the code first binds THEIR ChatGPT account to the bot, so
-// every later run (and its history) would go through that account. status and
-// cancel stay available everywhere: neither reveals a code.
+// Whether a one-time code may be printed here is decided by codexauth from the
+// Private flag, not by this adapter inspecting the arguments: /login status also
+// re-shows a pending code, so an argument-based guard would let it straight past.
+// A VK conversation has a peer id distinct from the sender's, which is exactly
+// what makes it non-private.
 //
 // The sign-in outlives this call: Dispatch replies immediately and keeps working
 // in the background, delivering the link, the one-time code, and the verdict to
@@ -448,12 +442,9 @@ const loginGroupChatText = "Send /login in a direct message with me, not in a co
 // long gone by the time a user finishes in a browser.
 func (r *Receiver) dispatchLogin(ctx context.Context, msg messageObject) {
 	peerID := msg.PeerID
-	if isGroupPeer(peerID) && codexauth.StartsLogin(commandArgs(msg.Text)) {
-		r.notify(ctx, peerID, loginGroupChatText)
-		return
-	}
 	sub := codexauth.Subscriber{
-		ID: chatIDStr(peerID),
+		ID:      chatIDStr(peerID),
+		Private: !isGroupPeer(peerID),
 		Notify: func(text string) {
 			sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginNotifyTimeout)
 			defer cancel()

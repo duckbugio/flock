@@ -135,6 +135,7 @@ type Manager struct {
 	last    Prompt
 	hasLast bool
 	subs    []Subscriber
+	done    chan struct{} // closed when the in-flight login goroutine has returned
 }
 
 // NewManager returns a Manager for cfg.
@@ -213,8 +214,15 @@ func (m *Manager) BlockedNotice() (string, bool) {
 const NoLoginNeededText = "No interactive login is needed on this deployment: " +
 	"the AI provider authenticates from its configured credentials."
 
-// StatusText describes the current auth state without ever revealing a secret.
-func (m *Manager) StatusText() string {
+// StatusText describes the current auth state for a PRIVATE destination. It
+// never reveals a stored secret, but it does re-show a pending sign-in's
+// one-time code, which is why the destination matters — see statusText.
+func (m *Manager) StatusText() string { return m.statusText(true) }
+
+// statusText describes the current auth state. When the destination is not
+// private the pending code is withheld: /login status is otherwise a way to
+// print it into a group, straight past the guard on starting a sign-in there.
+func (m *Manager) statusText(private bool) string {
 	if !m.Applicable() {
 		return m.notApplicableText()
 	}
@@ -223,6 +231,8 @@ func (m *Manager) StatusText() string {
 	m.mu.Unlock()
 
 	switch {
+	case running && hasLast && !private:
+		return pendingElsewhereText
 	case running && hasLast:
 		return "Codex device login is in progress — finish it in the browser:\n\n" + promptText(last)
 	case running:
@@ -258,6 +268,15 @@ func (m *Manager) notApplicableText() string {
 		", which authenticates from its configured credentials."
 }
 
+// LoginPrivateOnlyText refuses to start a sign-in outside a 1:1 chat.
+const LoginPrivateOnlyText = "Send /login in a direct message with me, not here.\n\n" +
+	"The reply carries a one-time code that authorizes an account for the whole bot, " +
+	"and everyone in this chat would see it."
+
+// pendingElsewhereText reports a pending sign-in without reprinting its code.
+const pendingElsewhereText = "A Codex sign-in is in progress. Its link and one-time code went to the " +
+	"direct message that started it — send /login there to see them again."
+
 // LoginUsage is the /login help.
 const LoginUsage = "Usage:\n" +
 	"/login — start the Codex browser sign-in (or re-show the pending code)\n" +
@@ -265,34 +284,32 @@ const LoginUsage = "Usage:\n" +
 	"/login cancel — abort a pending sign-in\n" +
 	"/login force — sign in again even if already authorized"
 
-// Subscriber is where a pending login's background notices are delivered. ID
-// identifies the destination (a chat id) so the same destination asking twice is
-// collapsed to one subscription rather than being told everything twice; Notify
-// does the delivery and may be called minutes later, from another goroutine, so
-// it must build its own context rather than close over the update's.
+// Subscriber is where a /login reply and a pending login's background notices
+// are delivered.
+//
+// Private is the security-critical field: the one-time code authorizes an
+// account for the WHOLE bot, so whoever acts on it first binds their ChatGPT
+// account to it and every later run (and its history) goes through that account.
+// A code may therefore only ever reach a 1:1 destination. The judgement lives
+// HERE rather than in each adapter because it cannot be derived from the command
+// arguments: /login status also prints the pending code, so an argument-based
+// guard silently misses it. Manager redacts instead, on every path that could
+// carry a code.
+//
+// ID identifies the destination so the same one asking twice is collapsed to a
+// single subscription rather than being told everything twice. Notify does the
+// delivery and may be called minutes later, from another goroutine, so it must
+// build its own context rather than close over the update's.
 type Subscriber struct {
-	ID     string
-	Notify func(string)
+	ID      string
+	Private bool
+	Notify  func(string)
 }
 
 // deliver sends text when the subscriber can receive it.
 func (s Subscriber) deliver(text string) {
 	if s.Notify != nil {
 		s.Notify(text)
-	}
-}
-
-// StartsLogin reports whether these /login arguments would begin a sign-in, as
-// opposed to merely reporting or cancelling one. Adapters use it to refuse the
-// code-revealing forms in a group chat while leaving status and cancel available
-// everywhere; it shares Dispatch's switch so the two can never disagree about
-// which arguments print a code.
-func StartsLogin(args string) bool {
-	switch normalizeArgs(args) {
-	case "", "force", "again", "relogin":
-		return true
-	default:
-		return false
 	}
 }
 
@@ -323,7 +340,7 @@ func (m *Manager) Dispatch(base context.Context, args string, sub Subscriber) st
 	case "force", "again", "relogin":
 		return m.start(base, true, sub)
 	case "status":
-		return m.StatusText()
+		return m.statusText(sub.Private)
 	case "cancel", "abort", "stop":
 		if m.Cancel() {
 			return "Cancelled the pending Codex login."
@@ -340,6 +357,12 @@ func (m *Manager) Dispatch(base context.Context, args string, sub Subscriber) st
 // pending code is re-shown, never replaced) or Codex is already authorized and
 // force was not asked for.
 func (m *Manager) start(base context.Context, force bool, sub Subscriber) string {
+	// Refused before anything else: every reply below can carry the one-time code,
+	// and subscribing a group destination would also feed it the code when the
+	// prompt is broadcast.
+	if !sub.Private {
+		return LoginPrivateOnlyText
+	}
 	m.mu.Lock()
 	if m.running {
 		m.subscribeLocked(sub)
@@ -361,22 +384,25 @@ func (m *Manager) start(base context.Context, force bool, sub Subscriber) string
 	// context.WithoutCancel: the login must survive the update whose handler
 	// started it. The timeout is the real bound.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(base), m.cfg.timeout())
+	done := make(chan struct{})
 	m.running = true
 	m.cancel = cancel
+	m.done = done
 	m.hasLast = false
 	m.last = Prompt{}
 	m.subs = nil
 	m.subscribeLocked(sub)
 	m.mu.Unlock()
 
-	go m.run(ctx, cancel)
+	go m.run(ctx, cancel, done)
 	return "Starting the Codex sign-in — the link and one-time code arrive in a moment."
 }
 
 // subscribeLocked adds sub to the pending login's notice list, collapsing a
-// destination that is already subscribed. The caller must hold m.mu.
+// destination that is already subscribed. The caller must hold m.mu. Only
+// private destinations subscribe: the broadcast carries the one-time code.
 func (m *Manager) subscribeLocked(sub Subscriber) {
-	if sub.Notify == nil {
+	if sub.Notify == nil || !sub.Private {
 		return
 	}
 	for _, existing := range m.subs {
@@ -399,7 +425,9 @@ func (m *Manager) broadcast(text string) {
 }
 
 // run drives one login attempt and reports its result to every subscriber.
-func (m *Manager) run(ctx context.Context, cancel context.CancelFunc) {
+// Closing done is what lets Cancel wait for the child to actually be gone.
+func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, done chan struct{}) {
+	defer close(done)
 	defer cancel()
 	log := m.cfg.logger()
 
@@ -414,6 +442,7 @@ func (m *Manager) run(ctx context.Context, cancel context.CancelFunc) {
 	m.mu.Lock()
 	m.running = false
 	m.cancel = nil
+	m.done = nil
 	m.mu.Unlock()
 
 	if err == nil {
@@ -425,18 +454,41 @@ func (m *Manager) run(ctx context.Context, cancel context.CancelFunc) {
 	m.broadcast(failureText(err))
 }
 
+// cancelDrain bounds how long Cancel waits for the login child to be reaped.
+// Login signals the process GROUP and escalates to SIGKILL after killGrace, so
+// the real wait is milliseconds; the bound only stops shutdown from hanging on a
+// pathological child.
+const cancelDrain = 5 * time.Second
+
 // Cancel aborts a pending login, reporting whether there was one.
+//
+// It WAITS for the login goroutine to return rather than just cancelling its
+// context. Two things depend on that. On shutdown, `defer auth.Cancel()` is the
+// only thing that ends a login deliberately detached from every request context
+// — returning before the child is signalled and reaped would leave an orphaned
+// polling process, which is exactly what the defer exists to prevent. And a
+// /login issued right after a cancel must not be answered with "already pending"
+// plus a code that is already dead.
 func (m *Manager) Cancel() bool {
 	if m == nil {
 		return false
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if !m.running || m.cancel == nil {
+		m.mu.Unlock()
 		return false
 	}
-	m.cancel()
+	cancel, done := m.cancel, m.done
 	m.cancel = nil
+	m.mu.Unlock()
+
+	cancel()
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(cancelDrain):
+		}
+	}
 	return true
 }
 

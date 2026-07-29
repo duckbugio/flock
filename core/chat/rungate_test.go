@@ -189,3 +189,46 @@ func TestGateAllowsRunsWhenAuthorized(t *testing.T) {
 		})
 	}
 }
+
+// TestBlockedSubmitLeavesNoPendingMarker is the marker-leak regression. The
+// submit paths enqueue a marker BEFORE handing the job to the dispatcher, and a
+// blocked run can never reach the clean terminal that clears it — so blocking
+// inside the run would strand one marker per refused message. The pending store
+// is append-only, and a poller or cron firing into an unauthorized deployment
+// would grow it without bound and replay every marker on the next restart.
+func TestBlockedSubmitLeavesNoPendingMarker(t *testing.T) {
+	tests := []struct {
+		name  string
+		start func(s *Service)
+	}{
+		{"user message", func(s *Service) { s.Handle(context.Background(), testChatID, 7, "m1", "build it") }},
+		{"edited message", func(s *Service) { s.HandleEdit(context.Background(), testChatID, 7, "m1", "edited") }},
+		{"poller relay", func(s *Service) { s.Inject(testChatID, "a reviewer commented") }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, p, gate := newFakeChat(), newFakePending(), blockingGate()
+			s := gatedService(t, &countingRunner{}, c, gate, p)
+
+			for range 5 {
+				tt.start(s)
+			}
+			waitUntil(t, func() bool { return gate.calls() >= 5 })
+
+			if got := p.count(); got != 0 {
+				t.Errorf("five blocked submits left %d pending markers, want 0", got)
+			}
+		})
+	}
+}
+
+// TestBlockedScheduledFireIsReportedDropped: the scheduler reads the bool to know
+// the fire did not take, exactly as it does for the cost cap.
+func TestBlockedScheduledFireIsReportedDropped(t *testing.T) {
+	c, gate := newFakeChat(), blockingGate()
+	s := gatedService(t, &countingRunner{}, c, gate, newFakePending())
+
+	if s.InjectScheduled(testChatID, "nightly", 7) {
+		t.Error("InjectScheduled reported the fire enqueued while unauthorized")
+	}
+}

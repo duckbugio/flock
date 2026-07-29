@@ -262,8 +262,11 @@ func (s *Service) Handle(_ context.Context, chatID ChatID, userID int64, msgID M
 // behaves exactly like Handle (trailing-arg text path). Edit-tracking and
 // dispatch semantics are identical to Handle.
 func (s *Service) HandleMedia(
-	_ context.Context, chatID ChatID, userID int64, msgID MessageID, prompt string, images []agent.ImageInput,
+	ctx context.Context, chatID ChatID, userID int64, msgID MessageID, prompt string, images []agent.ImageInput,
 ) {
+	if s.blockSubmit(ctx, chatID) {
+		return
+	}
 	s.mu.Lock()
 	s.lastMsg[chatID] = msgID
 	// A real user message opens a fresh chapter: the post-run verification retry
@@ -289,6 +292,9 @@ func (s *Service) HandleMedia(
 // allow-listed user holds); these synthetic relays are rare and are not rate-/
 // cost-gated on the inbound path.
 func (s *Service) Inject(chatID ChatID, prompt string) {
+	if s.blockSubmit(context.Background(), chatID) {
+		return
+	}
 	// Enqueue before Submit so a poller-injected run is captured for auto-resume
 	// too (it should resume if killed mid-flight, same as a user message).
 	id := s.enqueuePending(chatID, prompt)
@@ -314,6 +320,9 @@ func (s *Service) Inject(chatID ChatID, prompt string) {
 // and true when the run was enqueued. Inject, by contrast, runs as the sentinel
 // user 0, is durable (enqueues a marker), and blocks on a full buffer.
 func (s *Service) InjectScheduled(chatID ChatID, prompt string, userID int64) bool {
+	if s.blockSubmit(context.Background(), chatID) {
+		return false
+	}
 	if s.costs != nil && !s.costs.Allowed(userID, s.costCapUSD) {
 		return false
 	}
@@ -330,6 +339,12 @@ func (s *Service) InjectScheduled(chatID ChatID, prompt string, userID int64) bo
 // It deliberately does not touch edit-tracking state (like Inject), so replay
 // never interferes with a real user's supersede logic.
 func (s *Service) ResumePending(chatID ChatID, m pending.Marker) {
+	// The marker is deliberately left in place: it was not created here, and an
+	// interrupted run must not be lost to the outage that is blocking it. It
+	// replays after the sign-in, on the next restart.
+	if s.blockSubmit(context.Background(), chatID) {
+		return
+	}
 	s.dispatch.Submit(chatID, func(ctx context.Context) {
 		s.run(ctx, chatID, 0, m.Prompt, nil, m.ID)
 	})
@@ -349,8 +364,11 @@ func (s *Service) HandleEdit(ctx context.Context, chatID ChatID, userID int64, m
 // HandleEditMedia is HandleEdit with optional image attachments (see
 // HandleMedia). An empty images slice behaves exactly like HandleEdit.
 func (s *Service) HandleEditMedia(
-	_ context.Context, chatID ChatID, userID int64, msgID MessageID, prompt string, images []agent.ImageInput,
+	ctx context.Context, chatID ChatID, userID int64, msgID MessageID, prompt string, images []agent.ImageInput,
 ) {
+	if s.blockSubmit(ctx, chatID) {
+		return
+	}
 	s.mu.Lock()
 	last, ok := s.lastMsg[chatID]
 	supersede := ok && last == msgID
@@ -413,15 +431,6 @@ func (s *Service) Stop(runID string) bool {
 func (s *Service) run(
 	ctx context.Context, chatID ChatID, userID int64, prompt string, images []agent.ImageInput, markerID string,
 ) {
-	// The provider gate, at the single point EVERY run passes through: a user
-	// message, a poller-injected PR comment, a cron fire, a workspace follow-up and
-	// the restart replay all land here. A blocked run is dropped before any work —
-	// and before the pending marker would be cleared, so an interrupted run stays
-	// queued for after the sign-in instead of being lost to it.
-	if s.blockRun(ctx, chatID) {
-		return
-	}
-
 	runID := strconv.FormatUint(s.runSeq.Add(1), 10)
 	s.mu.Lock()
 	s.runChat[runID] = chatID

@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/chat"
@@ -706,6 +708,47 @@ func TestReceiverLoginWithoutManagerIsInert(t *testing.T) {
 	}
 }
 
+// pendingLoginManager returns a manager with a device login already in flight,
+// its code issued, so a test can assert what each destination is allowed to see.
+func pendingLoginManager(t *testing.T) *codexauth.Manager {
+	t.Helper()
+	m := codexauth.NewManager(codexauth.Config{
+		Backend:     codexauth.BackendCodex,
+		AuthMode:    codexauth.AuthSubscription,
+		RequireAuth: true,
+		Home:        t.TempDir(),
+		Bin:         fakeCodexLogin(t),
+		Env:         []string{"PATH=" + os.Getenv("PATH")},
+	})
+	t.Cleanup(func() { m.Cancel() })
+
+	got := make(chan string, 4)
+	m.Dispatch(context.Background(), "", codexauth.Subscriber{
+		ID: "dm", Private: true, Notify: func(text string) { got <- text },
+	})
+	select {
+	case <-got:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the fake login never issued a prompt")
+	}
+	return m
+}
+
+// fakeCodexLogin writes a stand-in Codex CLI that prints the real device-auth
+// prompt and then blocks, like the real one polling for the browser step.
+func fakeCodexLogin(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "codex")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' '1. Open this link' '   https://auth.openai.com/codex/device' \\\n" +
+		"  '2. Enter this one-time code (expires in 15 minutes)' '   XER9-NWCA2'\n" +
+		"sleep 30\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil { //nolint:gosec // test fixture must be executable
+		t.Fatalf("write fake codex: %v", err)
+	}
+	return path
+}
+
 // TestReceiverLoginRefusedInConversation: the reply goes to the PEER, so in a
 // community conversation the verification link and one-time code would be
 // readable by every participant — and whoever acts on the code first binds THEIR
@@ -726,19 +769,43 @@ func TestReceiverLoginRefusedInConversation(t *testing.T) {
 	}
 }
 
-// TestReceiverLoginStatusAllowedInConversation: status reveals no code, so it
-// stays available everywhere — refusing it would just be noise.
-func TestReceiverLoginStatusAllowedInConversation(t *testing.T) {
+// TestReceiverLoginStatusInConversationHidesAPendingCode is the regression for
+// the hole an argument-based guard left: /login status ALSO re-shows a pending
+// one-time code, so refusing only the code-starting arguments let it into the
+// conversation anyway — where anyone, allow-listed or not, could bind their own
+// ChatGPT account to the bot.
+func TestReceiverLoginStatusInConversationHidesAPendingCode(t *testing.T) {
 	svc := &fakeService{}
 	notices := &fakeNotice{}
-	r := unauthorizedCodexReceiver(t, svc, notices)
+	r := newTestReceiverWithAuth(svc, notices, pendingLoginManager(t))
 
 	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{
 		FromID: 42, PeerID: 2000000001, Text: "/login status",
 	}))
 
-	if len(notices.texts) != 1 || !strings.Contains(notices.texts[0], "NOT authorized") {
-		t.Errorf("notices = %v, want the status reply", notices.texts)
+	if len(notices.texts) != 1 {
+		t.Fatalf("notices = %v, want exactly one", notices.texts)
+	}
+	if strings.Contains(notices.texts[0], "XER9-NWCA2") || strings.Contains(notices.texts[0], "http") {
+		t.Errorf("the pending code or link reached a conversation: %q", notices.texts[0])
+	}
+	if !strings.Contains(notices.texts[0], "in progress") {
+		t.Errorf("status = %q, want it to still report the pending sign-in", notices.texts[0])
+	}
+}
+
+// TestReceiverLoginStatusInDirectMessageShowsTheCode: the same command in a 1:1
+// chat must still re-show the code — that is what makes a lost message
+// recoverable.
+func TestReceiverLoginStatusInDirectMessageShowsTheCode(t *testing.T) {
+	svc := &fakeService{}
+	notices := &fakeNotice{}
+	r := newTestReceiverWithAuth(svc, notices, pendingLoginManager(t))
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 42, Text: "/login status"}))
+
+	if len(notices.texts) != 1 || !strings.Contains(notices.texts[0], "XER9-NWCA2") {
+		t.Errorf("notices = %v, want the pending code re-shown in a direct message", notices.texts)
 	}
 }
 

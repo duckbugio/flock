@@ -25,10 +25,15 @@ type collector struct {
 
 func newCollector() *collector { return &collector{ch: make(chan string, 8)} }
 
+// dmSub is a private (1:1) destination — the only kind allowed to see a code.
+var dmSub = Subscriber{ID: "dm", Private: true}
+
 func (c *collector) notify(text string) { c.ch <- text }
 
 // sub is the collector as a Subscriber for destination id.
-func (c *collector) sub(id string) Subscriber { return Subscriber{ID: id, Notify: c.notify} }
+func (c *collector) sub(id string) Subscriber {
+	return Subscriber{ID: id, Private: true, Notify: c.notify}
+}
 
 // next returns the next notice, failing the test if none arrives in time.
 func (c *collector) next(t *testing.T) string {
@@ -154,7 +159,7 @@ func TestNilManagerIsInert(t *testing.T) {
 	if m.Cancel() {
 		t.Error("nil Manager cancelled a login")
 	}
-	if got := m.Dispatch(context.Background(), "", Subscriber{}); got != NoLoginNeededText {
+	if got := m.Dispatch(context.Background(), "", Subscriber{ID: "dm", Private: true}); got != NoLoginNeededText {
 		t.Errorf("nil Manager Dispatch = %q, want NoLoginNeededText", got)
 	}
 }
@@ -163,11 +168,12 @@ func TestNilManagerIsInert(t *testing.T) {
 // itself instead of running anything.
 func TestDispatchNotApplicable(t *testing.T) {
 	claude := NewManager(Config{Backend: "claude"})
-	if got := claude.Dispatch(context.Background(), "", Subscriber{}); !strings.Contains(got, "claude") {
+	if got := claude.Dispatch(context.Background(), "", Subscriber{ID: "dm", Private: true}); !strings.Contains(got, "claude") {
 		t.Errorf("Dispatch = %q, want it to name the configured backend", got)
 	}
 	billing := NewManager(Config{Backend: BackendCodex, AuthMode: AuthBilling})
-	if got := billing.Dispatch(context.Background(), "", Subscriber{}); !strings.Contains(got, "CODEX_API_KEY") {
+	dm := Subscriber{ID: "dm", Private: true}
+	if got := billing.Dispatch(context.Background(), "", dm); !strings.Contains(got, "CODEX_API_KEY") {
 		t.Errorf("Dispatch = %q, want the billing-mode explanation", got)
 	}
 }
@@ -270,7 +276,7 @@ func TestDispatchCancel(t *testing.T) {
 		Env:         []string{"PATH=" + os.Getenv("PATH")},
 	})
 
-	if got := m.Dispatch(context.Background(), "cancel", Subscriber{}); !strings.Contains(got, "No Codex login is pending") {
+	if got := m.Dispatch(context.Background(), "cancel", dmSub); !strings.Contains(got, "No Codex login is pending") {
 		t.Errorf("cancel with nothing pending = %q", got)
 	}
 
@@ -294,7 +300,7 @@ func TestDispatchAlreadyAuthorized(t *testing.T) {
 	writeAuthFile(t, home)
 	m := NewManager(Config{Backend: BackendCodex, AuthMode: AuthSubscription, RequireAuth: true, Home: home})
 
-	got := m.Dispatch(context.Background(), "", Subscriber{})
+	got := m.Dispatch(context.Background(), "", Subscriber{ID: "dm", Private: true})
 	if !strings.Contains(got, "authorized") || !strings.Contains(got, "/login force") {
 		t.Errorf("Dispatch = %q, want the authorized state plus the force hint", got)
 	}
@@ -304,13 +310,13 @@ func TestDispatchAlreadyAuthorized(t *testing.T) {
 func TestDispatchStatusAndUsage(t *testing.T) {
 	m := NewManager(Config{Backend: BackendCodex, AuthMode: AuthSubscription, RequireAuth: true, Home: t.TempDir()})
 
-	if got := m.Dispatch(context.Background(), "status", Subscriber{}); !strings.Contains(got, "NOT authorized") {
+	if got := m.Dispatch(context.Background(), "status", dmSub); !strings.Contains(got, "NOT authorized") {
 		t.Errorf("status = %q, want the unauthorized state", got)
 	}
-	if got := m.Dispatch(context.Background(), "help", Subscriber{}); got != LoginUsage {
+	if got := m.Dispatch(context.Background(), "help", Subscriber{ID: "dm", Private: true}); got != LoginUsage {
 		t.Errorf("help = %q, want LoginUsage", got)
 	}
-	if got := m.Dispatch(context.Background(), "wat", Subscriber{}); !strings.Contains(got, "Unknown /login argument") {
+	if got := m.Dispatch(context.Background(), "wat", dmSub); !strings.Contains(got, "Unknown /login argument") {
 		t.Errorf("unknown arg = %q, want the usage hint", got)
 	}
 }
@@ -404,19 +410,120 @@ func TestSubscriptionLoginDropsInheritedAPIKey(t *testing.T) {
 	}
 }
 
-// TestStartsLogin pins which arguments print a code — the adapters gate group
-// chats on exactly this, so it must agree with Dispatch's own switch.
-func TestStartsLogin(t *testing.T) {
-	for _, args := range []string{"", "  ", "force", "FORCE", "again", "relogin"} {
-		if !StartsLogin(args) {
-			t.Errorf("StartsLogin(%q) = false, want true (this form reveals a code)", args)
-		}
+// TestNoCodeReachesANonPrivateDestination is the regression for the guard that
+// an argument-based check missed: /login status ALSO prints a pending code, so
+// the decision has to key off the destination, not the arguments. A group asking
+// anything at all must never see the link or the code.
+func TestNoCodeReachesANonPrivateDestination(t *testing.T) {
+	bin := fakeCodex(t, printBanner+"sleep 30\n")
+	m := NewManager(Config{
+		Backend:     BackendCodex,
+		AuthMode:    AuthSubscription,
+		RequireAuth: true,
+		Bin:         bin,
+		Home:        t.TempDir(),
+		Env:         []string{"PATH=" + os.Getenv("PATH")},
+	})
+	t.Cleanup(func() { m.Cancel() })
+
+	// A sign-in is pending, started from a direct message.
+	dm := newCollector()
+	m.Dispatch(context.Background(), "", Subscriber{ID: "dm", Private: true, Notify: dm.notify})
+	if p := dm.next(t); !strings.Contains(p, deviceCode) {
+		t.Fatalf("the private starter did not get the code: %q", p)
 	}
-	for _, args := range []string{"status", "cancel", "abort", "help", "nonsense"} {
-		if StartsLogin(args) {
-			t.Errorf("StartsLogin(%q) = true, want false", args)
-		}
+
+	group := Subscriber{ID: "group", Private: false, Notify: func(string) {}}
+	for _, args := range []string{"", "status", "force", "again"} {
+		t.Run("args="+args, func(t *testing.T) {
+			got := m.Dispatch(context.Background(), args, group)
+			if strings.Contains(got, deviceCode) {
+				t.Errorf("/login %q leaked the one-time code into a group: %q", args, got)
+			}
+			if strings.Contains(got, deviceURL) {
+				t.Errorf("/login %q leaked the verification link into a group: %q", args, got)
+			}
+		})
 	}
+}
+
+// TestGroupStatusStillReportsSomethingUseful: withholding the code must not turn
+// into silence — a user in a group is told a sign-in is pending and where it went.
+func TestGroupStatusStillReportsSomethingUseful(t *testing.T) {
+	m := NewManager(Config{
+		Backend: BackendCodex, AuthMode: AuthSubscription, RequireAuth: true, Home: t.TempDir(),
+	})
+	if got := m.Dispatch(context.Background(), "status", Subscriber{ID: "group"}); !strings.Contains(got, "NOT authorized") {
+		t.Errorf("group status = %q, want the state (no code is involved when none is pending)", got)
+	}
+	if got := m.Dispatch(context.Background(), "", Subscriber{ID: "group"}); !strings.Contains(got, "direct message") {
+		t.Errorf("group /login = %q, want the direct-message refusal", got)
+	}
+}
+
+// TestGroupSubscriberNeverJoinsTheBroadcast: a non-private destination must not
+// be subscribed either, or the prompt broadcast would hand it the code.
+func TestGroupSubscriberNeverJoinsTheBroadcast(t *testing.T) {
+	bin := fakeCodex(t, printBanner+"sleep 30\n")
+	m := NewManager(Config{
+		Backend:     BackendCodex,
+		AuthMode:    AuthSubscription,
+		RequireAuth: true,
+		Bin:         bin,
+		Home:        t.TempDir(),
+		Env:         []string{"PATH=" + os.Getenv("PATH")},
+	})
+	t.Cleanup(func() { m.Cancel() })
+
+	group := newCollector()
+	dm := newCollector()
+	m.Dispatch(context.Background(), "", Subscriber{ID: "dm", Private: true, Notify: dm.notify})
+	dm.next(t) // the prompt
+	m.Dispatch(context.Background(), "", Subscriber{ID: "group", Private: false, Notify: group.notify})
+
+	m.Cancel()
+	if got := dm.next(t); !strings.Contains(got, "cancelled") {
+		t.Fatalf("the private subscriber did not get the outcome: %q", got)
+	}
+	select {
+	case leaked := <-group.ch:
+		t.Errorf("a group destination received a login notice: %q", leaked)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestCancelWaitsForTheChild: Cancel must not return while the login goroutine is
+// still unwinding. Shutdown relies on it to reap the polling child, and a /login
+// issued straight after a cancel must start fresh rather than be told "already
+// pending" alongside a code that is already dead.
+func TestCancelWaitsForTheChild(t *testing.T) {
+	bin := fakeCodex(t, printBanner+"sleep 30\n")
+	m := NewManager(Config{
+		Backend:     BackendCodex,
+		AuthMode:    AuthSubscription,
+		RequireAuth: true,
+		Bin:         bin,
+		Home:        t.TempDir(),
+		Env:         []string{"PATH=" + os.Getenv("PATH")},
+	})
+
+	c := newCollector()
+	m.Dispatch(context.Background(), "", c.sub("dm"))
+	if p := c.next(t); !strings.Contains(p, deviceCode) {
+		t.Fatalf("no prompt: %q", p)
+	}
+
+	if !m.Cancel() {
+		t.Fatal("Cancel reported nothing pending")
+	}
+	// Immediately after Cancel the manager must already be idle.
+	if got := m.StatusText(); strings.Contains(got, "in progress") {
+		t.Errorf("StatusText = %q right after Cancel; the run was still marked pending", got)
+	}
+	if got := m.Dispatch(context.Background(), "", c.sub("dm")); strings.Contains(got, "already pending") {
+		t.Errorf("a fresh /login after cancel was refused with a dead code: %q", got)
+	}
+	m.Cancel()
 }
 
 // TestEveryAskerLearnsTheOutcome: a second /login while one is pending re-shows

@@ -522,10 +522,14 @@ Delivered:
   marching into an unauthenticated CLI once per tick. The adapters keep an early
   check on the message path so an unauthorized deploy never pays for a voice
   transcription or an upload download. A blocked replay keeps its pending marker.
-- `/login` starts a sign-in only in a direct message; `status` and `cancel` work
-  anywhere. `CODEX_REQUIRE_AUTH=false` still opts out of blocking entirely, and
-  startup logs `authorized` next to `credentials_present` so that opt-out cannot
-  read as "all good".
+- Where a one-time code may be printed is decided by `codexauth` from the
+  destination, not by the adapters inspecting the arguments: `/login status` also
+  re-shows a pending code, so an argument-based guard misses it. A non-private
+  destination gets a redirect instead of the code, is refused when it tries to
+  START a sign-in, and is never subscribed to the prompt broadcast.
+- `CODEX_REQUIRE_AUTH=false` still opts out of blocking entirely, and startup
+  logs `authorized` next to `credentials_present` so that opt-out cannot read as
+  "all good".
 
 Acceptance:
 

@@ -72,9 +72,11 @@ func TestCommandSenderAllowList(t *testing.T) {
 // TestReservedBotCommandsFromCanonicalSet asserts the published Telegram command
 // menu is built one-for-one from core/chat.ReservedCommands (the single source of
 // truth) — same names, same order, same descriptions — so the menu can never
-// drift from the commands the handlers route on.
+// drift from the commands the handlers route on. The manager here is a Codex
+// subscription one, for which every reserved command applies; see
+// TestMenuOmitsLoginWithoutAnInteractiveSignIn for the one conditional entry.
 func TestReservedBotCommandsFromCanonicalSet(t *testing.T) {
-	got := reservedBotCommands()
+	got := reservedBotCommands(codexAuthForMenu)
 	if len(got) != len(chat.ReservedCommands) {
 		t.Fatalf("reservedBotCommands has %d entries, want %d", len(got), len(chat.ReservedCommands))
 	}

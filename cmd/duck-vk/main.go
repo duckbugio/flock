@@ -286,6 +286,7 @@ func run() int {
 						logger.Warn("poller: bad chat id in branch", "chat_id", c.ChatID)
 						continue
 					}
+					//nolint:contextcheck // detached by design: the run (and its notice) must outlive this poll/replay context.
 					svc.Inject(c.ChatID, formatPRComment(c))
 				}
 			}

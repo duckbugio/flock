@@ -349,7 +349,7 @@ func run() int {
 	// source the handlers above route on). Native Claude commands (/loop, /security-review, …)
 	// are intentionally NOT listed — they pass through as free text. Best-effort:
 	// a failure here only means an empty/stale menu, so log and continue.
-	if _, err := b.SetMyCommands(ctx, &bot.SetMyCommandsParams{Commands: reservedBotCommands()}); err != nil {
+	if _, err := b.SetMyCommands(ctx, &bot.SetMyCommandsParams{Commands: reservedBotCommands(auth)}); err != nil {
 		logger.Warn("set telegram command menu", "error", err)
 	}
 
@@ -379,6 +379,7 @@ func run() int {
 						logger.Warn("poller: bad chat id in branch", "chat_id", c.ChatID)
 						continue
 					}
+					//nolint:contextcheck // detached by design: the run (and its notice) must outlive this poll/replay context.
 					svc.Inject(c.ChatID, formatPRComment(c))
 				}
 			}
@@ -965,9 +966,16 @@ func starHandler(cfg config.Config, svc *chat.Service) bot.HandlerFunc {
 // reservedBotCommands maps the canonical reserved set (core/chat) to the Telegram
 // command-menu model published via SetMyCommands. It is the single place the menu
 // is built, so the menu can never drift from the commands the handlers route on.
-func reservedBotCommands() []models.BotCommand {
+func reservedBotCommands(auth *codexauth.Manager) []models.BotCommand {
 	cmds := make([]models.BotCommand, 0, len(chat.ReservedCommands))
 	for _, c := range chat.ReservedCommands {
+		// /login is meaningless on a deployment with no interactive sign-in (Claude,
+		// an API-key backend, Codex billing): it would sit in the menu only to answer
+		// that it is not needed. The handler stays registered either way, so a user
+		// who types it still gets that answer.
+		if c.Name == loginCommand && !auth.Applicable() {
+			continue
+		}
 		cmds = append(cmds, models.BotCommand{Command: c.Name, Description: c.Description})
 	}
 	return cmds
@@ -985,13 +993,13 @@ func reservedHandlers(
 	cfg config.Config, svc *chat.Service, sched *schedule.Manager, auth *codexauth.Manager,
 ) map[string]bot.HandlerFunc {
 	return map[string]bot.HandlerFunc{
-		"start":    startHandler(cfg),
-		"help":     helpHandler(cfg),
-		"new":      newHandler(cfg, svc),
-		"stop":     stopCommandHandler(cfg, svc),
-		"schedule": scheduleHandler(cfg, sched),
-		"goal":     goalHandler(cfg, svc),
-		"login":    loginHandler(cfg, auth),
+		"start":      startHandler(cfg),
+		"help":       helpHandler(cfg),
+		"new":        newHandler(cfg, svc),
+		"stop":       stopCommandHandler(cfg, svc),
+		"schedule":   scheduleHandler(cfg, sched),
+		"goal":       goalHandler(cfg, svc),
+		loginCommand: loginHandler(cfg, auth),
 	}
 }
 
@@ -999,6 +1007,10 @@ func reservedHandlers(
 // device-code sign-in. The command is deliberately available even while the
 // deployment is unauthorized — it is the only way out of that state — and, like
 // every reserved handler, is allow-list gated and never starts a run.
+//
+// Whether a one-time code may be printed here is decided by codexauth from the
+// Private flag, not by this handler inspecting the arguments: /login status also
+// re-shows a pending code, so an argument-based guard would let it straight past.
 //
 // The device flow outlives this handler: Dispatch returns an immediate reply and
 // keeps working in the background, delivering the link, the one-time code, and
@@ -1011,35 +1023,24 @@ func loginHandler(cfg config.Config, auth *codexauth.Manager) bot.HandlerFunc {
 		if !ok {
 			return
 		}
-		args := commandArgs(update.Message.Text)
-		if update.Message.Chat.Type != models.ChatTypePrivate && codexauth.StartsLogin(args) {
-			sendCommandReply(ctx, b, chatID, loginGroupChatText)
-			return
-		}
 		sub := codexauth.Subscriber{
-			ID: chatIDStr(chatID),
+			ID:      chatIDStr(chatID),
+			Private: update.Message.Chat.Type == models.ChatTypePrivate,
 			Notify: func(text string) {
 				sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginNotifyTimeout)
 				defer cancel()
 				sendCommandReply(sendCtx, b, chatID, text)
 			},
 		}
-		sendCommandReply(ctx, b, chatID, auth.Dispatch(ctx, args, sub))
+		sendCommandReply(ctx, b, chatID, auth.Dispatch(ctx, commandArgs(update.Message.Text), sub))
 	}
 }
 
-// loginGroupChatText refuses to start a sign-in in a group chat. The reply goes
-// to the CHAT, not the sender, so in a group the verification link and one-time
-// code would be readable by every member, allow-listed or not — and whoever acts
-// on the code first binds THEIR ChatGPT account to the bot, so every later run
-// (and its history) would go through that account. status and cancel stay
-// available everywhere: neither reveals a code.
-const loginGroupChatText = "Send /login in a direct message with me, not in a group.\n\n" +
-	"The sign-in reply carries a one-time code that authorizes an account for the whole bot, " +
-	"and everyone in this group would see it."
-
 // loginNotifyTimeout bounds one background login notice delivery.
 const loginNotifyTimeout = 30 * time.Second
+
+// loginCommand is the reserved command name the sign-in flow is published under.
+const loginCommand = "login"
 
 // commandMatch routes a message whose leading bot command is name, tolerating
 // the @botname suffix Telegram adds in groups (/new@duck_bot). It only routes;
@@ -1256,6 +1257,7 @@ func resumePending(
 					}
 				}
 			}
+			//nolint:contextcheck // detached by design: the run (and its notice) must outlive this poll/replay context.
 			svc.ResumePending(chatID, m)
 		}
 	}
