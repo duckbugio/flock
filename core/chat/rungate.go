@@ -47,8 +47,12 @@ func (s *Service) blockSubmit(ctx context.Context, chatID ChatID) bool {
 	}
 	notice, blocked := s.auth.BlockedNotice()
 	if !blocked {
+		// Clear EVERY chat, not just this one: authorization is process-wide, so one
+		// chat submitting is proof the outage is over for all of them. Clearing only
+		// the submitting chat would leave a chat that stayed quiet through the
+		// recovery window silently un-notified when the next lapse hit it.
 		s.mu.Lock()
-		delete(s.authNotified, chatID)
+		clear(s.authNotified)
 		s.mu.Unlock()
 		return false
 	}

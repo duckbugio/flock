@@ -396,9 +396,9 @@ func (r *Receiver) dispatchReserved(ctx context.Context, name string, msg messag
 	peerID := msg.PeerID
 	switch name {
 	case "start":
-		r.notify(ctx, peerID, welcomeText(r.auth.Applicable()))
+		r.notify(ctx, peerID, welcomeText(chat.LoginVisibilityFor(r.auth.Applicable())))
 	case "help":
-		r.notify(ctx, peerID, HelpText(r.auth.Applicable()))
+		r.notify(ctx, peerID, HelpText(chat.LoginVisibilityFor(r.auth.Applicable())))
 	case "new":
 		if err := r.svc.NewSession(chatIDStr(peerID)); err != nil {
 			r.logger.Error("vk: reset session", "peer_id", peerID, "error", err)

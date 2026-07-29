@@ -702,3 +702,36 @@ func TestGroupStatusHidesTheHostPath(t *testing.T) {
 		t.Errorf("direct-message status = %q, want the path an operator needs", dm)
 	}
 }
+
+// TestCancelIsPrivateOnly: cancel is the one state-MUTATING argument, so it obeys
+// the same rule as starting. Otherwise a conversation could abort a sign-in
+// running in someone else's direct message — and the confirmation would itself
+// reveal that one is under way.
+func TestCancelIsPrivateOnly(t *testing.T) {
+	bin := fakeCodex(t, printBanner+"sleep 30\n")
+	m := NewManager(Config{
+		Backend:     BackendCodex,
+		AuthMode:    AuthSubscription,
+		RequireAuth: true,
+		Bin:         bin,
+		Home:        t.TempDir(),
+		Env:         []string{"PATH=" + os.Getenv("PATH")},
+	})
+	t.Cleanup(func() { m.Cancel() })
+
+	c := newCollector()
+	m.Dispatch(context.Background(), "", c.sub("dm"))
+	c.awaitCode(t)
+
+	got := m.Dispatch(context.Background(), "cancel", Subscriber{ID: "group"})
+	if got != LoginPrivateOnlyText {
+		t.Errorf("group cancel = %q, want the direct-message refusal", got)
+	}
+	if !strings.Contains(m.StatusText(), "in progress") {
+		t.Error("a group aborted a sign-in owned by a direct message")
+	}
+
+	if reply := m.Dispatch(context.Background(), "cancel", dmSub); !strings.Contains(reply, "Cancelled") {
+		t.Errorf("direct-message cancel = %q, want it to work", reply)
+	}
+}

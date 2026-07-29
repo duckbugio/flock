@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,6 +14,7 @@ import (
 	"github.com/duckbugio/flock/core/chat"
 	"github.com/duckbugio/flock/core/codexauth"
 	"github.com/duckbugio/flock/core/codexauth/codexauthtest"
+	"github.com/duckbugio/flock/core/codexauth/logintest"
 	"github.com/duckbugio/flock/core/goal"
 	"github.com/duckbugio/flock/core/schedule"
 )
@@ -368,7 +368,7 @@ func TestReceiverStartTextCommand(t *testing.T) {
 	if len(svc.handleCalls) != 0 {
 		t.Errorf("/start should not start a run, got %d Handle calls", len(svc.handleCalls))
 	}
-	if len(notices.texts) != 1 || notices.texts[0] != welcomeText(false) {
+	if len(notices.texts) != 1 || notices.texts[0] != welcomeText(chat.WithoutLogin) {
 		t.Errorf("notice texts = %v, want one welcome notice", notices.texts)
 	}
 }
@@ -414,7 +414,7 @@ func TestReceiverHelpTextCommand(t *testing.T) {
 	if len(svc.handleCalls) != 0 {
 		t.Errorf("/help should not start a run, got %d Handle calls", len(svc.handleCalls))
 	}
-	if len(notices.texts) != 1 || notices.texts[0] != HelpText(false) {
+	if len(notices.texts) != 1 || notices.texts[0] != HelpText(chat.WithoutLogin) {
 		t.Errorf("notice texts = %v, want one HelpText notice", notices.texts)
 	}
 }
@@ -708,28 +708,6 @@ func TestReceiverLoginWithoutManagerIsInert(t *testing.T) {
 	}
 }
 
-// pendingLoginManager returns a manager with a device login already in flight,
-// its code issued, so a test can assert what each destination is allowed to see.
-func pendingLoginManager(t *testing.T) *codexauth.Manager {
-	t.Helper()
-	m := codexauth.NewManager(codexauth.Config{
-		Backend:     codexauth.BackendCodex,
-		AuthMode:    codexauth.AuthSubscription,
-		RequireAuth: true,
-		Home:        t.TempDir(),
-		Bin:         codexauthtest.WriteCLI(t, codexauthtest.Polling),
-		Env:         []string{"PATH=" + os.Getenv("PATH")},
-	})
-	t.Cleanup(func() { m.Cancel() })
-
-	issued := make(chan string, 8)
-	m.Dispatch(context.Background(), "", codexauth.Subscriber{
-		ID: "dm", Private: true, Notify: func(text string) { issued <- text },
-	})
-	codexauthtest.AwaitCode(t, issued)
-	return m
-}
-
 // TestReceiverLoginRefusedInConversation: the reply goes to the PEER, so in a
 // community conversation the verification link and one-time code would be
 // readable by every participant — and whoever acts on the code first binds THEIR
@@ -758,7 +736,7 @@ func TestReceiverLoginRefusedInConversation(t *testing.T) {
 func TestReceiverLoginStatusInConversationHidesAPendingCode(t *testing.T) {
 	svc := &fakeService{}
 	notices := &fakeNotice{}
-	r := newTestReceiverWithAuth(svc, notices, pendingLoginManager(t))
+	r := newTestReceiverWithAuth(svc, notices, logintest.PendingLogin(t))
 
 	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{
 		FromID: 42, PeerID: 2000000001, Text: "/login status",
@@ -781,7 +759,7 @@ func TestReceiverLoginStatusInConversationHidesAPendingCode(t *testing.T) {
 func TestReceiverLoginStatusInDirectMessageShowsTheCode(t *testing.T) {
 	svc := &fakeService{}
 	notices := &fakeNotice{}
-	r := newTestReceiverWithAuth(svc, notices, pendingLoginManager(t))
+	r := newTestReceiverWithAuth(svc, notices, logintest.PendingLogin(t))
 
 	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 42, Text: "/login status"}))
 
@@ -810,13 +788,13 @@ func TestReceiverLoginRejectsDisallowedSender(t *testing.T) {
 // line appears only where an interactive sign-in exists, so the two adapters (and
 // Telegram's command menu) cannot disagree.
 func TestHelpListsLoginOnlyWhereItApplies(t *testing.T) {
-	if !strings.Contains(HelpText(true), "/login") {
+	if !strings.Contains(HelpText(chat.WithLogin), "/login") {
 		t.Error("help omits /login where the sign-in is real")
 	}
-	if strings.Contains(HelpText(false), "/login") {
+	if strings.Contains(HelpText(chat.WithoutLogin), "/login") {
 		t.Error("help advertises /login where there is no sign-in")
 	}
-	if strings.Contains(welcomeText(false), "/login") {
+	if strings.Contains(welcomeText(chat.WithoutLogin), "/login") {
 		t.Error("welcome advertises /login where there is no sign-in")
 	}
 }
@@ -826,7 +804,7 @@ func TestHelpListsLoginOnlyWhereItApplies(t *testing.T) {
 // community peers private too, which is far too loose for the flag that decides
 // who may see a code that takes over the bot's account.
 func TestPrivacyFollowsTheDirectMessageInvariant(t *testing.T) {
-	auth := pendingLoginManager(t)
+	auth := logintest.PendingLogin(t)
 
 	tests := []struct {
 		name      string
@@ -864,7 +842,7 @@ func TestPrivacyFollowsTheDirectMessageInvariant(t *testing.T) {
 // drift silently — the adapters would still share the applicability predicate but
 // not the words.
 func TestHelpLineComesFromTheCanonicalSet(t *testing.T) {
-	if !strings.Contains(HelpText(true), chat.LoginHelpLine) {
+	if !strings.Contains(HelpText(chat.WithLogin), chat.LoginHelpLine) {
 		t.Error("the VK help does not render the canonical /login line")
 	}
 }

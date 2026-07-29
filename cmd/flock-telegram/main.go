@@ -1079,7 +1079,7 @@ func startHandler(cfg config.Config, auth *codexauth.Manager) bot.HandlerFunc {
 		if !ok {
 			return
 		}
-		sendCommandReply(ctx, b, chatID, telegram.WelcomeText(auth.Applicable()))
+		sendCommandReply(ctx, b, chatID, telegram.WelcomeText(chat.LoginVisibilityFor(auth.Applicable())))
 	}
 }
 
@@ -1091,7 +1091,7 @@ func helpHandler(cfg config.Config, auth *codexauth.Manager) bot.HandlerFunc {
 		if !ok {
 			return
 		}
-		sendCommandReply(ctx, b, chatID, telegram.HelpText(auth.Applicable()))
+		sendCommandReply(ctx, b, chatID, telegram.HelpText(chat.LoginVisibilityFor(auth.Applicable())))
 	}
 }
 

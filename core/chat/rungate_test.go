@@ -234,3 +234,26 @@ func TestBlockedScheduledFireIsReportedDropped(t *testing.T) {
 		t.Error("InjectScheduled reported the fire enqueued while unauthorized")
 	}
 }
+
+// TestNotifyResetIsProcessWide: authorization is process-wide, so one chat
+// submitting after recovery proves the outage is over for all of them. Clearing
+// only the submitting chat would leave a chat that stayed quiet through the
+// recovery window silently un-notified when the next lapse hit it.
+func TestNotifyResetIsProcessWide(t *testing.T) {
+	c, gate := newFakeChat(), blockingGate()
+	s := gatedService(t, &countingRunner{}, c, gate, newFakePending())
+
+	// The quiet chat is told once, then says nothing more.
+	s.Inject(testChatID, "first")
+	waitUntil(t, func() bool { return notices(c) == 1 })
+
+	// Recovery happens while ANOTHER chat submits; the quiet chat stays silent.
+	gate.blocked.Store(false)
+	s.Inject("other-chat", "now allowed")
+	waitUntil(t, func() bool { return gate.calls() >= 2 })
+
+	// The next lapse must be announced to the quiet chat again.
+	gate.blocked.Store(true)
+	s.Inject(testChatID, "blocked again")
+	waitUntil(t, func() bool { return notices(c) == 2 })
+}

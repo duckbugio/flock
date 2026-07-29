@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/go-telegram/bot/models"
+
+	"github.com/duckbugio/flock/core/chat"
 )
 
 // botCmd builds a message whose leading token is a bot_command entity, the shape
@@ -96,12 +98,12 @@ func TestStripCommandMention(t *testing.T) {
 // it can never submit a run); the constant IS the entire payload the handler
 // sends.
 func TestHelpTextListsCommands(t *testing.T) {
-	if HelpText(true) == "" {
-		t.Fatal("HelpText(true) is empty")
+	if HelpText(chat.WithLogin) == "" {
+		t.Fatal("HelpText(chat.WithLogin) is empty")
 	}
 	for _, cmd := range []string{"/help", "/new", "/stop"} {
-		if !strings.Contains(HelpText(true), cmd) {
-			t.Fatalf("HelpText(true) does not mention %q:\n%s", cmd, HelpText(true))
+		if !strings.Contains(HelpText(chat.WithLogin), cmd) {
+			t.Fatalf("HelpText(chat.WithLogin) does not mention %q:\n%s", cmd, HelpText(chat.WithLogin))
 		}
 	}
 }

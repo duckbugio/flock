@@ -352,6 +352,13 @@ func (m *Manager) Dispatch(base context.Context, args string, sub Subscriber) st
 	case "status":
 		return m.statusText(sub.Private)
 	case "cancel", "abort", "stop":
+		// The only state-MUTATING branch, so it obeys the same rule as start: a
+		// conversation could otherwise abort a sign-in running in someone else's
+		// direct message, and the confirmation would itself reveal that one is
+		// underway. Control of the login stays on the 1:1 channel that owns it.
+		if !sub.Private {
+			return LoginPrivateOnlyText
+		}
 		if m.Cancel() {
 			return "Cancelled the pending Codex login."
 		}

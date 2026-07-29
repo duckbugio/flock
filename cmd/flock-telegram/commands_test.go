@@ -129,10 +129,10 @@ func TestStartCommandRouted(t *testing.T) {
 // TestStartWelcomeText asserts the static /start reply is the welcome text: a
 // short greeting prepended to the usage help, plain English with no duck flavor.
 func TestStartWelcomeText(t *testing.T) {
-	if !strings.HasPrefix(telegram.WelcomeText(false), "Hi!") {
-		t.Fatalf("WelcomeText should open with a greeting, got %q", telegram.WelcomeText(false))
+	if !strings.HasPrefix(telegram.WelcomeText(chat.WithoutLogin), "Hi!") {
+		t.Fatalf("WelcomeText should open with a greeting, got %q", telegram.WelcomeText(chat.WithoutLogin))
 	}
-	if !strings.Contains(telegram.WelcomeText(false), telegram.HelpText(false)) {
+	if !strings.Contains(telegram.WelcomeText(chat.WithoutLogin), telegram.HelpText(chat.WithoutLogin)) {
 		t.Fatalf("WelcomeText should include the usage help (HelpText)")
 	}
 }

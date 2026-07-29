@@ -36,12 +36,34 @@ var ReservedCommands = []ReservedCommand{
 //
 // withLogin adds the /login entry, on the same condition that publishes /login in
 // Telegram's command menu.
-func HelpBody(withLogin bool) string {
+func HelpBody(login LoginVisibility) string {
 	body := helpCommands
-	if withLogin {
+	if login == WithLogin {
 		body += LoginHelpLine
 	}
 	return body + helpTail
+}
+
+// LoginVisibility says whether a rendered help text lists /login. It is a named
+// type rather than a bare bool so a call site reads as its own documentation:
+// HelpText(chat.WithLogin) instead of HelpText(true), which only means something
+// after a trip to the declaration.
+type LoginVisibility bool
+
+// Whether /login belongs in a help text. Derive it from the deployment with
+// LoginVisibilityFor.
+const (
+	WithLogin    LoginVisibility = true
+	WithoutLogin LoginVisibility = false
+)
+
+// LoginVisibilityFor maps "does this deployment have an interactive sign-in" onto
+// the flag, so callers do not convert a bool by hand.
+func LoginVisibilityFor(applicable bool) LoginVisibility {
+	if applicable {
+		return WithLogin
+	}
+	return WithoutLogin
 }
 
 // helpCommands lists the reserved commands with the fuller wording a chat reply

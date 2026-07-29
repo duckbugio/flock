@@ -15,10 +15,10 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"github.com/duckbugio/flock/adapters/telegram"
-	"github.com/duckbugio/flock/adapters/vk"
 	"github.com/duckbugio/flock/core/chat"
 	"github.com/duckbugio/flock/core/codexauth"
 	"github.com/duckbugio/flock/core/codexauth/codexauthtest"
+	"github.com/duckbugio/flock/core/codexauth/logintest"
 	"github.com/duckbugio/flock/internal/config"
 )
 
@@ -211,7 +211,7 @@ func TestLoginRefusedInGroupChat(t *testing.T) {
 // argument-based guard left: /login status ALSO re-shows a pending one-time code,
 // so refusing only the code-starting arguments let it into the group anyway.
 func TestLoginStatusInGroupHidesAPendingCode(t *testing.T) {
-	auth := pendingLoginManager(t)
+	auth := logintest.PendingLogin(t)
 
 	got := groupCommandReplies(t, auth, "/login status")
 	if len(got) != 1 {
@@ -229,7 +229,7 @@ func TestLoginStatusInGroupHidesAPendingCode(t *testing.T) {
 // message must still re-show the code — that is what makes a lost message
 // recoverable.
 func TestLoginStatusInPrivateShowsThePendingCode(t *testing.T) {
-	auth := pendingLoginManager(t)
+	auth := logintest.PendingLogin(t)
 	cfg := config.Config{AllowedUsers: []int64{loginTestUserID}}
 	replies := &capturingHTTPClient{}
 	b := commandBot(t, cfg, auth, replies)
@@ -241,28 +241,6 @@ func TestLoginStatusInPrivateShowsThePendingCode(t *testing.T) {
 	if len(got) != 1 || !strings.Contains(got[0], codexauthtest.DeviceCode) {
 		t.Errorf("replies = %v, want the pending code re-shown in a direct message", got)
 	}
-}
-
-// pendingLoginManager returns a manager with a device login already in flight,
-// its code issued, so a test can assert what each destination is allowed to see.
-func pendingLoginManager(t *testing.T) *codexauth.Manager {
-	t.Helper()
-	m := codexauth.NewManager(codexauth.Config{
-		Backend:     codexauth.BackendCodex,
-		AuthMode:    codexauth.AuthSubscription,
-		RequireAuth: true,
-		Home:        t.TempDir(),
-		Bin:         codexauthtest.WriteCLI(t, codexauthtest.Polling),
-		Env:         []string{"PATH=" + os.Getenv("PATH")},
-	})
-	t.Cleanup(func() { m.Cancel() })
-
-	issued := make(chan string, 8)
-	m.Dispatch(context.Background(), "", codexauth.Subscriber{
-		ID: "dm", Private: true, Notify: func(text string) { issued <- text },
-	})
-	codexauthtest.AwaitCode(t, issued)
-	return m
 }
 
 // commandBot builds a bot with the reserved handlers registered and every API
@@ -389,16 +367,16 @@ func TestMenuKeepsLoginOnCodexSubscription(t *testing.T) {
 // text that still advertises it would send the user to a command that can only
 // answer "not needed".
 func TestHelpListsLoginOnlyWhereItApplies(t *testing.T) {
-	if !strings.Contains(telegram.HelpText(true), "/login") {
+	if !strings.Contains(telegram.HelpText(chat.WithLogin), "/login") {
 		t.Error("help omits /login where the sign-in is real")
 	}
-	if strings.Contains(telegram.HelpText(false), "/login") {
+	if strings.Contains(telegram.HelpText(chat.WithoutLogin), "/login") {
 		t.Error("help advertises /login where there is no sign-in")
 	}
-	if !strings.Contains(telegram.WelcomeText(true), "/login") {
+	if !strings.Contains(telegram.WelcomeText(chat.WithLogin), "/login") {
 		t.Error("welcome omits /login where the sign-in is real")
 	}
-	if strings.Contains(telegram.WelcomeText(false), "/login") {
+	if strings.Contains(telegram.WelcomeText(chat.WithoutLogin), "/login") {
 		t.Error("welcome advertises /login where there is no sign-in")
 	}
 
@@ -409,7 +387,7 @@ func TestHelpListsLoginOnlyWhereItApplies(t *testing.T) {
 			menuHasLogin = true
 		}
 	}
-	if menuHasLogin != strings.Contains(telegram.HelpText(codexAuthForMenu.Applicable()), "/login") {
+	if menuHasLogin != strings.Contains(telegram.HelpText(chat.LoginVisibilityFor(codexAuthForMenu.Applicable())), "/login") {
 		t.Error("the command menu and /help disagree about /login")
 	}
 }
@@ -417,10 +395,7 @@ func TestHelpListsLoginOnlyWhereItApplies(t *testing.T) {
 // TestHelpLineComesFromTheCanonicalSet: both adapters render the same /login help
 // line from core/chat, so a wording change cannot land in one and not the other.
 func TestHelpLineComesFromTheCanonicalSet(t *testing.T) {
-	if !strings.Contains(telegram.HelpText(true), chat.LoginHelpLine) {
+	if !strings.Contains(telegram.HelpText(chat.WithLogin), chat.LoginHelpLine) {
 		t.Error("the Telegram help does not render the canonical /login line")
-	}
-	if !strings.Contains(vk.HelpText(true), chat.LoginHelpLine) {
-		t.Error("the VK help does not render the canonical /login line")
 	}
 }

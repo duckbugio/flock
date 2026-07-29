@@ -96,8 +96,8 @@ func lower(s string) string {
 // share the applicability predicate but never the words, and would drift in
 // silence — the reason LoginHelpLine moved here in the first place.
 func TestHelpBodyIsTheSharedSource(t *testing.T) {
-	withLogin := chat.HelpBody(true)
-	without := chat.HelpBody(false)
+	withLogin := chat.HelpBody(chat.WithLogin)
+	without := chat.HelpBody(chat.WithoutLogin)
 
 	if !strings.Contains(withLogin, chat.LoginHelpLine) {
 		t.Error("HelpBody(true) omits the /login line")
