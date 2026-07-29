@@ -554,7 +554,13 @@ func handleMessage(ctx context.Context, deps messageDeps, b *bot.Bot, msg *model
 	// nothing, while transcription and downloads do. /login is a reserved command
 	// routed elsewhere, so it stays reachable while this gate is closed. core/chat
 	// gates the run itself; this is the early, user-facing half.
-	if notice, blocked := deps.auth.BlockedNotice(); blocked {
+	//
+	// Only for a message that WOULD have started a run: a sticker, an empty message
+	// or an unsupported attachment is dropped silently further down, and answering
+	// those with "not authorized" spends rate limit to tell the user about work they
+	// never asked for.
+	hasWork := strings.TrimSpace(cleaned) != "" || isVoice || isDocument || isPhoto
+	if notice, blocked := deps.auth.BlockedNotice(); blocked && hasWork {
 		slog.Debug("codex unauthorized — blocking run", "chat_id", msg.Chat.ID)
 		sendCommandReply(ctx, b, msg.Chat.ID, notice)
 		return

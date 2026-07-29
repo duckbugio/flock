@@ -33,6 +33,9 @@ func unauthorizedCodexAuth(t *testing.T) (*codexauth.Manager, string) {
 		AuthMode:    codexauth.AuthSubscription,
 		RequireAuth: true,
 		Home:        home,
+		// A deliberately absent binary, so no case can start the REAL codex and sit
+		// polling for the full DeviceCodeTTL.
+		Bin: filepath.Join(home, "no-such-codex"),
 	}), home
 }
 

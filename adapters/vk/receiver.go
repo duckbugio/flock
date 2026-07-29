@@ -345,7 +345,12 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 	// nothing, while transcription and downloads do. /login is dispatched above and
 	// stays reachable while this gate is closed. core/chat gates the run itself;
 	// this is the early, user-facing half.
-	if notice, blocked := r.auth.BlockedNotice(); blocked {
+	//
+	// Only for a message that WOULD have started a run: a sticker, an empty message
+	// or an unsupported attachment is dropped silently further down, and answering
+	// those with "not authorized" spends rate limit to tell the user about work they
+	// never asked for.
+	if notice, blocked := r.auth.BlockedNotice(); blocked && r.hasWork(cleaned, msg) {
 		r.logger.Debug("vk: codex unauthorized — blocking run", "peer_id", peerID)
 		r.notify(ctx, peerID, notice)
 		return
@@ -385,6 +390,19 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 	r.svc.Handle(ctx, chatIDStr(peerID), msg.FromID, msgIDStr(msg.ConversationMessageID), text)
 }
 
+// hasWork reports whether this message carries something the receiver would
+// actually submit: text (after the mention gate stripped the address), a voice
+// note to transcribe, or an attachment to save. It mirrors the branches below.
+func (r *Receiver) hasWork(cleaned string, msg messageObject) bool {
+	if strings.TrimSpace(cleaned) != "" {
+		return true
+	}
+	if r.voice != nil && firstAudioMessage(msg.Attachments) != nil {
+		return true
+	}
+	return r.uploads != nil && (firstDoc(msg.Attachments) != nil || firstPhoto(msg.Attachments) != nil)
+}
+
 // dispatchReserved acts on a reserved command (caller already confirmed the name
 // is in the canonical set). /start and /help reply with the static notices; /new
 // resets the chat's session and confirms; /stop cancels the in-flight run;
@@ -411,7 +429,13 @@ func (r *Receiver) dispatchReserved(ctx context.Context, name string, msg messag
 	case "goal":
 		r.dispatchGoal(ctx, msg)
 	case "login":
-		r.dispatchLogin(ctx, msg)
+		// On its own goroutine: this receiver processes updates SERIALLY inside the
+		// poll loop, and /login can block for seconds — Cancel waits out the login
+		// goroutine (up to cancelDrain) and each reply is a transport call bounded by
+		// NotifyTimeout. Blocking there would stall every chat's messages. Detaching
+		// is safe because the login itself is already detached (Dispatch derives its
+		// own context) and every notice builds its own.
+		go r.dispatchLogin(ctx, msg)
 	}
 }
 

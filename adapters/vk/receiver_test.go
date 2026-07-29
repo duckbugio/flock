@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/chat"
@@ -115,6 +116,29 @@ func (n *fakeNotice) Notify(_ context.Context, _ int64, text string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.texts = append(n.texts, text)
+}
+
+// seen snapshots the notices delivered so far. /login is dispatched on its own
+// goroutine (it must not block the poll loop), so its tests read through this
+// rather than touching the slice.
+func (n *fakeNotice) seen() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]string(nil), n.texts...)
+}
+
+// await waits for at least one notice to arrive and returns everything seen.
+func (n *fakeNotice) await(t *testing.T) []string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := n.seen(); len(got) > 0 {
+			return got
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("no notice arrived")
+	return nil
 }
 
 // newTestReceiver builds a Receiver wired to the fakes, allowing user 42, group
@@ -646,11 +670,17 @@ func isContextErr(err error) bool {
 // own plumbing instead of reaching past it into the private field.
 func unauthorizedCodexReceiver(t *testing.T, svc Service, notices NoticeSender) *Receiver {
 	t.Helper()
+	home := t.TempDir()
 	return newTestReceiverWithAuth(svc, notices, codexauth.NewManager(codexauth.Config{
 		Backend:     codexauth.BackendCodex,
 		AuthMode:    codexauth.AuthSubscription,
 		RequireAuth: true,
-		Home:        t.TempDir(),
+		Home:        home,
+		// A deliberately absent binary. No case here reaches a sign-in start today,
+		// but that is a property of the current set: one future /login from a direct
+		// message would otherwise run the REAL codex on a developer's machine and sit
+		// polling for the full DeviceCodeTTL.
+		Bin: filepath.Join(home, "no-such-codex"),
 	}))
 }
 
@@ -684,8 +714,8 @@ func TestReceiverLoginCommandStaysReachableWhileUnauthorized(t *testing.T) {
 	if len(svc.handleCalls) != 0 {
 		t.Errorf("/login should not start a run, got %d Handle calls", len(svc.handleCalls))
 	}
-	if len(notices.texts) != 1 || !strings.Contains(notices.texts[0], "NOT authorized") {
-		t.Errorf("notices = %v, want the login status reply", notices.texts)
+	if len(notices.await(t)) != 1 || !strings.Contains(notices.await(t)[0], "NOT authorized") {
+		t.Errorf("notices = %v, want the login status reply", notices.seen())
 	}
 }
 
@@ -698,8 +728,8 @@ func TestReceiverLoginWithoutManagerIsInert(t *testing.T) {
 	r := newTestReceiver(svc, notices, false, nil)
 
 	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 42, Text: "/login"}))
-	if len(notices.texts) != 1 || notices.texts[0] != codexauth.NoLoginNeededText {
-		t.Errorf("notices = %v, want the no-login-needed reply", notices.texts)
+	if len(notices.await(t)) != 1 || notices.await(t)[0] != codexauth.NoLoginNeededText {
+		t.Errorf("notices = %v, want the no-login-needed reply", notices.seen())
 	}
 
 	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 200, Text: "build it"}))
@@ -720,10 +750,10 @@ func TestReceiverLoginRefusedInConversation(t *testing.T) {
 	// 2000000000+ is VK's conversation (chat) peer range.
 	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 2000000001, Text: "/login"}))
 
-	if len(notices.texts) != 1 || !strings.Contains(notices.texts[0], "direct message") {
-		t.Fatalf("notices = %v, want the refusal pointing at a direct message", notices.texts)
+	if len(notices.await(t)) != 1 || !strings.Contains(notices.await(t)[0], "direct message") {
+		t.Fatalf("notices = %v, want the refusal pointing at a direct message", notices.seen())
 	}
-	if strings.Contains(notices.texts[0], "http") {
+	if strings.Contains(notices.await(t)[0], "http") {
 		t.Error("the refusal leaked a link into the conversation")
 	}
 }
@@ -742,14 +772,14 @@ func TestReceiverLoginStatusInConversationHidesAPendingCode(t *testing.T) {
 		FromID: 42, PeerID: 2000000001, Text: "/login status",
 	}))
 
-	if len(notices.texts) != 1 {
-		t.Fatalf("notices = %v, want exactly one", notices.texts)
+	if len(notices.await(t)) != 1 {
+		t.Fatalf("notices = %v, want exactly one", notices.seen())
 	}
-	if strings.Contains(notices.texts[0], codexauthtest.DeviceCode) || strings.Contains(notices.texts[0], "http") {
-		t.Errorf("the pending code or link reached a conversation: %q", notices.texts[0])
+	if strings.Contains(notices.await(t)[0], codexauthtest.DeviceCode) || strings.Contains(notices.await(t)[0], "http") {
+		t.Errorf("the pending code or link reached a conversation: %q", notices.await(t)[0])
 	}
-	if !strings.Contains(notices.texts[0], "in progress") {
-		t.Errorf("status = %q, want it to still report the pending sign-in", notices.texts[0])
+	if !strings.Contains(notices.await(t)[0], "in progress") {
+		t.Errorf("status = %q, want it to still report the pending sign-in", notices.await(t)[0])
 	}
 }
 
@@ -763,8 +793,8 @@ func TestReceiverLoginStatusInDirectMessageShowsTheCode(t *testing.T) {
 
 	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 42, Text: "/login status"}))
 
-	if len(notices.texts) != 1 || !strings.Contains(notices.texts[0], codexauthtest.DeviceCode) {
-		t.Errorf("notices = %v, want the pending code re-shown in a direct message", notices.texts)
+	if len(notices.await(t)) != 1 || !strings.Contains(notices.await(t)[0], codexauthtest.DeviceCode) {
+		t.Errorf("notices = %v, want the pending code re-shown in a direct message", notices.seen())
 	}
 }
 
@@ -826,12 +856,12 @@ func TestPrivacyFollowsTheDirectMessageInvariant(t *testing.T) {
 				FromID: tt.fromID, PeerID: tt.peerID, Text: "/login status",
 			}))
 
-			if len(notices.texts) != 1 {
-				t.Fatalf("notices = %v, want exactly one", notices.texts)
+			if len(notices.await(t)) != 1 {
+				t.Fatalf("notices = %v, want exactly one", notices.seen())
 			}
-			got := strings.Contains(notices.texts[0], codexauthtest.DeviceCode)
+			got := strings.Contains(notices.await(t)[0], codexauthtest.DeviceCode)
 			if got != tt.wantsCode {
-				t.Errorf("code shown = %v, want %v (reply: %q)", got, tt.wantsCode, notices.texts[0])
+				t.Errorf("code shown = %v, want %v (reply: %q)", got, tt.wantsCode, notices.await(t)[0])
 			}
 		})
 	}
@@ -845,4 +875,61 @@ func TestHelpLineComesFromTheCanonicalSet(t *testing.T) {
 	if !strings.Contains(HelpText(chat.WithLogin), chat.LoginHelpLine) {
 		t.Error("the VK help does not render the canonical /login line")
 	}
+}
+
+// TestSilentMessagesGetNoUnauthorizedNotice: a sticker or an empty message is
+// dropped silently when the deployment is healthy, so an unauthorized one must
+// not answer it either — that spends rate limit telling the user about work they
+// never asked for.
+func TestSilentMessagesGetNoUnauthorizedNotice(t *testing.T) {
+	svc := &fakeService{}
+	notices := &fakeNotice{}
+	r := unauthorizedCodexReceiver(t, svc, notices)
+
+	// No text, no voice, no attachment the receiver would save.
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 42, Text: "   "}))
+
+	if got := notices.seen(); len(got) != 0 {
+		t.Errorf("an empty message drew %v, want silence", got)
+	}
+	if len(svc.handleCalls) != 0 {
+		t.Errorf("an empty message started %d runs, want 0", len(svc.handleCalls))
+	}
+}
+
+// TestRealMessagesStillGetTheUnauthorizedNotice is the other half: a message that
+// WOULD have run must still be answered.
+func TestRealMessagesStillGetTheUnauthorizedNotice(t *testing.T) {
+	svc := &fakeService{}
+	notices := &fakeNotice{}
+	r := unauthorizedCodexReceiver(t, svc, notices)
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 42, Text: "build it"}))
+
+	if got := notices.await(t); !strings.Contains(got[0], "/login") {
+		t.Errorf("notice = %q, want it to point at /login", got[0])
+	}
+}
+
+// TestLoginDoesNotBlockThePollLoop: this receiver processes updates serially, and
+// /login can block for seconds (Cancel waits out the login goroutine; each reply
+// is a bounded transport call). Handling it inline would stall every chat, so it
+// runs detached — dispatch must return without waiting for the reply.
+func TestLoginDoesNotBlockThePollLoop(t *testing.T) {
+	svc := &fakeService{}
+	notices := &fakeNotice{}
+	r := newTestReceiverWithAuth(svc, notices, logintest.PendingLogin(t))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 42, Text: "/login cancel"}))
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dispatch blocked on /login; the poll loop would stall with it")
+	}
+	notices.await(t)
 }

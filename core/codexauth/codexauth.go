@@ -301,9 +301,14 @@ const LoginPrivateOnlyText = "Send /login in a direct message with me, not here.
 	"The reply carries a one-time code that authorizes an account for the whole bot, " +
 	"and everyone in this chat would see it."
 
-// pendingElsewhereText reports a pending sign-in without reprinting its code.
-const pendingElsewhereText = "A Codex sign-in is in progress. Its link and one-time code went to the " +
-	"direct message that started it — send /login there to see them again."
+// pendingElsewhereText reports a pending sign-in without reprinting its code. It
+// is deliberately neutral about WHOSE direct message: the code is re-shown to any
+// private destination that asks, not only the one that started the login, and
+// telling the user otherwise would misdescribe the very thing this message is
+// about. (That any allow-listed user can finish a started sign-in with their own
+// account is a documented property — one Codex identity serves the deployment.)
+const pendingElsewhereText = "A Codex sign-in is in progress. Its link and one-time code go only to direct " +
+	"messages — send /login in a direct message with me to see them again."
 
 // LoginUsage is the /login help.
 const LoginUsage = "Usage:\n" +
