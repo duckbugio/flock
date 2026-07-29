@@ -28,6 +28,34 @@ var ReservedCommands = []ReservedCommand{
 	{Name: "login", Description: "Sign in to Codex on a subscription (other backends need no login)"},
 }
 
+// HelpBody is the shared body of both adapters' /help: the command list and the
+// closing line. Only the first line — which names the transport — differs, so
+// that is all an adapter supplies. It lives here, beside the canonical set it has
+// to stay in step with, for the same reason as LoginHelpLine: two byte-identical
+// copies share a predicate, never their words, and drift in silence.
+//
+// withLogin adds the /login entry, on the same condition that publishes /login in
+// Telegram's command menu.
+func HelpBody(withLogin bool) string {
+	body := helpCommands
+	if withLogin {
+		body += LoginHelpLine
+	}
+	return body + helpTail
+}
+
+// helpCommands lists the reserved commands with the fuller wording a chat reply
+// affords, next to the terse Description the command menu uses.
+const helpCommands = "/help — show this message\n" +
+	"/new — start a fresh session (forget the current conversation)\n" +
+	"/stop — stop the run currently in progress\n" +
+	"/schedule — manage scheduled jobs (when enabled)\n" +
+	"/goal <criterion> — arm a goal an independent evaluator re-checks after every run " +
+	"(/goal off to disarm)\n"
+
+// helpTail closes the usage message.
+const helpTail = "\nSend any other message to run it through the assistant."
+
 // LoginHelpLine is the /login entry for an adapter's /help text. It lives here,
 // beside the canonical command set, because both adapters render it and a second
 // copy would drift silently — the only thing they would still share is the

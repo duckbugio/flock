@@ -239,8 +239,11 @@ func (m *Manager) statusText(private bool) string {
 		return "Codex device login is starting; the link and code arrive in a moment."
 	case m.cfg.HasAccessToken:
 		return "Codex is authorized with a configured access token. No browser login needed."
-	case m.CredentialsPresent():
+	case m.CredentialsPresent() && private:
 		return "Codex is authorized (persisted login in " + m.cfg.Home + ")."
+	case m.CredentialsPresent():
+		// The host path is deployment detail; a group chat has no business with it.
+		return "Codex is authorized."
 	case !m.cfg.RequireAuth:
 		return "No persisted Codex login found, but CODEX_REQUIRE_AUTH=false, so runs are not blocked. " +
 			"Send /login if Codex reports it is unauthenticated."
@@ -283,6 +286,11 @@ const LoginUsage = "Usage:\n" +
 	"/login status — show the current authorization state\n" +
 	"/login cancel — abort a pending sign-in\n" +
 	"/login force — sign in again even if already authorized"
+
+// NotifyTimeout bounds ONE background notice delivery. Both adapters use it for
+// their Subscriber.Notify: a pending login reports minutes after the update that
+// started it is gone, so each notice needs a fresh, bounded context of its own.
+const NotifyTimeout = 30 * time.Second
 
 // Subscriber is where a /login reply and a pending login's background notices
 // are delivered.

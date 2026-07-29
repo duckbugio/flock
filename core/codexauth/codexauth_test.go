@@ -680,3 +680,25 @@ func TestDispatchStillReturnsAReplyWithoutASubscriber(t *testing.T) {
 		t.Error("Dispatch swallowed the reply for a subscriber that cannot receive it")
 	}
 }
+
+// TestGroupStatusHidesTheHostPath: the authorized branch names CODEX_HOME, which
+// is deployment detail a group chat has no business with. /login status reaches
+// that branch from anywhere, so the path is private-only too.
+func TestGroupStatusHidesTheHostPath(t *testing.T) {
+	home := t.TempDir()
+	writeAuthFile(t, home)
+	m := NewManager(Config{
+		Backend: BackendCodex, AuthMode: AuthSubscription, RequireAuth: true, Home: home,
+	})
+
+	group := m.Dispatch(context.Background(), "status", Subscriber{ID: "group"})
+	if strings.Contains(group, home) {
+		t.Errorf("group status leaked the host path: %q", group)
+	}
+	if !strings.Contains(group, "authorized") {
+		t.Errorf("group status = %q, want it to still report the state", group)
+	}
+	if dm := m.Dispatch(context.Background(), "status", dmSub); !strings.Contains(dm, home) {
+		t.Errorf("direct-message status = %q, want the path an operator needs", dm)
+	}
+}

@@ -84,33 +84,20 @@ func StripCommandMention(text, botUsername string) string {
 	return token[:at] + rest
 }
 
-// helpHeader/helpTail bracket the command list of the usage message replied to
-// an allowed user who sends /help. It is an engineering artifact (professional
-// English, no duck flavor) and never reaches the Runner.
-const (
-	helpHeader = "Flock Telegram assistant — available commands:\n\n" +
-		"/help — show this message\n" +
-		"/new — start a fresh session (forget the current conversation)\n" +
-		"/stop — stop the run currently in progress\n" +
-		"/schedule — manage scheduled jobs (when enabled)\n" +
-		"/goal <criterion> — arm a goal an independent evaluator re-checks after every run " +
-		"(/goal off to disarm)\n"
-	helpTail = "\nSend any other message to run it through the assistant."
-)
+// helpTitle names the transport; everything below it is shared with the VK
+// adapter (chat.HelpBody), so the two cannot drift apart.
+const helpTitle = "Flock Telegram assistant — available commands:\n\n"
 
-// HelpText renders the usage message. withLogin adds the /login line.
-func HelpText(withLogin bool) string {
-	if withLogin {
-		return helpHeader + chat.LoginHelpLine + helpTail
-	}
-	return helpHeader + helpTail
-}
+// HelpText renders the usage message replied to an allowed user who sends /help.
+// withLogin adds the /login line, on the same condition that publishes /login in
+// the command menu. It is an engineering artifact (professional English, no duck
+// flavor) and never reaches the Runner.
+func HelpText(withLogin bool) string { return helpTitle + chat.HelpBody(withLogin) }
 
 // WelcomeText is the reply to /start: a short greeting prepended to the command
 // help, so a brand-new user immediately sees what the bot does and how to use
-// it. Like HelpText it is an engineering artifact (plain English, no duck
-// flavor) and never reaches the Runner — the duck greeting comes from the model
-// on a real message.
+// it. Like HelpText it never reaches the Runner — the duck greeting comes from
+// the model on a real message.
 func WelcomeText(withLogin bool) string {
 	return "Hi! I'm the Flock assistant.\n\n" + HelpText(withLogin)
 }

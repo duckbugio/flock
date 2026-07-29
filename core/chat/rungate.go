@@ -61,12 +61,13 @@ func (s *Service) blockSubmit(ctx context.Context, chatID ChatID) bool {
 	s.mu.Unlock()
 
 	if first && notice != "" {
-		// Sent synchronously on the caller's own goroutine, so a request context is
-		// still alive where there is one; the background sources pass context
-		// Background because they have none.
-		if _, err := s.chat.Send(ctx, chatID, notice, "", true); err != nil {
-			s.log.Error("send unauthorized notice", "chat_id", chatID, "error", err)
-		}
+		// Via notify, which bounds the send: this runs on the CALLER's goroutine, and
+		// three of the six callers are loops that must not be stalled — the PR poller
+		// dispatches inline, and the restart replay walks every stored marker. A
+		// transport that hangs or sits in a 429 back-off would otherwise stop them
+		// for good. The refusal itself is already logged at Warn above, so notify's
+		// Debug-level delivery failure is enough.
+		s.notify(ctx, chatID, notice)
 	}
 	return true
 }

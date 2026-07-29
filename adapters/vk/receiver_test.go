@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/chat"
@@ -723,24 +722,12 @@ func pendingLoginManager(t *testing.T) *codexauth.Manager {
 	})
 	t.Cleanup(func() { m.Cancel() })
 
-	// The immediate acknowledgement now arrives through the SAME subscriber as the
-	// prompt (that ordering is deliberate), so drain until the code shows up rather
-	// than assuming the first notice is it.
 	issued := make(chan string, 8)
 	m.Dispatch(context.Background(), "", codexauth.Subscriber{
 		ID: "dm", Private: true, Notify: func(text string) { issued <- text },
 	})
-	deadline := time.After(10 * time.Second)
-	for {
-		select {
-		case text := <-issued:
-			if strings.Contains(text, codexauthtest.DeviceCode) {
-				return m
-			}
-		case <-deadline:
-			t.Fatal("the fake login never issued a prompt")
-		}
-	}
+	codexauthtest.AwaitCode(t, issued)
+	return m
 }
 
 // TestReceiverLoginRefusedInConversation: the reply goes to the PEER, so in a

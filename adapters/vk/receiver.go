@@ -17,11 +17,6 @@ import (
 	"github.com/duckbugio/flock/core/schedule"
 )
 
-// loginNotifyTimeout bounds one background Codex-login notice delivery. The
-// device flow reports minutes after the /login update's own context is gone, so
-// each notice is sent on a fresh, bounded context of its own.
-const loginNotifyTimeout = 30 * time.Second
-
 // scheduleDisabledText is the reply when /schedule is used but the scheduler is
 // turned off (the default). It mirrors the Telegram adapter's notice.
 const scheduleDisabledText = "Scheduler is disabled. Set ENABLE_SCHEDULER=true to enable it."
@@ -445,7 +440,7 @@ func (r *Receiver) dispatchLogin(ctx context.Context, msg messageObject) {
 		// test for a flag that decides who may take over the bot's account.
 		Private: peerID == msg.FromID,
 		Notify: func(text string) {
-			sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginNotifyTimeout)
+			sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), codexauth.NotifyTimeout)
 			defer cancel()
 			r.notify(sendCtx, peerID, text)
 		},

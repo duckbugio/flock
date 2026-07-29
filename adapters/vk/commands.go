@@ -2,28 +2,15 @@ package vk
 
 import "github.com/duckbugio/flock/core/chat"
 
-// helpHeader/helpTail bracket the command list of the VK adapter's usage
-// message. It mirrors the Telegram adapter's: VK has no native slash-command UI,
-// so these are plain text commands the receiver intercepts. It is an engineering
-// artifact (professional English, no duck flavor).
-const (
-	helpHeader = "Flock VK assistant — available commands:\n\n" +
-		"/help — show this message\n" +
-		"/new — start a fresh session (forget the current conversation)\n" +
-		"/stop — stop the run currently in progress\n" +
-		"/schedule — manage scheduled jobs (when enabled)\n" +
-		"/goal <criterion> — arm a goal an independent evaluator re-checks after every run " +
-		"(/goal off to disarm)\n"
-	helpTail = "\nSend any other message to run it through the assistant."
-)
+// helpTitle names the transport; everything below it is shared with the Telegram
+// adapter (chat.HelpBody), so the two cannot drift apart. VK has no native
+// slash-command UI, so these are plain text commands the receiver intercepts.
+const helpTitle = "Flock VK assistant — available commands:\n\n"
 
-// HelpText renders the usage message. withLogin adds the /login line.
-func HelpText(withLogin bool) string {
-	if withLogin {
-		return helpHeader + chat.LoginHelpLine + helpTail
-	}
-	return helpHeader + helpTail
-}
+// HelpText renders the usage message. withLogin adds the /login line, on the same
+// condition that publishes /login in Telegram's command menu. It is an
+// engineering artifact (professional English, no duck flavor).
+func HelpText(withLogin bool) string { return helpTitle + chat.HelpBody(withLogin) }
 
 // welcomeText is the reply to /start: a short greeting + the usage help,
 // mirroring the Telegram adapter's WelcomeText.

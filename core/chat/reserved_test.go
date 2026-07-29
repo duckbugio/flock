@@ -1,6 +1,7 @@
 package chat_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/duckbugio/flock/core/chat"
@@ -88,4 +89,29 @@ func lower(s string) string {
 		}
 	}
 	return string(out)
+}
+
+// TestHelpBodyIsTheSharedSource: both adapters render this body, so the command
+// list has one home beside the canonical set. Two byte-identical copies would
+// share the applicability predicate but never the words, and would drift in
+// silence — the reason LoginHelpLine moved here in the first place.
+func TestHelpBodyIsTheSharedSource(t *testing.T) {
+	withLogin := chat.HelpBody(true)
+	without := chat.HelpBody(false)
+
+	if !strings.Contains(withLogin, chat.LoginHelpLine) {
+		t.Error("HelpBody(true) omits the /login line")
+	}
+	if strings.Contains(without, "/login") {
+		t.Error("HelpBody(false) advertises /login where there is no sign-in")
+	}
+	// Every reserved command except /login is unconditional, so each must appear.
+	for _, c := range chat.ReservedCommands {
+		if c.Name == "login" || c.Name == "start" {
+			continue // /login is conditional; /start is not listed (it IS the greeting)
+		}
+		if !strings.Contains(without, "/"+c.Name) {
+			t.Errorf("HelpBody omits the reserved command /%s", c.Name)
+		}
+	}
 }

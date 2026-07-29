@@ -1028,7 +1028,7 @@ func loginHandler(cfg config.Config, auth *codexauth.Manager) bot.HandlerFunc {
 			ID:      chatIDStr(chatID),
 			Private: update.Message.Chat.Type == models.ChatTypePrivate,
 			Notify: func(text string) {
-				sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginNotifyTimeout)
+				sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), codexauth.NotifyTimeout)
 				defer cancel()
 				sendCommandReply(sendCtx, b, chatID, text)
 			},
@@ -1039,9 +1039,6 @@ func loginHandler(cfg config.Config, auth *codexauth.Manager) bot.HandlerFunc {
 		}
 	}
 }
-
-// loginNotifyTimeout bounds one background login notice delivery.
-const loginNotifyTimeout = 30 * time.Second
 
 // loginCommand is the reserved command name the sign-in flow is published under.
 const loginCommand = "login"

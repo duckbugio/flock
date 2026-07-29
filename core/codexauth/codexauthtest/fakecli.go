@@ -13,7 +13,9 @@ package codexauthtest
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 // The verification link and one-time code the banner carries.
@@ -58,4 +60,33 @@ func WriteCLI(t *testing.T, script string) string {
 		t.Fatalf("write fake codex: %v", err)
 	}
 	return path
+}
+
+// promptWait bounds how long AwaitCode waits for the fake CLI's prompt.
+const promptWait = 10 * time.Second
+
+// AwaitCode drains delivered notices until the one carrying DeviceCode and
+// returns it. A pending login delivers its acknowledgement through the SAME
+// channel as the prompt, and deliberately ahead of it, so a caller that wants the
+// code has to skip past what precedes it.
+//
+// This package stops at the fixtures on purpose: a helper that built a
+// codexauth.Manager would have to import codexauth, and codexauth's own tests
+// import this package — that is an import cycle. What actually drifts (the
+// captured banner and its tokens) is shared; the few lines of manager glue stay
+// with each caller.
+func AwaitCode(t *testing.T, notices <-chan string) string {
+	t.Helper()
+	deadline := time.After(promptWait)
+	for {
+		select {
+		case text := <-notices:
+			if strings.Contains(text, DeviceCode) {
+				return text
+			}
+		case <-deadline:
+			t.Fatal("the fake login never issued a prompt")
+			return ""
+		}
+	}
 }
