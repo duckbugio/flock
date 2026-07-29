@@ -134,6 +134,7 @@ type Manager struct {
 	cancel  context.CancelFunc
 	last    Prompt
 	hasLast bool
+	subs    []Subscriber
 }
 
 // NewManager returns a Manager for cfg.
@@ -161,13 +162,23 @@ func (m *Manager) Authorized() bool {
 	if !m.Applicable() || !m.cfg.RequireAuth {
 		return true
 	}
-	return m.credentialsPresent()
+	return m.CredentialsPresent()
 }
 
-// credentialsPresent reports whether Codex has something to authenticate WITH,
-// independent of whether the deployment demands it. It is the honest answer
-// /login reasons about; Authorized is the policy answer runs are gated on.
-func (m *Manager) credentialsPresent() bool {
+// CredentialsPresent reports whether Codex has something to authenticate WITH: a
+// configured access token, or a persisted auth.json under CODEX_HOME.
+//
+// This is the FACTUAL answer; Authorized is the POLICY answer runs are gated on,
+// and the two deliberately differ when CODEX_REQUIRE_AUTH=false — that deploy has
+// no credential and is not blocked. Startup logs both, because "authorized=true"
+// alone would reassure an operator in exactly the configuration where the first
+// run is about to fail inside the CLI.
+//
+// A present auth.json is not proof the credential still WORKS: an expired or
+// corrupt token reads as present. Re-validating would mean spawning
+// `codex login status` on every message, which is far too expensive for the
+// message path; /login force re-authenticates when a stale credential shows up.
+func (m *Manager) CredentialsPresent() bool {
 	if m == nil {
 		return false
 	}
@@ -218,7 +229,7 @@ func (m *Manager) StatusText() string {
 		return "Codex device login is starting; the link and code arrive in a moment."
 	case m.cfg.HasAccessToken:
 		return "Codex is authorized with a configured access token. No browser login needed."
-	case m.credentialsPresent():
+	case m.CredentialsPresent():
 		return "Codex is authorized (persisted login in " + m.cfg.Home + ")."
 	case !m.cfg.RequireAuth:
 		return "No persisted Codex login found, but CODEX_REQUIRE_AUTH=false, so runs are not blocked. " +
@@ -254,26 +265,63 @@ const LoginUsage = "Usage:\n" +
 	"/login cancel — abort a pending sign-in\n" +
 	"/login force — sign in again even if already authorized"
 
+// Subscriber is where a pending login's background notices are delivered. ID
+// identifies the destination (a chat id) so the same destination asking twice is
+// collapsed to one subscription rather than being told everything twice; Notify
+// does the delivery and may be called minutes later, from another goroutine, so
+// it must build its own context rather than close over the update's.
+type Subscriber struct {
+	ID     string
+	Notify func(string)
+}
+
+// deliver sends text when the subscriber can receive it.
+func (s Subscriber) deliver(text string) {
+	if s.Notify != nil {
+		s.Notify(text)
+	}
+}
+
+// StartsLogin reports whether these /login arguments would begin a sign-in, as
+// opposed to merely reporting or cancelling one. Adapters use it to refuse the
+// code-revealing forms in a group chat while leaving status and cancel available
+// everywhere; it shares Dispatch's switch so the two can never disagree about
+// which arguments print a code.
+func StartsLogin(args string) bool {
+	switch normalizeArgs(args) {
+	case "", "force", "again", "relogin":
+		return true
+	default:
+		return false
+	}
+}
+
+// normalizeArgs canonicalizes a /login argument for comparison.
+func normalizeArgs(args string) string { return strings.ToLower(strings.TrimSpace(args)) }
+
 // Dispatch serves the /login command and returns the IMMEDIATE reply.
 //
 // The device flow outlives the command: after the immediate reply, the pending
 // login keeps running in the background and reports the verification link, the
-// one-time code, and the final outcome through notify. notify may therefore be
-// called minutes later and from another goroutine — the caller must make it safe
-// to use then (its own context, not the update's).
+// one-time code, and the final outcome to every subscriber.
+//
+// Subscribing is per Dispatch call, so a SECOND /login (from another chat, or the
+// same one) both re-shows the pending code and starts receiving the outcome —
+// without it, only the chat that happened to start the login would ever learn
+// whether it succeeded.
 //
 // base only seeds the login's values; its cancellation does NOT abort the login
 // (the update's context is dead long before a user finishes in a browser).
 // /login cancel, the timeout, and process shutdown are the ways it ends.
-func (m *Manager) Dispatch(base context.Context, args string, notify func(string)) string {
+func (m *Manager) Dispatch(base context.Context, args string, sub Subscriber) string {
 	if !m.Applicable() {
 		return m.notApplicableText()
 	}
-	switch strings.ToLower(strings.TrimSpace(args)) {
+	switch normalizeArgs(args) {
 	case "":
-		return m.start(base, false, notify)
+		return m.start(base, false, sub)
 	case "force", "again", "relogin":
-		return m.start(base, true, notify)
+		return m.start(base, true, sub)
 	case "status":
 		return m.StatusText()
 	case "cancel", "abort", "stop":
@@ -291,9 +339,10 @@ func (m *Manager) Dispatch(base context.Context, args string, notify func(string
 // start launches a device login unless one is already pending (in which case the
 // pending code is re-shown, never replaced) or Codex is already authorized and
 // force was not asked for.
-func (m *Manager) start(base context.Context, force bool, notify func(string)) string {
+func (m *Manager) start(base context.Context, force bool, sub Subscriber) string {
 	m.mu.Lock()
 	if m.running {
+		m.subscribeLocked(sub)
 		last, hasLast := m.last, m.hasLast
 		m.mu.Unlock()
 		if hasLast {
@@ -301,10 +350,10 @@ func (m *Manager) start(base context.Context, force bool, notify func(string)) s
 		}
 		return "A Codex login is already starting; the link and code arrive in a moment."
 	}
-	// credentialsPresent, not Authorized: with CODEX_REQUIRE_AUTH=false the policy
+	// CredentialsPresent, not Authorized: with CODEX_REQUIRE_AUTH=false the policy
 	// answer is always "authorized", which would make /login unusable on exactly
 	// the deployments most likely to need it.
-	if !force && m.credentialsPresent() {
+	if !force && m.CredentialsPresent() {
 		m.mu.Unlock()
 		return m.StatusText() + "\n\nSend /login force to sign in again."
 	}
@@ -316,14 +365,41 @@ func (m *Manager) start(base context.Context, force bool, notify func(string)) s
 	m.cancel = cancel
 	m.hasLast = false
 	m.last = Prompt{}
+	m.subs = nil
+	m.subscribeLocked(sub)
 	m.mu.Unlock()
 
-	go m.run(ctx, cancel, notify)
+	go m.run(ctx, cancel)
 	return "Starting the Codex sign-in — the link and one-time code arrive in a moment."
 }
 
-// run drives one login attempt and reports its result through notify.
-func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, notify func(string)) {
+// subscribeLocked adds sub to the pending login's notice list, collapsing a
+// destination that is already subscribed. The caller must hold m.mu.
+func (m *Manager) subscribeLocked(sub Subscriber) {
+	if sub.Notify == nil {
+		return
+	}
+	for _, existing := range m.subs {
+		if existing.ID == sub.ID {
+			return
+		}
+	}
+	m.subs = append(m.subs, sub)
+}
+
+// broadcast delivers text to every current subscriber. The list is copied under
+// the lock so a delivery (which does network I/O) never holds it.
+func (m *Manager) broadcast(text string) {
+	m.mu.Lock()
+	subs := append([]Subscriber(nil), m.subs...)
+	m.mu.Unlock()
+	for _, sub := range subs {
+		sub.deliver(text)
+	}
+}
+
+// run drives one login attempt and reports its result to every subscriber.
+func (m *Manager) run(ctx context.Context, cancel context.CancelFunc) {
 	defer cancel()
 	log := m.cfg.logger()
 
@@ -332,9 +408,7 @@ func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, notify fun
 		m.last, m.hasLast = p, true
 		m.mu.Unlock()
 		log.Info("codex device login prompt issued", "url", p.URL, "expires_in", p.ExpiresIn)
-		if notify != nil {
-			notify(promptText(p))
-		}
+		m.broadcast(promptText(p))
 	})
 
 	m.mu.Lock()
@@ -342,16 +416,13 @@ func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, notify fun
 	m.cancel = nil
 	m.mu.Unlock()
 
-	if notify == nil {
-		return
-	}
 	if err == nil {
 		log.Info("codex device login succeeded", "codex_home", m.cfg.Home)
-		notify("Codex is authorized. Send your next message and the team gets to work.")
+		m.broadcast("Codex is authorized. Send your next message and the team gets to work.")
 		return
 	}
 	log.Warn("codex device login failed", "error", err)
-	notify(failureText(err))
+	m.broadcast(failureText(err))
 }
 
 // Cancel aborts a pending login, reporting whether there was one.

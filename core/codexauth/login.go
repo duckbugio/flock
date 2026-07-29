@@ -132,20 +132,37 @@ func Login(ctx context.Context, cfg Config, onPrompt func(Prompt)) error {
 	// Both streams are parsed: --device-auth prints the prompt on stdout, while
 	// diagnostics (including the "use --device-auth" hint and argument errors)
 	// arrive on stderr. Whichever carries the URL and code, we find it.
+	//
+	// Each stream gets its OWN parser, and a prompt is only released when the URL
+	// and the code came from the SAME one. The two readers are separate goroutines,
+	// so a shared parser would interleave them in nondeterministic order: a stray
+	// URL on stderr (an upgrade notice, a policy link) could then be paired with the
+	// real code from stdout and the user would be sent, silently, to the wrong page
+	// with a valid code. Only one prompt is emitted overall, whichever stream
+	// completes a pair first.
 	out := newTail(outputTailBytes)
-	var parseMu sync.Mutex
-	parser := &promptParser{}
+	var (
+		emitMu         sync.Mutex
+		emitted        bool
+		sawPromptOnAny bool
+	)
 	var streams sync.WaitGroup
 	for _, rd := range []io.Reader{stdout, stderr} {
 		streams.Add(1)
 		go func(rd io.Reader) {
 			defer streams.Done()
+			parser := &promptParser{}
 			scanLines(rd, func(line string) {
 				out.WriteString(line + "\n")
-				parseMu.Lock()
 				p, ok := parser.feed(line)
-				parseMu.Unlock()
-				if ok && onPrompt != nil {
+				if !ok {
+					return
+				}
+				emitMu.Lock()
+				first := !emitted
+				emitted, sawPromptOnAny = true, true
+				emitMu.Unlock()
+				if first && onPrompt != nil {
 					onPrompt(p)
 				}
 			})
@@ -162,9 +179,9 @@ func Login(ctx context.Context, cfg Config, onPrompt func(Prompt)) error {
 	}
 	killMu.Unlock()
 
-	parseMu.Lock()
-	sawPrompt := parser.sent
-	parseMu.Unlock()
+	emitMu.Lock()
+	sawPrompt := sawPromptOnAny
+	emitMu.Unlock()
 
 	return loginResult(ctx, waitErr, out.String(), sawPrompt)
 }
@@ -278,10 +295,11 @@ var (
 // is actionable; the prompt is released exactly once, on the line that completes
 // the pair.
 type promptParser struct {
-	url  string
-	code string
-	ttl  time.Duration
-	sent bool
+	url      string
+	urlScore int
+	code     string
+	ttl      time.Duration
+	sent     bool
 }
 
 // feed consumes one ANSI-stripped output line. ok is true only for the line that
@@ -290,9 +308,14 @@ func (p *promptParser) feed(line string) (Prompt, bool) {
 	if p.sent {
 		return Prompt{}, false
 	}
-	if p.url == "" {
-		if m := urlRe.FindString(line); m != "" {
-			p.url = strings.TrimRight(m, ".,;")
+	if m := urlRe.FindString(line); m != "" {
+		// Keep the BEST candidate rather than the first: an upgrade notice or a
+		// policy link printed before the verification URL must not win just because
+		// it came first, or the user would be sent to the wrong page with a code
+		// that looks perfectly valid. A single-URL run is unaffected — it scores
+		// whatever it scores and stays.
+		if candidate := strings.TrimRight(m, ".,;"); p.url == "" || urlScore(candidate) > p.urlScore {
+			p.url, p.urlScore = candidate, urlScore(candidate)
 		}
 	}
 	if p.code == "" {
@@ -308,6 +331,30 @@ func (p *promptParser) feed(line string) (Prompt, bool) {
 	}
 	p.sent = true
 	return Prompt{URL: p.url, Code: p.code, ExpiresIn: p.ttl}, true
+}
+
+// URL candidate ranks, best first: the device path is unmistakable, a known host
+// is good evidence, and anything else is only used for lack of an alternative.
+const (
+	scoreDevicePath = 2
+	scoreKnownHost  = 1
+	scoreUnknown    = 0
+)
+
+// urlScore ranks a URL by how much it looks like Codex's device-verification
+// link. It is a preference, never a filter: an unrecognized URL is still used
+// when it is the only one, so a changed domain degrades to today's behavior
+// instead of breaking the flow outright.
+func urlScore(u string) int {
+	low := strings.ToLower(u)
+	switch {
+	case strings.Contains(low, "/device"):
+		return scoreDevicePath
+	case strings.Contains(low, "openai.com"), strings.Contains(low, "chatgpt.com"):
+		return scoreKnownHost
+	default:
+		return scoreUnknown
+	}
 }
 
 // matchCode extracts a one-time code from line. A bare uppercase hyphenated

@@ -340,22 +340,25 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 		return
 	}
 
-	// Codex with no completed sign-in cannot run anything. Say so once, after the
-	// gate (so an unaddressed community message stays silent) and before any paid
-	// work (transcription, downloads) or a run that would only fail inside the CLI.
-	// /login is dispatched above and stays reachable while this gate is closed.
-	if notice, blocked := r.auth.BlockedNotice(); blocked {
-		r.logger.Debug("vk: codex unauthorized — blocking run", "peer_id", peerID)
-		r.notify(ctx, peerID, notice)
-		return
-	}
-
 	if r.guards != nil {
 		if allow, reason := r.guards(msg.FromID); !allow {
 			r.logger.Debug("vk: guardrail denied message", "peer_id", peerID, "user_id", msg.FromID, "reason", reason)
 			r.notify(ctx, peerID, reason)
 			return
 		}
+	}
+
+	// Codex with no completed sign-in cannot run anything. Say so here — after the
+	// mention gate (so an unaddressed community message stays silent) and after the
+	// guards (an unauthorized deploy in a busy conversation would otherwise answer
+	// every single message, unthrottled), but before any paid work: the guards spend
+	// nothing, while transcription and downloads do. /login is dispatched above and
+	// stays reachable while this gate is closed. core/chat gates the run itself;
+	// this is the early, user-facing half.
+	if notice, blocked := r.auth.BlockedNotice(); blocked {
+		r.logger.Debug("vk: codex unauthorized — blocking run", "peer_id", peerID)
+		r.notify(ctx, peerID, notice)
+		return
 	}
 
 	text := strings.TrimSpace(cleaned)
@@ -422,22 +425,42 @@ func (r *Receiver) dispatchReserved(ctx context.Context, name string, msg messag
 	}
 }
 
+// loginGroupChatText refuses to start a sign-in in a community conversation.
+const loginGroupChatText = "Send /login in a direct message with me, not in a conversation.\n\n" +
+	"The sign-in reply carries a one-time code that authorizes an account for the whole bot, " +
+	"and everyone in this conversation would see it."
+
 // dispatchLogin serves /login: start, report, or cancel the Codex device-code
 // sign-in. It stays available while the deployment is unauthorized — it is the
-// only way out of that state.
+// only way out of that state. The sender is already allow-list gated by
+// onMessageNew, which returns before any reserved command is dispatched.
+//
+// Starting a sign-in is refused in a community conversation. The reply goes to
+// the PEER, not the sender, so in a conversation the verification link and the
+// one-time code would be readable by every participant, allow-listed or not —
+// and whoever acts on the code first binds THEIR ChatGPT account to the bot, so
+// every later run (and its history) would go through that account. status and
+// cancel stay available everywhere: neither reveals a code.
 //
 // The sign-in outlives this call: Dispatch replies immediately and keeps working
-// in the background, delivering the link, the one-time code, and the verdict
-// through notify. That callback builds its OWN context, because this update's is
+// in the background, delivering the link, the one-time code, and the verdict to
+// its subscribers. The callback builds its OWN context, because this update's is
 // long gone by the time a user finishes in a browser.
 func (r *Receiver) dispatchLogin(ctx context.Context, msg messageObject) {
 	peerID := msg.PeerID
-	notify := func(text string) {
-		sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginNotifyTimeout)
-		defer cancel()
-		r.notify(sendCtx, peerID, text)
+	if isGroupPeer(peerID) && codexauth.StartsLogin(commandArgs(msg.Text)) {
+		r.notify(ctx, peerID, loginGroupChatText)
+		return
 	}
-	r.notify(ctx, peerID, r.auth.Dispatch(ctx, commandArgs(msg.Text), notify))
+	sub := codexauth.Subscriber{
+		ID: chatIDStr(peerID),
+		Notify: func(text string) {
+			sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginNotifyTimeout)
+			defer cancel()
+			r.notify(sendCtx, peerID, text)
+		},
+	}
+	r.notify(ctx, peerID, r.auth.Dispatch(ctx, commandArgs(msg.Text), sub))
 }
 
 // dispatchGoal serves /goal: arm, show, or disarm the calling chat's goal via

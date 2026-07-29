@@ -27,7 +27,6 @@ import (
 	"github.com/duckbugio/flock/adapters/vk"
 	"github.com/duckbugio/flock/core/chat"
 	"github.com/duckbugio/flock/core/claude"
-	"github.com/duckbugio/flock/core/codexauth"
 	"github.com/duckbugio/flock/core/cost"
 	"github.com/duckbugio/flock/core/dispatch"
 	"github.com/duckbugio/flock/core/ghstar"
@@ -79,42 +78,18 @@ func run() int {
 	}))
 	slog.SetDefault(logger)
 
-	// A Codex subscription deploy that has never been signed in starts anyway, in a
-	// "needs login" state: /login is the only headless way to complete that sign-in,
-	// so refusing to boot would make it unreachable. Runs stay blocked (with an
-	// actionable notice) until the login lands.
-	runner, opts, provider, pendingLogin, err := airunner.BuildWithPendingLogin(cfg)
+	runner, opts, provider, auth, err := airunner.BuildProvider(cfg, logger)
 	if err != nil {
-		logger.Error("invalid ai provider config", "provider", cfg.AIBackend, "error", err)
 		return 1
-	}
-	auth := codexauth.NewManager(airunner.CodexAuthConfig(cfg, provider))
-	if pendingLogin {
-		logger.Warn("codex is not authorized yet; runs are blocked until /login completes",
-			"codex_home", cfg.CodexHome)
-	}
-	if provider.Name == config.AIBackendCodex {
-		logger.Info("codex backend enabled",
-			"provider", provider.Name,
-			"display_name", provider.DisplayName,
-			"auth_mode", cfg.CodexAuthModeName(),
-			"authorized", auth.Authorized(),
-			"sandbox", cfg.CodexSandbox,
-			"approval_policy", cfg.CodexApprovalPolicy,
-			"codex_home", cfg.CodexHome,
-			"capabilities", provider.Capabilities,
-		)
-	} else {
-		logger.Info("ai provider enabled",
-			"provider", provider.Name,
-			"display_name", provider.DisplayName,
-			"model", opts.Model,
-			"capabilities", provider.Capabilities,
-		)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// A pending device login is deliberately detached from the update that
+	// started it, so nothing else would ever end it on shutdown: the polling
+	// Codex child would outlive this process as an orphan.
+	defer auth.Cancel()
 
 	// Best-effort git startup wiring (identity, default branch, inline credential
 	// helper). Non-fatal: a git setup failure must not crash-loop the bot.
@@ -249,7 +224,12 @@ func run() int {
 		Opts:       opts,
 		Timeout:    cfg.ClaudeTimeout(),
 		RetryAfter: vk.RetryAfter,
-		Logger:     logger,
+		// The provider gate at the single point every run passes through — a user
+		// message, a cron fire, a workspace follow-up, a poller relay, the restart
+		// replay. The adapters block the message path early (before paid work); this
+		// is what stops the other four from marching into an unauthenticated CLI.
+		Auth:   auth,
+		Logger: logger,
 	})
 
 	// One-shot follow-ups (the workspace followup/<delay>.md convention).

@@ -27,6 +27,9 @@ func newCollector() *collector { return &collector{ch: make(chan string, 8)} }
 
 func (c *collector) notify(text string) { c.ch <- text }
 
+// sub is the collector as a Subscriber for destination id.
+func (c *collector) sub(id string) Subscriber { return Subscriber{ID: id, Notify: c.notify} }
+
 // next returns the next notice, failing the test if none arrives in time.
 func (c *collector) next(t *testing.T) string {
 	t.Helper()
@@ -151,7 +154,7 @@ func TestNilManagerIsInert(t *testing.T) {
 	if m.Cancel() {
 		t.Error("nil Manager cancelled a login")
 	}
-	if got := m.Dispatch(context.Background(), "", nil); got != NoLoginNeededText {
+	if got := m.Dispatch(context.Background(), "", Subscriber{}); got != NoLoginNeededText {
 		t.Errorf("nil Manager Dispatch = %q, want NoLoginNeededText", got)
 	}
 }
@@ -160,11 +163,11 @@ func TestNilManagerIsInert(t *testing.T) {
 // itself instead of running anything.
 func TestDispatchNotApplicable(t *testing.T) {
 	claude := NewManager(Config{Backend: "claude"})
-	if got := claude.Dispatch(context.Background(), "", nil); !strings.Contains(got, "claude") {
+	if got := claude.Dispatch(context.Background(), "", Subscriber{}); !strings.Contains(got, "claude") {
 		t.Errorf("Dispatch = %q, want it to name the configured backend", got)
 	}
 	billing := NewManager(Config{Backend: BackendCodex, AuthMode: AuthBilling})
-	if got := billing.Dispatch(context.Background(), "", nil); !strings.Contains(got, "CODEX_API_KEY") {
+	if got := billing.Dispatch(context.Background(), "", Subscriber{}); !strings.Contains(got, "CODEX_API_KEY") {
 		t.Errorf("Dispatch = %q, want the billing-mode explanation", got)
 	}
 }
@@ -192,7 +195,7 @@ func TestDispatchFullLoginPath(t *testing.T) {
 	}
 
 	c := newCollector()
-	if reply := m.Dispatch(context.Background(), "", c.notify); !strings.Contains(reply, "Starting") {
+	if reply := m.Dispatch(context.Background(), "", c.sub("chat-1")); !strings.Contains(reply, "Starting") {
 		t.Errorf("immediate reply = %q, want an acknowledgement that the sign-in started", reply)
 	}
 
@@ -232,12 +235,12 @@ func TestDispatchReshowsPendingPrompt(t *testing.T) {
 	t.Cleanup(func() { m.Cancel() })
 
 	c := newCollector()
-	m.Dispatch(context.Background(), "", c.notify)
+	m.Dispatch(context.Background(), "", c.sub("chat-1"))
 	if prompt := c.next(t); !strings.Contains(prompt, "XER9-NWCA2") {
 		t.Fatalf("first prompt %q is missing the code", prompt)
 	}
 
-	again := m.Dispatch(context.Background(), "", c.notify)
+	again := m.Dispatch(context.Background(), "", c.sub("chat-1"))
 	if !strings.Contains(again, "XER9-NWCA2") {
 		t.Errorf("second /login = %q, want the pending code re-shown", again)
 	}
@@ -267,15 +270,15 @@ func TestDispatchCancel(t *testing.T) {
 		Env:         []string{"PATH=" + os.Getenv("PATH")},
 	})
 
-	if got := m.Dispatch(context.Background(), "cancel", nil); !strings.Contains(got, "No Codex login is pending") {
+	if got := m.Dispatch(context.Background(), "cancel", Subscriber{}); !strings.Contains(got, "No Codex login is pending") {
 		t.Errorf("cancel with nothing pending = %q", got)
 	}
 
 	c := newCollector()
-	m.Dispatch(context.Background(), "", c.notify)
+	m.Dispatch(context.Background(), "", c.sub("chat-1"))
 	c.next(t) // the prompt
 
-	if got := m.Dispatch(context.Background(), "cancel", c.notify); !strings.Contains(got, "Cancelled") {
+	if got := m.Dispatch(context.Background(), "cancel", c.sub("chat-1")); !strings.Contains(got, "Cancelled") {
 		t.Errorf("cancel = %q, want a cancellation acknowledgement", got)
 	}
 	if got := c.next(t); !strings.Contains(got, "cancelled") {
@@ -291,7 +294,7 @@ func TestDispatchAlreadyAuthorized(t *testing.T) {
 	writeAuthFile(t, home)
 	m := NewManager(Config{Backend: BackendCodex, AuthMode: AuthSubscription, RequireAuth: true, Home: home})
 
-	got := m.Dispatch(context.Background(), "", nil)
+	got := m.Dispatch(context.Background(), "", Subscriber{})
 	if !strings.Contains(got, "authorized") || !strings.Contains(got, "/login force") {
 		t.Errorf("Dispatch = %q, want the authorized state plus the force hint", got)
 	}
@@ -301,13 +304,13 @@ func TestDispatchAlreadyAuthorized(t *testing.T) {
 func TestDispatchStatusAndUsage(t *testing.T) {
 	m := NewManager(Config{Backend: BackendCodex, AuthMode: AuthSubscription, RequireAuth: true, Home: t.TempDir()})
 
-	if got := m.Dispatch(context.Background(), "status", nil); !strings.Contains(got, "NOT authorized") {
+	if got := m.Dispatch(context.Background(), "status", Subscriber{}); !strings.Contains(got, "NOT authorized") {
 		t.Errorf("status = %q, want the unauthorized state", got)
 	}
-	if got := m.Dispatch(context.Background(), "help", nil); got != LoginUsage {
+	if got := m.Dispatch(context.Background(), "help", Subscriber{}); got != LoginUsage {
 		t.Errorf("help = %q, want LoginUsage", got)
 	}
-	if got := m.Dispatch(context.Background(), "wat", nil); !strings.Contains(got, "Unknown /login argument") {
+	if got := m.Dispatch(context.Background(), "wat", Subscriber{}); !strings.Contains(got, "Unknown /login argument") {
 		t.Errorf("unknown arg = %q, want the usage hint", got)
 	}
 }
@@ -341,7 +344,7 @@ func TestDispatchSurvivesADeadRequestContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	c := newCollector()
-	m.Dispatch(ctx, "", c.notify)
+	m.Dispatch(ctx, "", c.sub("chat-1"))
 	cancel() // the update's context dies immediately, as it does in production
 
 	if prompt := c.next(t); !strings.Contains(prompt, "XER9-NWCA2") {
@@ -398,5 +401,81 @@ func TestSubscriptionLoginDropsInheritedAPIKey(t *testing.T) {
 	}
 	if env[len(env)-1] != "CODEX_HOME="+cfg.Home {
 		t.Errorf("CODEX_HOME = %q, want the configured home", env[len(env)-1])
+	}
+}
+
+// TestStartsLogin pins which arguments print a code — the adapters gate group
+// chats on exactly this, so it must agree with Dispatch's own switch.
+func TestStartsLogin(t *testing.T) {
+	for _, args := range []string{"", "  ", "force", "FORCE", "again", "relogin"} {
+		if !StartsLogin(args) {
+			t.Errorf("StartsLogin(%q) = false, want true (this form reveals a code)", args)
+		}
+	}
+	for _, args := range []string{"status", "cancel", "abort", "help", "nonsense"} {
+		if StartsLogin(args) {
+			t.Errorf("StartsLogin(%q) = true, want false", args)
+		}
+	}
+}
+
+// TestEveryAskerLearnsTheOutcome: a second /login while one is pending re-shows
+// the same code — and must also start receiving the verdict. Without the
+// subscription, only the chat that happened to start the login would ever learn
+// whether it worked.
+func TestEveryAskerLearnsTheOutcome(t *testing.T) {
+	bin := fakeCodex(t, printBanner+"sleep 0.3\nexit 0\n")
+	m := NewManager(Config{
+		Backend:     BackendCodex,
+		AuthMode:    AuthSubscription,
+		RequireAuth: true,
+		Bin:         bin,
+		Home:        t.TempDir(),
+		Env:         []string{"PATH=" + os.Getenv("PATH")},
+	})
+
+	first, second := newCollector(), newCollector()
+	m.Dispatch(context.Background(), "", first.sub("chat-1"))
+	if p := first.next(t); !strings.Contains(p, "XER9-NWCA2") {
+		t.Fatalf("first prompt %q is missing the code", p)
+	}
+
+	// A different chat asks while the login is pending.
+	if again := m.Dispatch(context.Background(), "", second.sub("chat-2")); !strings.Contains(again, "XER9-NWCA2") {
+		t.Fatalf("second /login = %q, want the pending code re-shown", again)
+	}
+
+	for name, c := range map[string]*collector{"starter": first, "joiner": second} {
+		if got := c.next(t); !strings.Contains(strings.ToLower(got), "authorized") {
+			t.Errorf("%s got %q as the final notice, want the success confirmation", name, got)
+		}
+	}
+}
+
+// TestTheSameChatAskingTwiceIsNotToldTwice: subscriptions are keyed by
+// destination, so a user tapping /login twice does not double every later notice.
+func TestTheSameChatAskingTwiceIsNotToldTwice(t *testing.T) {
+	bin := fakeCodex(t, printBanner+"sleep 0.3\nexit 0\n")
+	m := NewManager(Config{
+		Backend:     BackendCodex,
+		AuthMode:    AuthSubscription,
+		RequireAuth: true,
+		Bin:         bin,
+		Home:        t.TempDir(),
+		Env:         []string{"PATH=" + os.Getenv("PATH")},
+	})
+
+	c := newCollector()
+	m.Dispatch(context.Background(), "", c.sub("chat-1"))
+	c.next(t) // the prompt
+	m.Dispatch(context.Background(), "", c.sub("chat-1"))
+
+	if got := c.next(t); !strings.Contains(strings.ToLower(got), "authorized") {
+		t.Fatalf("final notice = %q, want the success confirmation", got)
+	}
+	select {
+	case extra := <-c.ch:
+		t.Errorf("the same chat was told twice; extra notice: %q", extra)
+	case <-time.After(300 * time.Millisecond):
 	}
 }

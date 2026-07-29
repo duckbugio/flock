@@ -118,7 +118,20 @@ func (n *fakeNotice) Notify(_ context.Context, _ int64, text string) {
 // newTestReceiver builds a Receiver wired to the fakes, allowing user 42, group
 // 123, with the given requireMention.
 func newTestReceiver(svc Service, notices NoticeSender, requireMention bool, acked *[]string) *Receiver {
+	return newTestReceiverOpts(svc, notices, requireMention, acked, nil)
+}
+
+// newTestReceiverWithAuth is newTestReceiver with a Codex sign-in manager wired
+// through the config, as production does.
+func newTestReceiverWithAuth(svc Service, notices NoticeSender, auth *codexauth.Manager) *Receiver {
+	return newTestReceiverOpts(svc, notices, false, nil, auth)
+}
+
+func newTestReceiverOpts(
+	svc Service, notices NoticeSender, requireMention bool, acked *[]string, auth *codexauth.Manager,
+) *Receiver {
 	return NewReceiver(ReceiverConfig{
+		CodexAuth:      auth,
 		Service:        svc,
 		GroupID:        123,
 		RequireMention: requireMention,
@@ -626,17 +639,17 @@ func isContextErr(err error) bool {
 }
 
 // unauthorizedCodexReceiver wires a receiver whose Codex backend has never been
-// signed in (an empty CODEX_HOME, so no auth.json).
+// signed in (an empty CODEX_HOME, so no auth.json). The manager goes in through
+// ReceiverConfig, the same way production wires it, so this covers NewReceiver's
+// own plumbing instead of reaching past it into the private field.
 func unauthorizedCodexReceiver(t *testing.T, svc Service, notices NoticeSender) *Receiver {
 	t.Helper()
-	r := newTestReceiver(svc, notices, false, nil)
-	r.auth = codexauth.NewManager(codexauth.Config{
+	return newTestReceiverWithAuth(svc, notices, codexauth.NewManager(codexauth.Config{
 		Backend:     codexauth.BackendCodex,
 		AuthMode:    codexauth.AuthSubscription,
 		RequireAuth: true,
 		Home:        t.TempDir(),
-	})
-	return r
+	}))
 }
 
 // TestReceiverBlocksRunsWhileCodexUnauthorized: a Codex deploy with no completed
@@ -690,5 +703,57 @@ func TestReceiverLoginWithoutManagerIsInert(t *testing.T) {
 	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 200, Text: "build it"}))
 	if len(svc.handleCalls) != 1 {
 		t.Errorf("Handle calls = %d, want 1 (no manager must never block)", len(svc.handleCalls))
+	}
+}
+
+// TestReceiverLoginRefusedInConversation: the reply goes to the PEER, so in a
+// community conversation the verification link and one-time code would be
+// readable by every participant — and whoever acts on the code first binds THEIR
+// ChatGPT account to the bot, sending every later run through it.
+func TestReceiverLoginRefusedInConversation(t *testing.T) {
+	svc := &fakeService{}
+	notices := &fakeNotice{}
+	r := unauthorizedCodexReceiver(t, svc, notices)
+
+	// 2000000000+ is VK's conversation (chat) peer range.
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 2000000001, Text: "/login"}))
+
+	if len(notices.texts) != 1 || !strings.Contains(notices.texts[0], "direct message") {
+		t.Fatalf("notices = %v, want the refusal pointing at a direct message", notices.texts)
+	}
+	if strings.Contains(notices.texts[0], "http") {
+		t.Error("the refusal leaked a link into the conversation")
+	}
+}
+
+// TestReceiverLoginStatusAllowedInConversation: status reveals no code, so it
+// stays available everywhere — refusing it would just be noise.
+func TestReceiverLoginStatusAllowedInConversation(t *testing.T) {
+	svc := &fakeService{}
+	notices := &fakeNotice{}
+	r := unauthorizedCodexReceiver(t, svc, notices)
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{
+		FromID: 42, PeerID: 2000000001, Text: "/login status",
+	}))
+
+	if len(notices.texts) != 1 || !strings.Contains(notices.texts[0], "NOT authorized") {
+		t.Errorf("notices = %v, want the status reply", notices.texts)
+	}
+}
+
+// TestReceiverLoginRejectsDisallowedSender: /login (and especially /login force)
+// changes the provider credentials for the WHOLE process, so it must be as
+// allow-list gated as any other command. onMessageNew returns before dispatching
+// any reserved command for a disallowed sender; this pins that.
+func TestReceiverLoginRejectsDisallowedSender(t *testing.T) {
+	svc := &fakeService{}
+	notices := &fakeNotice{}
+	r := unauthorizedCodexReceiver(t, svc, notices)
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 999, PeerID: 999, Text: "/login"}))
+
+	if len(notices.texts) != 0 {
+		t.Errorf("a disallowed sender got %v, want silence", notices.texts)
 	}
 }

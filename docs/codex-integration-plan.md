@@ -516,6 +516,16 @@ Delivered:
   (`airunner.BuildWithPendingLogin`); runs are blocked with an actionable notice
   until the login lands, re-checked from `auth.json` on every message so no
   restart is needed.
+- The block lives in `core/chat` (`RunGate`), at the single point every run
+  passes through, so the four non-adapter sources — a poller relay, a cron fire,
+  a workspace follow-up and the restart replay — are gated too instead of
+  marching into an unauthenticated CLI once per tick. The adapters keep an early
+  check on the message path so an unauthorized deploy never pays for a voice
+  transcription or an upload download. A blocked replay keeps its pending marker.
+- `/login` starts a sign-in only in a direct message; `status` and `cancel` work
+  anywhere. `CODEX_REQUIRE_AUTH=false` still opts out of blocking entirely, and
+  startup logs `authorized` next to `credentials_present` so that opt-out cannot
+  read as "all good".
 
 Acceptance:
 
@@ -565,8 +575,9 @@ Acceptance:
 2. Start the container. With no persisted `auth.json` and no `CODEX_ACCESS_TOKEN`
    the bot comes up in a "needs login" state: it logs a warning, serves `/login`,
    and answers any other message with a notice pointing at it.
-3. From an allow-listed chat, send `/login`. The bot replies with a verification
-   link and a one-time code.
+3. From an allow-listed **direct message** (not a group — the reply carries a
+   one-time code that would authorize whoever acts on it first), send `/login`.
+   The bot replies with a verification link and a one-time code.
 4. Open the link, sign in, and enter the code. The bot confirms in the chat.
 5. Send a small prompt in a private allowed chat — no restart needed.
 

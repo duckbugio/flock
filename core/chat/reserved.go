@@ -25,7 +25,7 @@ var ReservedCommands = []ReservedCommand{
 	{Name: "stop", Description: "Stop the run currently in progress"},
 	{Name: "schedule", Description: "Manage scheduled jobs"},
 	{Name: "goal", Description: "Arm a goal an independent evaluator re-checks after every run"},
-	{Name: "login", Description: "Authorize the AI provider (Codex browser sign-in)"},
+	{Name: "login", Description: "Sign in to Codex on a subscription (other backends need no login)"},
 }
 
 // IsReservedCommand reports whether name is one of the bot's reserved commands.

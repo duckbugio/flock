@@ -11,7 +11,7 @@ const HelpText = "Flock VK assistant — available commands:\n\n" +
 	"/schedule — manage scheduled jobs (when enabled)\n" +
 	"/goal <criterion> — arm a goal an independent evaluator re-checks after every run " +
 	"(/goal off to disarm)\n" +
-	"/login — authorize the AI provider (Codex browser sign-in; /login status, /login cancel)\n\n" +
+	"/login — sign in to Codex on a subscription (not needed on other backends; /login status, /login cancel)\n\n" +
 	"Send any other message to run it through the assistant."
 
 // goalUsageText is the /goal usage reply, mirroring the Telegram adapter.

@@ -27,6 +27,13 @@ const deviceAuthBanner = "\n" +
 	"2. Enter this one-time code \x1b[90m(expires in 15 minutes)\x1b[0m\n" +
 	"   \x1b[94mXER9-NWCA2\x1b[0m\n"
 
+// The verification link and one-time code the banner carries, asserted across
+// the parser and end-to-end cases.
+const (
+	deviceURL  = "https://auth.openai.com/codex/device"
+	deviceCode = "XER9-NWCA2"
+)
+
 // printBanner is the shell snippet emitting deviceAuthBanner verbatim. A quoted
 // heredoc keeps the apostrophes and escapes intact without shell interpretation.
 const printBanner = "cat <<'CODEX_BANNER_EOF'" + deviceAuthBanner + "CODEX_BANNER_EOF\n"
@@ -86,10 +93,10 @@ func TestLoginEmitsPromptWhileProcessStillRunning(t *testing.T) {
 		t.Fatal("no prompt within 10s: the CLI output is not being read incrementally")
 	}
 
-	if got.URL != "https://auth.openai.com/codex/device" {
+	if got.URL != deviceURL {
 		t.Errorf("URL = %q, want the device verification link", got.URL)
 	}
-	if got.Code != "XER9-NWCA2" {
+	if got.Code != deviceCode {
 		t.Errorf("Code = %q, want XER9-NWCA2", got.Code)
 	}
 	if got.ExpiresIn != 15*time.Minute {
@@ -240,7 +247,7 @@ func TestPromptParser(t *testing.T) {
 	if !ok {
 		t.Fatal("the code line did not release the prompt")
 	}
-	if got.URL != "https://auth.openai.com/codex/device" || got.Code != "XER9-NWCA2" {
+	if got.URL != deviceURL || got.Code != deviceCode {
 		t.Errorf("prompt = %+v, want the parsed URL and code", got)
 	}
 	if got.ExpiresIn != 15*time.Minute {
@@ -260,8 +267,8 @@ func TestMatchCode(t *testing.T) {
 		line string
 		want string
 	}{
-		{"bare code line", "   XER9-NWCA2  ", "XER9-NWCA2"},
-		{"labelled code", "Your one-time code: XER9-NWCA2 now", "XER9-NWCA2"},
+		{"bare code line", "   XER9-NWCA2  ", deviceCode},
+		{"labelled code", "Your one-time code: XER9-NWCA2 now", deviceCode},
 		{"inside a url", "https://example.com/AAAA-BBBB", ""},
 		{"unrelated banner token", "Release NOTES-DRAFT ready", ""},
 		{"lowercase", "   xer9-nwca2", ""},
@@ -339,5 +346,76 @@ func TestSplitLinesBreaksOnCarriageReturn(t *testing.T) {
 	}
 	if advance != len("waiting…")+1 {
 		t.Errorf("advance = %d, want %d", advance, len("waiting…")+1)
+	}
+}
+
+// TestLoginIgnoresAStrayURLFromTheOtherStream is the anti-mispairing guard. The
+// two output streams are read by separate goroutines, so a shared parser would
+// interleave them nondeterministically: an unrelated URL on stderr (an upgrade
+// notice, a policy link) could be paired with the REAL code from stdout, and the
+// user would be sent to the wrong page holding a code that works. The URL and
+// the code must come from the same stream.
+func TestLoginIgnoresAStrayURLFromTheOtherStream(t *testing.T) {
+	bin := fakeCodex(t, "echo 'A new version is available: https://example.com/upgrade' >&2\n"+
+		"sleep 0.2\n"+printBanner+"exit 0\n")
+
+	var got Prompt
+	if err := Login(context.Background(), testConfig(t, bin), func(p Prompt) { got = p }); err != nil {
+		t.Fatalf("Login = %v, want nil", err)
+	}
+	if got.URL != deviceURL {
+		t.Errorf("URL = %q, want the verification link, not the stray stderr one", got.URL)
+	}
+	if got.Code != deviceCode {
+		t.Errorf("Code = %q, want XER9-NWCA2", got.Code)
+	}
+}
+
+// TestPromptParserPrefersTheVerificationURL: within one stream, a URL printed
+// before the verification link must not win merely by being first.
+func TestPromptParserPrefersTheVerificationURL(t *testing.T) {
+	p := &promptParser{}
+	p.feed("Docs: https://example.com/help")
+	p.feed("   https://auth.openai.com/codex/device")
+	got, ok := p.feed("   XER9-NWCA2")
+	if !ok {
+		t.Fatal("no prompt released")
+	}
+	if got.URL != deviceURL {
+		t.Errorf("URL = %q, want the device link to outrank the earlier one", got.URL)
+	}
+}
+
+// TestPromptParserKeepsALoneUnrecognizedURL: the preference is a ranking, not a
+// filter — if Codex ever moves off these domains, the only URL on offer is still
+// used rather than the flow breaking outright.
+func TestPromptParserKeepsALoneUnrecognizedURL(t *testing.T) {
+	p := &promptParser{}
+	p.feed("   https://login.example.test/activate")
+	got, ok := p.feed("   XER9-NWCA2")
+	if !ok {
+		t.Fatal("no prompt released")
+	}
+	if got.URL != "https://login.example.test/activate" {
+		t.Errorf("URL = %q, want the single available URL", got.URL)
+	}
+}
+
+// TestURLScore pins the ranking.
+func TestURLScore(t *testing.T) {
+	tests := []struct {
+		url  string
+		want int
+	}{
+		{deviceURL, scoreDevicePath},
+		{"https://chatgpt.com/codex/settings", scoreKnownHost},
+		{"https://example.com/upgrade", scoreUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			if got := urlScore(tt.url); got != tt.want {
+				t.Errorf("urlScore(%q) = %d, want %d", tt.url, got, tt.want)
+			}
+		})
 	}
 }

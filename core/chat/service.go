@@ -128,12 +128,14 @@ type Service struct {
 	log        *slog.Logger
 	tick       time.Duration
 	nowFunc    func() time.Time
+	auth       RunGate
 
-	mu             sync.Mutex                 // guards runChat, lastMsg, verifyRetry, budgetNotified and snapCache
+	mu             sync.Mutex                 // guards runChat, lastMsg, verifyRetry, budgetNotified, authNotified and snapCache
 	runChat        map[string]ChatID          // active runID -> chatID, for mapping Stop back to a chat
 	lastMsg        map[ChatID]MessageID       // chatID -> the source message id of its latest submitted run
 	verifyRetry    map[ChatID][]string        // repos whose gate failed last round (re-gated even if unchanged)
 	budgetNotified map[ChatID]string          // chatID -> UTC day the budget-reached notice was last sent
+	authNotified   map[ChatID]bool            // chatID -> the "provider unauthorized" notice was already sent
 	snapCache      map[ChatID]verify.Snapshot // post-run repo fingerprints, reused as the next run's "before"
 	runSeq         atomic.Uint64
 }
@@ -179,7 +181,12 @@ type Config struct {
 	// (Telegram supplies its 429 detector here). Nil means the transport has no
 	// rate-limit signal, so a delivery error is never treated as throttling.
 	RetryAfter func(err error) (time.Duration, bool)
-	Logger     *slog.Logger
+	// Auth blocks every run while the configured provider is unauthorized (today:
+	// a Codex subscription deploy whose interactive sign-in has not happened yet).
+	// Nil means no gate — the Claude and API-key paths authenticate from env and
+	// have nothing to wait for.
+	Auth   RunGate
+	Logger *slog.Logger
 }
 
 // defaultMaxMessageRunes is the chunk limit used when a Transport reports a
@@ -221,11 +228,13 @@ func New(cfg Config) *Service {
 		log:        log,
 		tick:       tickInterval,
 		nowFunc:    time.Now,
+		auth:       cfg.Auth,
 		runChat:    map[string]ChatID{},
 		lastMsg:    map[ChatID]MessageID{},
 
 		verifyRetry:    map[ChatID][]string{},
 		budgetNotified: map[ChatID]string{},
+		authNotified:   map[ChatID]bool{},
 		snapCache:      map[ChatID]verify.Snapshot{},
 	}
 }
@@ -404,6 +413,15 @@ func (s *Service) Stop(runID string) bool {
 func (s *Service) run(
 	ctx context.Context, chatID ChatID, userID int64, prompt string, images []agent.ImageInput, markerID string,
 ) {
+	// The provider gate, at the single point EVERY run passes through: a user
+	// message, a poller-injected PR comment, a cron fire, a workspace follow-up and
+	// the restart replay all land here. A blocked run is dropped before any work —
+	// and before the pending marker would be cleared, so an interrupted run stays
+	// queued for after the sign-in instead of being lost to it.
+	if s.blockRun(ctx, chatID) {
+		return
+	}
+
 	runID := strconv.FormatUint(s.runSeq.Add(1), 10)
 	s.mu.Lock()
 	s.runChat[runID] = chatID

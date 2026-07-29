@@ -4,6 +4,7 @@ package airunner
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -117,6 +118,58 @@ func BuildWithPendingLogin(cfg config.Config) (
 // interactive Codex login yet", as opposed to a real misconfiguration.
 func IsPendingLogin(err error) bool {
 	return errors.Is(err, config.ErrCodexSubscriptionAuthRequired)
+}
+
+// BuildProvider is the whole provider-startup sequence both adapter binaries
+// run: resolve the provider (tolerating a pending Codex sign-in), build the
+// codexauth.Manager that serves /login and gates runs, and log what came up. It
+// lives here rather than in either main so the two cannot drift apart.
+//
+// The Codex log reports authorized AND credentials_present, because they are
+// different questions and only reporting the first would mislead: with
+// CODEX_REQUIRE_AUTH=false, Authorized is true by policy even when there is no
+// credential at all — precisely the deploy whose first run is about to fail
+// inside the CLI, and precisely the log an operator reads first.
+//
+// The error is logged here; the caller only needs to know to exit.
+func BuildProvider(cfg config.Config, logger *slog.Logger) (
+	agent.Runner, agent.Options, agent.ProviderInfo, *codexauth.Manager, error,
+) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	runner, opts, provider, pendingLogin, err := BuildWithPendingLogin(cfg)
+	if err != nil {
+		logger.Error("invalid ai provider config", "provider", cfg.AIBackend, "error", err)
+		return nil, agent.Options{}, agent.ProviderInfo{}, nil, err
+	}
+	auth := codexauth.NewManager(CodexAuthConfig(cfg, provider))
+	if pendingLogin {
+		logger.Warn("codex is not authorized yet; runs are blocked until /login completes",
+			"codex_home", cfg.CodexHome)
+	}
+	if provider.Name == config.AIBackendCodex {
+		logger.Info("codex backend enabled",
+			"provider", provider.Name,
+			"display_name", provider.DisplayName,
+			"auth_mode", cfg.CodexAuthModeName(),
+			"authorized", auth.Authorized(),
+			"credentials_present", auth.CredentialsPresent(),
+			"require_auth", cfg.CodexRequireAuth,
+			"sandbox", cfg.CodexSandbox,
+			"approval_policy", cfg.CodexApprovalPolicy,
+			"codex_home", cfg.CodexHome,
+			"capabilities", provider.Capabilities,
+		)
+	} else {
+		logger.Info("ai provider enabled",
+			"provider", provider.Name,
+			"display_name", provider.DisplayName,
+			"model", opts.Model,
+			"capabilities", provider.Capabilities,
+		)
+	}
+	return runner, opts, provider, auth, nil
 }
 
 // CodexAuthConfig derives the /login driver's configuration from the deployment

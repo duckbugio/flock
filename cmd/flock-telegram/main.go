@@ -58,50 +58,6 @@ func main() {
 	os.Exit(run())
 }
 
-// buildProvider resolves the configured AI provider, its run defaults, and the
-// Codex sign-in manager that serves /login, logging what came up.
-//
-// A Codex subscription deploy that has never been signed in is NOT a startup
-// failure: /login is the only way to complete that sign-in headlessly, so
-// refusing to boot would make it unreachable. Such a deploy comes up flagged,
-// with runs blocked (by an actionable notice) until the login lands. Every other
-// provider misconfiguration is still fatal. The error is logged here; the caller
-// only needs to know to exit.
-func buildProvider(cfg config.Config, logger *slog.Logger) (
-	agent.Runner, agent.Options, agent.ProviderInfo, *codexauth.Manager, error,
-) {
-	runner, opts, provider, pendingLogin, err := airunner.BuildWithPendingLogin(cfg)
-	if err != nil {
-		logger.Error("invalid ai provider config", "provider", cfg.AIBackend, "error", err)
-		return nil, agent.Options{}, agent.ProviderInfo{}, nil, err
-	}
-	auth := codexauth.NewManager(airunner.CodexAuthConfig(cfg, provider))
-	if pendingLogin {
-		logger.Warn("codex is not authorized yet; runs are blocked until /login completes",
-			"codex_home", cfg.CodexHome)
-	}
-	if provider.Name == config.AIBackendCodex {
-		logger.Info("codex backend enabled",
-			"provider", provider.Name,
-			"display_name", provider.DisplayName,
-			"auth_mode", cfg.CodexAuthModeName(),
-			"authorized", auth.Authorized(),
-			"sandbox", cfg.CodexSandbox,
-			"approval_policy", cfg.CodexApprovalPolicy,
-			"codex_home", cfg.CodexHome,
-			"capabilities", provider.Capabilities,
-		)
-	} else {
-		logger.Info("ai provider enabled",
-			"provider", provider.Name,
-			"display_name", provider.DisplayName,
-			"model", opts.Model,
-			"capabilities", provider.Capabilities,
-		)
-	}
-	return runner, opts, provider, auth, nil
-}
-
 // run holds the adapter's startup and serve logic, returning a process exit code.
 // Splitting it out of main lets deferred cleanups (signal context, dispatcher
 // drain) run before the process exits, which a direct os.Exit in main would skip.
@@ -121,13 +77,18 @@ func run() int {
 	}))
 	slog.SetDefault(logger)
 
-	runner, opts, provider, auth, err := buildProvider(cfg, logger)
+	runner, opts, provider, auth, err := airunner.BuildProvider(cfg, logger)
 	if err != nil {
 		return 1
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// A pending device login is deliberately detached from the update that
+	// started it, so nothing else would ever end it on shutdown: the polling
+	// Codex child would outlive this process as an orphan.
+	defer auth.Cancel()
 
 	// Best-effort git startup wiring (identity, default branch, and — when a host
 	// + token are set — an inline credential helper that reads the token from the
@@ -336,7 +297,12 @@ func run() int {
 		Opts:       opts,
 		Timeout:    cfg.ClaudeTimeout(),
 		RetryAfter: telegram.RetryAfter,
-		Logger:     logger,
+		// The provider gate at the single point every run passes through — a user
+		// message, a cron fire, a workspace follow-up, a poller relay, the restart
+		// replay. The adapters block the message path early (before paid work); this
+		// is what stops the other four from marching into an unauthenticated CLI.
+		Auth:   auth,
+		Logger: logger,
 	})
 
 	// Background cron scheduler (OFF by default). When enabled, open the durable
@@ -567,17 +533,6 @@ func handleMessage(ctx context.Context, deps messageDeps, b *bot.Bot, msg *model
 		return
 	}
 
-	// Codex with no completed sign-in cannot run anything. Say so once, here — after
-	// the gate (so an unaddressed group message stays silent) but before any paid
-	// work (transcription, downloads) or a run that would only fail deep inside the
-	// CLI. /login is a reserved command routed elsewhere, so it stays reachable
-	// while this gate is closed.
-	if notice, blocked := deps.auth.BlockedNotice(); blocked {
-		slog.Debug("codex unauthorized — blocking run", "chat_id", msg.Chat.ID)
-		sendCommandReply(ctx, b, msg.Chat.ID, notice)
-		return
-	}
-
 	// Guardrails (plan §9b): once the message is accepted for handling but BEFORE
 	// any paid work (voice transcription or the Claude run), apply the per-user
 	// rate limit and cumulative cost cap. A denied message spends no transcription
@@ -587,6 +542,19 @@ func handleMessage(ctx context.Context, deps messageDeps, b *bot.Bot, msg *model
 	if allow, reason := chat.CheckGuards(limiter, costs, guards, msg.From.ID); !allow {
 		slog.Debug("guardrail denied message", "chat_id", msg.Chat.ID, "user_id", msg.From.ID, "reason", reason)
 		sendCommandReply(ctx, b, msg.Chat.ID, reason)
+		return
+	}
+
+	// Codex with no completed sign-in cannot run anything. Say so here — after the
+	// mention gate (so an unaddressed group message stays silent) and after the rate
+	// limit (an unauthorized deploy in a busy group would otherwise answer every
+	// single message, unthrottled), but before any paid work: the guards spend
+	// nothing, while transcription and downloads do. /login is a reserved command
+	// routed elsewhere, so it stays reachable while this gate is closed. core/chat
+	// gates the run itself; this is the early, user-facing half.
+	if notice, blocked := deps.auth.BlockedNotice(); blocked {
+		slog.Debug("codex unauthorized — blocking run", "chat_id", msg.Chat.ID)
+		sendCommandReply(ctx, b, msg.Chat.ID, notice)
 		return
 	}
 
@@ -1043,14 +1011,32 @@ func loginHandler(cfg config.Config, auth *codexauth.Manager) bot.HandlerFunc {
 		if !ok {
 			return
 		}
-		notify := func(text string) {
-			sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginNotifyTimeout)
-			defer cancel()
-			sendCommandReply(sendCtx, b, chatID, text)
+		args := commandArgs(update.Message.Text)
+		if update.Message.Chat.Type != models.ChatTypePrivate && codexauth.StartsLogin(args) {
+			sendCommandReply(ctx, b, chatID, loginGroupChatText)
+			return
 		}
-		sendCommandReply(ctx, b, chatID, auth.Dispatch(ctx, commandArgs(update.Message.Text), notify))
+		sub := codexauth.Subscriber{
+			ID: chatIDStr(chatID),
+			Notify: func(text string) {
+				sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginNotifyTimeout)
+				defer cancel()
+				sendCommandReply(sendCtx, b, chatID, text)
+			},
+		}
+		sendCommandReply(ctx, b, chatID, auth.Dispatch(ctx, args, sub))
 	}
 }
+
+// loginGroupChatText refuses to start a sign-in in a group chat. The reply goes
+// to the CHAT, not the sender, so in a group the verification link and one-time
+// code would be readable by every member, allow-listed or not — and whoever acts
+// on the code first binds THEIR ChatGPT account to the bot, so every later run
+// (and its history) would go through that account. status and cancel stay
+// available everywhere: neither reveals a code.
+const loginGroupChatText = "Send /login in a direct message with me, not in a group.\n\n" +
+	"The sign-in reply carries a one-time code that authorizes an account for the whole bot, " +
+	"and everyone in this group would see it."
 
 // loginNotifyTimeout bounds one background login notice delivery.
 const loginNotifyTimeout = 30 * time.Second
