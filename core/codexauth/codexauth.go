@@ -170,6 +170,22 @@ func (m *Manager) Applicable() bool {
 		strings.EqualFold(strings.TrimSpace(m.cfg.AuthMode), AuthSubscription)
 }
 
+// LoginAdvertised reports whether /login should be OFFERED — in a command menu
+// or a help text. It is narrower than Applicable: a deployment carrying
+// CODEX_ACCESS_TOKEN is already authorized without a browser, so listing the
+// command would lead the user to a reply that says it is not needed, which is the
+// exact reason the other backends are excluded.
+//
+// Applicable stays wider on purpose: /login force is still a legitimate way to
+// replace a workspace token with a personal subscription, so the command keeps
+// working where it is simply not advertised.
+func (m *Manager) LoginAdvertised() bool {
+	if m == nil {
+		return false
+	}
+	return m.Applicable() && !m.cfg.HasAccessToken
+}
+
 // Authorized reports whether Codex can run right now: a configured access token,
 // or a persisted auth.json under CODEX_HOME. It re-checks the file on every call
 // rather than caching a startup verdict, so the very first run after a

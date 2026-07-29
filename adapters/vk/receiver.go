@@ -360,12 +360,20 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 
 	if w.kind != workNone {
 		if notice, blocked := r.auth.BlockedNotice(); blocked {
-			r.logger.Debug("vk: codex unauthorized — blocking run", "peer_id", peerID)
+			// Info, not Debug: core/chat logs its refusals at Warn, but a user message
+			// never reaches it — this adapter answers and returns first. At the default
+			// level the operator would otherwise see every background refusal and none
+			// of the human ones. The rate limiter above bounds the frequency.
+			r.logger.Info("vk: codex unauthorized — refusing run", "peer_id", peerID)
 			r.notify(ctx, peerID, notice)
 			return
 		}
 	}
 
+	// No default branch on purpose: the exhaustive linter treats one as "all cases
+	// covered", which would trade a build-time error for a runtime log — and
+	// catching a forgotten kind at build time is the whole point. The fall-through
+	// below is the runtime backstop, kept for the same reason.
 	switch w.kind {
 	case workNone:
 		return
@@ -384,23 +392,21 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 		r.handlePhoto(ctx, msg, w.photo, text)
 		return
 	case workText:
-		// Falls through to the text run below.
-	default:
-		// A kind added to classify but not handled here would otherwise fall through
-		// to the text run and submit whatever is in text — possibly nothing.
-		// .String() explicitly: both binaries log through slog's JSONHandler, which
-		// marshals a named int as a number — the Stringer would never be consulted and
-		// the operator would read "kind":4, exactly what naming it was meant to avoid.
-		r.logger.Warn("vk: unhandled work kind; dropping message", "kind", w.kind.String(), "peer_id", peerID)
+		// Fold any quoted/replied-to/forwarded original into the prompt so the run
+		// sees the context the user is referring to, not just their new text.
+		// QuotedPrompt is a strict no-op when there is no quote, so a normal message
+		// stays unchanged.
+		qAuthor, qText := quotedContext(msg)
+		text = chat.QuotedPrompt(qAuthor, qText, text)
+		r.svc.Handle(ctx, chatIDStr(peerID), msg.FromID, msgIDStr(msg.ConversationMessageID), text)
 		return
 	}
 
-	// Fold any quoted/replied-to/forwarded original into the prompt so the run sees
-	// the context the user is referring to, not just their new text. QuotedPrompt is
-	// a strict no-op when there is no quote, so a normal message stays unchanged.
-	qAuthor, qText := quotedContext(msg)
-	text = chat.QuotedPrompt(qAuthor, qText, text)
-	r.svc.Handle(ctx, chatIDStr(peerID), msg.FromID, msgIDStr(msg.ConversationMessageID), text)
+	// Only reachable for a kind added to classify and forgotten here — which the
+	// linter should have caught first. .String() explicitly: both binaries log
+	// through slog's JSONHandler, which marshals a named int as a number and never
+	// consults the Stringer.
+	r.logger.Warn("vk: unhandled work kind; dropping message", "kind", w.kind.String(), "peer_id", peerID)
 }
 
 // workKind names what an accepted message would submit. workNone means the
@@ -431,9 +437,10 @@ func (k workKind) String() string {
 		return "workDoc"
 	case workPhoto:
 		return "workPhoto"
-	default:
-		return "workKind(" + strconv.Itoa(int(k)) + ")"
 	}
+	// Trailing rather than a default branch, so exhaustive keeps demanding a case
+	// per constant instead of letting a new kind render as its ordinal.
+	return "workKind(" + strconv.Itoa(int(k)) + ")"
 }
 
 // work is what an accepted message would submit: its kind, and the attachment the
@@ -483,9 +490,9 @@ func (r *Receiver) dispatchReserved(ctx context.Context, name string, msg messag
 	peerID := msg.PeerID
 	switch name {
 	case "start":
-		r.notify(ctx, peerID, welcomeText(chat.LoginVisibilityFor(r.auth.Applicable())))
+		r.notify(ctx, peerID, welcomeText(chat.LoginVisibilityFor(r.auth.LoginAdvertised())))
 	case "help":
-		r.notify(ctx, peerID, HelpText(chat.LoginVisibilityFor(r.auth.Applicable())))
+		r.notify(ctx, peerID, HelpText(chat.LoginVisibilityFor(r.auth.LoginAdvertised())))
 	case "new":
 		if err := r.svc.NewSession(chatIDStr(peerID)); err != nil {
 			r.logger.Error("vk: reset session", "peer_id", peerID, "error", err)

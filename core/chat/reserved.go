@@ -66,6 +66,18 @@ func LoginVisibilityFor(applicable bool) LoginVisibility {
 	return WithoutLogin
 }
 
+// HelpText renders an adapter's /help: its own title line, then the shared body.
+// The render lives here for the same reason its parts do — two adapters writing the
+// same three-term concatenation drift as easily as two copies of the strings.
+func HelpText(title string, login LoginVisibility) string {
+	return title + HelpBody(login)
+}
+
+// WelcomeText renders an adapter's /start: the shared greeting, then its help.
+func WelcomeText(title string, login LoginVisibility) string {
+	return WelcomeGreeting + HelpText(title, login)
+}
+
 // helpCommands lists the reserved commands with the fuller wording a chat reply
 // affords, next to the terse Description the command menu uses.
 const helpCommands = "/help — show this message\n" +

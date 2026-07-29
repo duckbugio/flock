@@ -561,7 +561,9 @@ func handleMessage(ctx context.Context, deps messageDeps, b *bot.Bot, msg *model
 	// never asked for.
 	hasWork := strings.TrimSpace(cleaned) != "" || isVoice || isDocument || isPhoto
 	if notice, blocked := deps.auth.BlockedNotice(); blocked && hasWork {
-		slog.Debug("codex unauthorized — blocking run", "chat_id", msg.Chat.ID)
+		// Info, not Debug: see the VK adapter — core/chat's Warn never fires for a
+		// user message, because this path answers and returns first.
+		slog.Info("codex unauthorized — refusing run", "chat_id", msg.Chat.ID)
 		sendCommandReply(ctx, b, msg.Chat.ID, notice)
 		return
 	}
@@ -980,7 +982,7 @@ func reservedBotCommands(auth *codexauth.Manager) []models.BotCommand {
 		// an API-key backend, Codex billing): it would sit in the menu only to answer
 		// that it is not needed. The handler stays registered either way, so a user
 		// who types it still gets that answer.
-		if c.Name == loginCommand && !auth.Applicable() {
+		if c.Name == loginCommand && !auth.LoginAdvertised() {
 			continue
 		}
 		cmds = append(cmds, models.BotCommand{Command: c.Name, Description: c.Description})
@@ -1089,7 +1091,7 @@ func startHandler(cfg config.Config, auth *codexauth.Manager) bot.HandlerFunc {
 		if !ok {
 			return
 		}
-		sendCommandReply(ctx, b, chatID, telegram.WelcomeText(chat.LoginVisibilityFor(auth.Applicable())))
+		sendCommandReply(ctx, b, chatID, telegram.WelcomeText(chat.LoginVisibilityFor(auth.LoginAdvertised())))
 	}
 }
 
@@ -1101,7 +1103,7 @@ func helpHandler(cfg config.Config, auth *codexauth.Manager) bot.HandlerFunc {
 		if !ok {
 			return
 		}
-		sendCommandReply(ctx, b, chatID, telegram.HelpText(chat.LoginVisibilityFor(auth.Applicable())))
+		sendCommandReply(ctx, b, chatID, telegram.HelpText(chat.LoginVisibilityFor(auth.LoginAdvertised())))
 	}
 }
 

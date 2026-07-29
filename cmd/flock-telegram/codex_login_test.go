@@ -307,10 +307,12 @@ var codexAuthForMenu = codexauth.NewManager(codexauth.Config{
 	AuthMode: codexauth.AuthSubscription,
 })
 
-// TestMenuOmitsLoginWithoutAnInteractiveSignIn: on Claude, an API-key backend or
-// Codex billing there is no sign-in to complete, so advertising /login in the
-// menu would only lead a user to a command that answers "not needed". The
-// handler stays registered, so typing it still gets that answer.
+// TestMenuOmitsLoginWithoutAnInteractiveSignIn: on Claude, an API-key backend,
+// Codex billing, or a Codex deploy already carrying CODEX_ACCESS_TOKEN there is
+// no sign-in to complete, so advertising /login would only lead a user to a
+// command that answers "not needed". The handler stays registered, so typing it
+// still gets that answer — and /login force still works, which is why the
+// manager stays Applicable.
 func TestMenuOmitsLoginWithoutAnInteractiveSignIn(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -319,6 +321,9 @@ func TestMenuOmitsLoginWithoutAnInteractiveSignIn(t *testing.T) {
 		{"claude", codexauth.NewManager(codexauth.Config{Backend: "claude"})},
 		{"codex billing", codexauth.NewManager(codexauth.Config{
 			Backend: codexauth.BackendCodex, AuthMode: codexauth.AuthBilling,
+		})},
+		{"codex subscription with an access token", codexauth.NewManager(codexauth.Config{
+			Backend: codexauth.BackendCodex, AuthMode: codexauth.AuthSubscription, HasAccessToken: true,
 		})},
 		{"no manager", nil},
 	} {

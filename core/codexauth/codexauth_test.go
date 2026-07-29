@@ -957,3 +957,33 @@ func TestBlockedNoticePointsAtADirectMessage(t *testing.T) {
 		t.Errorf("notice = %q, want it to name where /login is accepted", notice)
 	}
 }
+
+// TestLoginAdvertisedNarrowerThanApplicable: a deployment carrying
+// CODEX_ACCESS_TOKEN is authorized without a browser, so /login must not be
+// offered there — it could only answer that it is not needed. The command itself
+// stays available, because /login force is a legitimate way to replace a
+// workspace token with a personal subscription.
+func TestLoginAdvertisedNarrowerThanApplicable(t *testing.T) {
+	withToken := NewManager(Config{
+		Backend: BackendCodex, AuthMode: AuthSubscription, RequireAuth: true,
+		Home: t.TempDir(), HasAccessToken: true,
+	})
+	if !withToken.Applicable() {
+		t.Error("Applicable() = false; /login force must stay usable with a token configured")
+	}
+	if withToken.LoginAdvertised() {
+		t.Error("LoginAdvertised() = true with an access token; the command would answer 'not needed'")
+	}
+
+	plain := NewManager(Config{
+		Backend: BackendCodex, AuthMode: AuthSubscription, RequireAuth: true, Home: t.TempDir(),
+	})
+	if !plain.LoginAdvertised() {
+		t.Error("LoginAdvertised() = false on the deployment whose whole setup is /login")
+	}
+
+	var nilManager *Manager
+	if nilManager.LoginAdvertised() {
+		t.Error("a nil Manager advertised /login")
+	}
+}

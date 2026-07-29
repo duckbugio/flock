@@ -89,15 +89,9 @@ func StripCommandMention(text, botUsername string) string {
 const helpTitle = "Flock Telegram assistant — available commands:\n\n"
 
 // HelpText renders the usage message replied to an allowed user who sends /help.
-// login adds the /login line, on the same condition that publishes /login in
-// the command menu. It is an engineering artifact (professional English, no duck
-// flavor) and never reaches the Runner.
-func HelpText(login chat.LoginVisibility) string { return helpTitle + chat.HelpBody(login) }
+// It is a thin alias over the shared render, so this adapter owns only its title.
+func HelpText(login chat.LoginVisibility) string { return chat.HelpText(helpTitle, login) }
 
-// WelcomeText is the reply to /start: a short greeting prepended to the command
-// help, so a brand-new user immediately sees what the bot does and how to use
-// it. Like HelpText it never reaches the Runner — the duck greeting comes from
-// the model on a real message.
-func WelcomeText(login chat.LoginVisibility) string {
-	return chat.WelcomeGreeting + HelpText(login)
-}
+// WelcomeText is the reply to /start: the shared greeting prepended to the help,
+// so a brand-new user immediately sees what the bot does and how to use it.
+func WelcomeText(login chat.LoginVisibility) string { return chat.WelcomeText(helpTitle, login) }
