@@ -7,9 +7,10 @@ import "github.com/duckbugio/flock/core/chat"
 // slash-command UI, so these are plain text commands the receiver intercepts.
 const helpTitle = "Flock VK assistant — available commands:\n\n"
 
-// HelpText renders the usage message. It is a thin alias over the shared render,
-// so this adapter owns only its title.
-func HelpText(login chat.LoginVisibility) string { return chat.HelpText(helpTitle, login) }
+// helpText renders the usage message. It is a thin alias over the shared render,
+// so this adapter owns only its title. Unexported like welcomeText beside it:
+// nothing outside this package renders VK's help.
+func helpText(login chat.LoginVisibility) string { return chat.HelpText(helpTitle, login) }
 
 // welcomeText is the reply to /start, mirroring the Telegram adapter.
 func welcomeText(login chat.LoginVisibility) string { return chat.WelcomeText(helpTitle, login) }

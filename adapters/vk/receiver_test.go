@@ -449,7 +449,7 @@ func TestReceiverHelpTextCommand(t *testing.T) {
 	if len(svc.handleCalls) != 0 {
 		t.Errorf("/help should not start a run, got %d Handle calls", len(svc.handleCalls))
 	}
-	if len(notices.texts) != 1 || notices.texts[0] != HelpText(chat.WithoutLogin) {
+	if len(notices.texts) != 1 || notices.texts[0] != helpText(chat.WithoutLogin) {
 		t.Errorf("notice texts = %v, want one HelpText notice", notices.texts)
 	}
 }
@@ -818,10 +818,10 @@ func TestReceiverLoginRejectsDisallowedSender(t *testing.T) {
 // line appears only where an interactive sign-in exists, so the two adapters (and
 // Telegram's command menu) cannot disagree.
 func TestHelpListsLoginOnlyWhereItApplies(t *testing.T) {
-	if !strings.Contains(HelpText(chat.WithLogin), "/login") {
+	if !strings.Contains(helpText(chat.WithLogin), "/login") {
 		t.Error("help omits /login where the sign-in is real")
 	}
-	if strings.Contains(HelpText(chat.WithoutLogin), "/login") {
+	if strings.Contains(helpText(chat.WithoutLogin), "/login") {
 		t.Error("help advertises /login where there is no sign-in")
 	}
 	if strings.Contains(welcomeText(chat.WithoutLogin), "/login") {
@@ -870,7 +870,7 @@ func TestPrivacyFollowsTheDirectMessageInvariant(t *testing.T) {
 // drift silently — the adapters would still share the applicability predicate but
 // not the words.
 func TestHelpLineComesFromTheCanonicalSet(t *testing.T) {
-	if !strings.Contains(HelpText(chat.WithLogin), chat.LoginHelpLine) {
+	if !strings.Contains(helpText(chat.WithLogin), chat.LoginHelpLine) {
 		t.Error("the VK help does not render the canonical /login line")
 	}
 }
@@ -954,7 +954,7 @@ func TestClassifyDrivesBothGateAndDispatch(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := r.classify(tt.text, tt.msg); got.kind != tt.want {
-				t.Errorf("classify kind = %v, want %v", got.kind, tt.want)
+				t.Errorf("classify kind = %d, want %d", got.kind, tt.want)
 			}
 		})
 	}
@@ -977,33 +977,9 @@ func TestClassifyCarriesTheAttachment(t *testing.T) {
 		Type: "doc", Doc: &docAttachment{URL: "https://vk.example/doc", Title: "notes.txt"},
 	}}})
 	if got.kind != workDoc {
-		t.Fatalf("kind = %v, want workDoc", got.kind)
+		t.Fatalf("kind = %d, want workDoc", got.kind)
 	}
 	if got.doc == nil {
 		t.Fatal("classify returned workDoc with no document; the handler would panic")
-	}
-}
-
-// TestWorkKindString: the dispatch switch's default branch exists to report a
-// kind nobody handled, so it has to name it — a bare ordinal sends the operator
-// to the source to decode their own log line.
-func TestWorkKindString(t *testing.T) {
-	tests := []struct {
-		kind workKind
-		want string
-	}{
-		{workNone, "workNone"},
-		{workText, "workText"},
-		{workVoice, "workVoice"},
-		{workDoc, "workDoc"},
-		{workPhoto, "workPhoto"},
-		{workKind(42), "workKind(42)"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.want, func(t *testing.T) {
-			if got := tt.kind.String(); got != tt.want {
-				t.Errorf("String() = %q, want %q", got, tt.want)
-			}
-		})
 	}
 }

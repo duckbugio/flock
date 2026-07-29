@@ -563,7 +563,7 @@ func handleMessage(ctx context.Context, deps messageDeps, b *bot.Bot, msg *model
 	if notice, blocked := deps.auth.BlockedNotice(); blocked && hasWork {
 		// Info, not Debug: see the VK adapter — core/chat's Warn never fires for a
 		// user message, because this path answers and returns first.
-		slog.Info("codex unauthorized — refusing run", "chat_id", msg.Chat.ID)
+		slog.Info("codex unauthorized — refusing run", "chat_id", msg.Chat.ID, "user_id", msg.From.ID)
 		sendCommandReply(ctx, b, msg.Chat.ID, notice)
 		return
 	}

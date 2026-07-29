@@ -364,16 +364,16 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 			// never reaches it — this adapter answers and returns first. At the default
 			// level the operator would otherwise see every background refusal and none
 			// of the human ones. The rate limiter above bounds the frequency.
-			r.logger.Info("vk: codex unauthorized — refusing run", "peer_id", peerID)
+			r.logger.Info("vk: codex unauthorized — refusing run", "peer_id", peerID, "user_id", msg.FromID)
 			r.notify(ctx, peerID, notice)
 			return
 		}
 	}
 
 	// No default branch on purpose: the exhaustive linter treats one as "all cases
-	// covered", which would trade a build-time error for a runtime log — and
-	// catching a forgotten kind at build time is the whole point. The fall-through
-	// below is the runtime backstop, kept for the same reason.
+	// covered", so a new workKind without a case here would stop failing the build —
+	// which is the check worth having. Every case returns, so there is nothing after
+	// the switch.
 	switch w.kind {
 	case workNone:
 		return
@@ -401,12 +401,6 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 		r.svc.Handle(ctx, chatIDStr(peerID), msg.FromID, msgIDStr(msg.ConversationMessageID), text)
 		return
 	}
-
-	// Only reachable for a kind added to classify and forgotten here — which the
-	// linter should have caught first. .String() explicitly: both binaries log
-	// through slog's JSONHandler, which marshals a named int as a number and never
-	// consults the Stringer.
-	r.logger.Warn("vk: unhandled work kind; dropping message", "kind", w.kind.String(), "peer_id", peerID)
 }
 
 // workKind names what an accepted message would submit. workNone means the
@@ -421,27 +415,6 @@ const (
 	workDoc
 	workPhoto
 )
-
-// String names the kind, so the diagnostic in the dispatch switch reads
-// "kind=workPhoto" instead of a bare ordinal an operator would have to look up in
-// this file — the branch exists precisely to report a kind nobody handled.
-func (k workKind) String() string {
-	switch k {
-	case workNone:
-		return "workNone"
-	case workText:
-		return "workText"
-	case workVoice:
-		return "workVoice"
-	case workDoc:
-		return "workDoc"
-	case workPhoto:
-		return "workPhoto"
-	}
-	// Trailing rather than a default branch, so exhaustive keeps demanding a case
-	// per constant instead of letting a new kind render as its ordinal.
-	return "workKind(" + strconv.Itoa(int(k)) + ")"
-}
 
 // work is what an accepted message would submit: its kind, and the attachment the
 // matching handler needs. Carrying the attachment is the point — the handlers
@@ -492,7 +465,7 @@ func (r *Receiver) dispatchReserved(ctx context.Context, name string, msg messag
 	case "start":
 		r.notify(ctx, peerID, welcomeText(chat.LoginVisibilityFor(r.auth.LoginAdvertised())))
 	case "help":
-		r.notify(ctx, peerID, HelpText(chat.LoginVisibilityFor(r.auth.LoginAdvertised())))
+		r.notify(ctx, peerID, helpText(chat.LoginVisibilityFor(r.auth.LoginAdvertised())))
 	case "new":
 		if err := r.svc.NewSession(chatIDStr(peerID)); err != nil {
 			r.logger.Error("vk: reset session", "peer_id", peerID, "error", err)
