@@ -356,32 +356,38 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 	// added: the new branch would run, but the gate would not know about it, so an
 	// unauthorized deploy would drop that message silently instead of pointing at
 	// /login.
-	kind := r.workKind(text, msg)
+	w := r.classify(text, msg)
 
-	if notice, blocked := r.auth.BlockedNotice(); blocked && kind != workNone {
+	if notice, blocked := r.auth.BlockedNotice(); blocked && w.kind != workNone {
 		r.logger.Debug("vk: codex unauthorized — blocking run", "peer_id", peerID)
 		r.notify(ctx, peerID, notice)
 		return
 	}
 
-	switch kind {
+	switch w.kind {
 	case workNone:
 		return
 	case workVoice:
-		// Transcribe the first audio_message attachment (gate already passed, so we
-		// only pay for transcription on an accepted message).
-		r.handleVoice(ctx, msg, firstAudioMessage(msg.Attachments))
+		// Transcribe the audio_message attachment (gate already passed, so we only
+		// pay for transcription on an accepted message).
+		r.handleVoice(ctx, msg, w.voice)
 		return
 	case workDoc:
 		// Save to the per-chat uploads dir (outside every git tree) and submit a run
 		// referencing the saved path.
-		r.handleDocument(ctx, msg, firstDoc(msg.Attachments), text)
+		r.handleDocument(ctx, msg, w.doc, text)
 		return
 	case workPhoto:
 		// As workDoc, and the run also carries a vision content block.
-		r.handlePhoto(ctx, msg, firstPhoto(msg.Attachments), text)
+		r.handlePhoto(ctx, msg, w.photo, text)
 		return
 	case workText:
+		// Falls through to the text run below.
+	default:
+		// A kind added to classify but not handled here would otherwise fall through
+		// to the text run and submit whatever is in text — possibly nothing.
+		r.logger.Warn("vk: unhandled work kind; dropping message", "kind", w.kind, "peer_id", peerID)
+		return
 	}
 
 	// Fold any quoted/replied-to/forwarded original into the prompt so the run sees
@@ -405,26 +411,40 @@ const (
 	workPhoto
 )
 
-// workKind classifies an accepted message. text is the mention-stripped, trimmed
-// body. The precedence is the dispatch order: a voice note counts only while
-// there is no text to run instead, and attachments only when an uploader is
-// configured.
-func (r *Receiver) workKind(text string, msg messageObject) workKind {
-	if text == "" && r.voice != nil && firstAudioMessage(msg.Attachments) != nil {
-		return workVoice
+// work is what an accepted message would submit: its kind, and the attachment the
+// matching handler needs. Carrying the attachment is the point — the handlers
+// dereference it unconditionally, so finding it a second time in the dispatch
+// switch would put a nil-panic in the poll loop behind nothing but an agreement
+// between two functions to keep picking the same one.
+type work struct {
+	kind  workKind
+	voice *audioMsgAttach
+	doc   *docAttachment
+	photo *photoAttachment
+}
+
+// classify decides what an accepted message would submit, walking the
+// attachments ONCE. text is the mention-stripped, trimmed body. The precedence is
+// the dispatch order: a voice note counts only while there is no text to run
+// instead, and attachments only when an uploader is configured.
+func (r *Receiver) classify(text string, msg messageObject) work {
+	if text == "" && r.voice != nil {
+		if att := firstAudioMessage(msg.Attachments); att != nil {
+			return work{kind: workVoice, voice: att}
+		}
 	}
 	if r.uploads != nil {
-		if firstDoc(msg.Attachments) != nil {
-			return workDoc
+		if doc := firstDoc(msg.Attachments); doc != nil {
+			return work{kind: workDoc, doc: doc}
 		}
-		if firstPhoto(msg.Attachments) != nil {
-			return workPhoto
+		if ph := firstPhoto(msg.Attachments); ph != nil {
+			return work{kind: workPhoto, photo: ph}
 		}
 	}
 	if text != "" {
-		return workText
+		return work{kind: workText}
 	}
-	return workNone
+	return work{kind: workNone}
 }
 
 // dispatchReserved acts on a reserved command (caller already confirmed the name

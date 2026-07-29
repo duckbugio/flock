@@ -942,11 +942,11 @@ func TestLoginDoesNotBlockThePollLoop(t *testing.T) {
 	notices.awaitOne(t)
 }
 
-// TestWorkKindDrivesBothGateAndDispatch pins the single decision: whatever the
-// receiver would submit is exactly what the unauthorized gate answers about. Two
-// independent condition lists would agree only until the next attachment type is
-// added to the dispatch switch.
-func TestWorkKindDrivesBothGateAndDispatch(t *testing.T) {
+// TestClassifyDrivesBothGateAndDispatch pins the single decision: whatever the
+// receiver would submit is exactly what the unauthorized gate answers about, and
+// the attachment travels WITH that decision. Two independent condition lists
+// would agree only until the next attachment type is added to the dispatch switch.
+func TestClassifyDrivesBothGateAndDispatch(t *testing.T) {
 	r := newTestReceiver(&fakeService{}, &fakeNotice{}, false, nil)
 	r.uploads = nil
 	r.voice = nil
@@ -963,9 +963,33 @@ func TestWorkKindDrivesBothGateAndDispatch(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := r.workKind(tt.text, tt.msg); got != tt.want {
-				t.Errorf("workKind = %v, want %v", got, tt.want)
+			if got := r.classify(tt.text, tt.msg); got.kind != tt.want {
+				t.Errorf("classify kind = %v, want %v", got.kind, tt.want)
 			}
 		})
+	}
+}
+
+// stubUploader satisfies the uploader seam; classify only checks it is present.
+type stubUploader struct{}
+
+func (stubUploader) Save(_ context.Context, _ int64, _, _ string) (string, error) { return "", nil }
+func (stubUploader) MaxBytes() int64                                              { return 1 << 20 }
+
+// TestClassifyCarriesTheAttachment: every handler dereferences its argument
+// unconditionally, so the decision must hand over the attachment it found rather
+// than leave the dispatch to look again.
+func TestClassifyCarriesTheAttachment(t *testing.T) {
+	r := newTestReceiver(&fakeService{}, &fakeNotice{}, false, nil)
+	r.uploads = stubUploader{}
+
+	got := r.classify("", messageObject{Attachments: []attachment{{
+		Type: "doc", Doc: &docAttachment{URL: "https://vk.example/doc", Title: "notes.txt"},
+	}}})
+	if got.kind != workDoc {
+		t.Fatalf("kind = %v, want workDoc", got.kind)
+	}
+	if got.doc == nil {
+		t.Fatal("classify returned workDoc with no document; the handler would panic")
 	}
 }

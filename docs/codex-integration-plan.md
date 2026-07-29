@@ -588,6 +588,23 @@ Acceptance:
 `/login status` reports the auth state, `/login cancel` aborts a pending sign-in,
 and `/login force` re-authenticates an already-authorized deployment.
 
+Two properties an operator should know before running it, because the `.env`
+files point here rather than repeating them:
+
+- **Starting a sign-in only works in a direct message.** The reply carries a
+  one-time code that authorizes an account for the entire bot, so in a group
+  every member — allow-listed or not — could read it, and whoever acts on it
+  first binds their account. `/login status` works anywhere but withholds the
+  code; `/login cancel` is direct-message only too, since it controls a sign-in
+  someone else may be completing.
+- **Any allow-listed user can finish a sign-in someone else started.** The code is
+  re-shown in any direct message, and the account that completes it becomes the
+  deployment's single Codex identity — one Codex account serves the whole
+  deployment. Restrict `ALLOWED_USERS` accordingly.
+
+With `CODEX_REQUIRE_AUTH=false` nothing is blocked: the bot runs immediately and
+an unfinished sign-in surfaces as a Codex CLI failure instead.
+
 Why device code and not the shell recipe this plan originally carried
 (`docker exec -it <bot-container> codex login --device-auth`): that still works,
 but it needs shell access to the host, and the plain `codex login` an operator
