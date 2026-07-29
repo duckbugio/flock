@@ -344,7 +344,10 @@ func buildScheduler(ctx context.Context, cfg config.Config, svc *chat.Service, l
 	// accumulate detached goroutines or durable markers. The creator is re-validated
 	// against the live VK allow-list at fire time (cfg.IsVKAllowed) so a de-listed
 	// user's stored jobs stop running and are pruned. Mirrors cmd/flock-telegram.
-	mgr := schedule.NewManager(store, svc.InjectScheduled, cfg.IsVKAllowed, time.Now, logger)
+	// svc.RunsBlocked pauses the whole tick while the provider is unauthorized:
+	// TickOnce records a matching minute whether or not the fire took, so ticking
+	// into a refusal would spend the job's occurrence on nothing.
+	mgr := schedule.NewManager(store, svc.InjectScheduled, cfg.IsVKAllowed, svc.RunsBlocked, time.Now, logger)
 	go func() {
 		if err := mgr.Run(ctx); err != nil && ctx.Err() == nil {
 			logger.Error("scheduler stopped", "error", err)

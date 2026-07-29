@@ -45,7 +45,7 @@ func newManager(t *testing.T) (*schedule.Manager, *schedule.Store, *recordingFir
 	rec := &recordingFire{}
 	clock := time.Date(2026, 6, 18, 9, 0, 0, 0, time.UTC)
 	nowPtr := &clock
-	mgr := schedule.NewManager(store, rec.fire, nil, func() time.Time { return *nowPtr }, nil)
+	mgr := schedule.NewManager(store, rec.fire, nil, nil, func() time.Time { return *nowPtr }, nil)
 	return mgr, store, rec, nowPtr
 }
 
@@ -57,7 +57,7 @@ func newDispatchManager(t *testing.T) (*schedule.Manager, *schedule.Store) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	return schedule.NewManager(store, func(string, string, int64) bool { return true }, nil, nil, nil), store
+	return schedule.NewManager(store, func(string, string, int64) bool { return true }, nil, nil, nil, nil), store
 }
 
 // --- Dispatch tests ---
@@ -433,7 +433,7 @@ func TestSchedulerPrunesJobOfDelistedCreator(t *testing.T) {
 	// allowed denies the creator (id 42) of the job below.
 	allowed := func(userID int64) bool { return userID != 42 }
 	clock := time.Date(2026, 6, 18, 9, 0, 0, 0, time.UTC)
-	mgr := schedule.NewManager(store, rec.fire, allowed, func() time.Time { return clock }, nil)
+	mgr := schedule.NewManager(store, rec.fire, allowed, nil, func() time.Time { return clock }, nil)
 
 	// A job whose schedule matches right now (every minute) but whose creator is
 	// de-listed.
@@ -470,7 +470,7 @@ func TestSchedulerSkipsBusyFireButMarksMinute(t *testing.T) {
 	}
 	clock := time.Date(2026, 6, 18, 9, 0, 0, 0, time.UTC)
 	now := clock
-	mgr := schedule.NewManager(store, fire, nil, func() time.Time { return now }, nil)
+	mgr := schedule.NewManager(store, fire, nil, nil, func() time.Time { return now }, nil)
 
 	if _, err := store.Add(schedule.Job{
 		ChatID: "100", Name: "j", Cron: "0 * * * *", Prompt: "go", CreatedBy: 7, Active: true,
@@ -510,5 +510,40 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return within 2s of cancel")
+	}
+}
+
+// TestTickOnceSkippedWhilePaused is the lost-occurrence regression. TickOnce
+// records a matching minute whether or not the fire took, so ticking into a fire
+// that must refuse — the AI provider is unauthorized — would spend the job's
+// occurrence on nothing: a nightly job would lose its night and never run it,
+// while the log blamed a busy lane. Pausing has to skip the tick.
+func TestTickOnceSkippedWhilePaused(t *testing.T) {
+	store := openStore(t)
+	if _, err := store.Add(schedule.Job{
+		ChatID: "1", Name: "nightly", Cron: "* * * * *", Prompt: "run the nightly", CreatedBy: 7, Active: true,
+	}); err != nil {
+		t.Fatalf("add job: %v", err)
+	}
+	at := time.Date(2026, 7, 29, 9, 0, 0, 0, time.UTC)
+
+	var fired int
+	paused := true
+	mgr := schedule.NewManager(store, func(string, string, int64) bool {
+		fired++
+		return true
+	}, nil, func() bool { return paused }, func() time.Time { return at }, nil)
+
+	mgr.TickOnce()
+	if fired != 0 {
+		t.Fatalf("fired %d times while paused, want 0", fired)
+	}
+
+	// The minute must NOT have been recorded: the same occurrence still fires once
+	// the pause clears.
+	paused = false
+	mgr.TickOnce()
+	if fired != 1 {
+		t.Errorf("fired %d times after the pause cleared, want 1 — the occurrence was consumed", fired)
 	}
 }

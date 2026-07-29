@@ -345,7 +345,10 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 	// its own refusals.
 	if w.kind != workNone {
 		if notice, blocked := r.auth.BlockedNotice(); blocked {
-			r.logger.Info("vk: codex unauthorized — refusing run", "peer_id", peerID, "user_id", msg.FromID)
+			// Warn, matching core/chat's identical refusal: an operator filtering on
+			// Warn would otherwise see the background refusals and miss the user-facing
+			// ones, which are the signal that the deployment needs /login right now.
+			r.logger.Warn("vk: codex unauthorized — refusing run", "peer_id", peerID, "user_id", msg.FromID)
 			if r.authNotified.Should(chatIDStr(peerID)) {
 				r.notify(ctx, peerID, notice)
 			}

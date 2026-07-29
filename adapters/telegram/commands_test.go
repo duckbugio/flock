@@ -98,12 +98,19 @@ func TestStripCommandMention(t *testing.T) {
 // it can never submit a run); the constant IS the entire payload the handler
 // sends.
 func TestHelpTextListsCommands(t *testing.T) {
-	if HelpText(chat.WithLogin) == "" {
-		t.Fatal("HelpText(chat.WithLogin) is empty")
-	}
-	for _, cmd := range []string{"/help", "/new", "/stop"} {
-		if !strings.Contains(HelpText(chat.WithLogin), cmd) {
-			t.Fatalf("HelpText(chat.WithLogin) does not mention %q:\n%s", cmd, HelpText(chat.WithLogin))
+	// Both renders: production picks between them with LoginVisibilityFor, and the
+	// WITHOUT-login one is what every Claude, Codex-billing and access-token
+	// deployment gets — so testing only the other would leave the common case
+	// uncovered.
+	for _, visibility := range []chat.LoginVisibility{chat.WithLogin, chat.WithoutLogin} {
+		got := HelpText(visibility)
+		if got == "" {
+			t.Fatalf("HelpText(%v) is empty", visibility)
+		}
+		for _, cmd := range []string{"/help", "/new", "/stop"} {
+			if !strings.Contains(got, cmd) {
+				t.Fatalf("HelpText(%v) does not mention %q:\n%s", visibility, cmd, got)
+			}
 		}
 	}
 }

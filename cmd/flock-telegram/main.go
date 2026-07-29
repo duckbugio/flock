@@ -557,7 +557,8 @@ func handleMessage(ctx context.Context, deps messageDeps, b *bot.Bot, msg *model
 	// returns; without the limiter throttling it, the restraint belongs here.
 	if strings.TrimSpace(cleaned) != "" || isVoice || isDocument || isPhoto {
 		if notice, blocked := deps.auth.BlockedNotice(); blocked {
-			slog.Info("codex unauthorized — refusing run", "chat_id", msg.Chat.ID, "user_id", msg.From.ID)
+			// Warn, matching core/chat and the VK adapter: one state, one level.
+			slog.Warn("codex unauthorized — refusing run", "chat_id", msg.Chat.ID, "user_id", msg.From.ID)
 			if deps.authNotified.Should(chatIDStr(msg.Chat.ID)) {
 				sendCommandReply(ctx, b, msg.Chat.ID, notice)
 			}
@@ -1207,7 +1208,10 @@ func buildScheduler(ctx context.Context, cfg config.Config, svc *chat.Service, l
 	// cron cannot accumulate detached goroutines or durable markers. The creator is
 	// re-validated against the live allow-list at fire time (cfg.IsAllowed) so a
 	// de-listed user's stored jobs stop running and are pruned.
-	mgr := schedule.NewManager(store, svc.InjectScheduled, cfg.IsAllowed, time.Now, logger)
+	// svc.RunsBlocked pauses the whole tick while the provider is unauthorized:
+	// TickOnce records a matching minute whether or not the fire took, so ticking
+	// into a refusal would spend the job's occurrence on nothing.
+	mgr := schedule.NewManager(store, svc.InjectScheduled, cfg.IsAllowed, svc.RunsBlocked, time.Now, logger)
 	go func() {
 		if err := mgr.Run(ctx); err != nil && ctx.Err() == nil {
 			logger.Error("scheduler stopped", "error", err)

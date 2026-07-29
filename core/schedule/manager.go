@@ -30,8 +30,11 @@ type Manager struct {
 	store   *Store
 	fire    func(chatID, prompt string, userID int64) bool
 	allowed func(userID int64) bool
-	now     func() time.Time
-	log     *slog.Logger
+	// paused reports that firing is impossible right now, so the whole tick is
+	// skipped before any minute is recorded. Nil never pauses.
+	paused func() bool
+	now    func() time.Time
+	log    *slog.Logger
 }
 
 // NewManager builds a Manager. store is the durable job store; fire injects a
@@ -41,13 +44,15 @@ type Manager struct {
 // cost cap, and TickOnce records the matching minute regardless (at-most-one-fire-
 // attempt per matching minute). allowed re-validates a job's creator against the
 // live allow-list at fire time, so a de-listed user's stored jobs stop running and
-// are pruned; a nil allowed allows every creator (no fire-time check). now supplies
+// are pruned; a nil allowed allows every creator (no fire-time check). paused
+// skips an entire tick — see TickOnce — and a nil paused never pauses. now supplies
 // the current time (time.Now in production, a stub in tests); a nil log defaults to
 // slog.Default().
 func NewManager(
 	store *Store,
 	fire func(chatID, prompt string, userID int64) bool,
 	allowed func(userID int64) bool,
+	paused func() bool,
 	now func() time.Time,
 	log *slog.Logger,
 ) *Manager {
@@ -57,7 +62,7 @@ func NewManager(
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Manager{store: store, fire: fire, allowed: allowed, now: now, log: log}
+	return &Manager{store: store, fire: fire, allowed: allowed, paused: paused, now: now, log: log}
 }
 
 // Run drives the scheduler until ctx is cancelled: every tick it reads the LIVE
@@ -84,6 +89,16 @@ func (m *Manager) Run(ctx context.Context) error {
 // skipped (never fired).
 func (m *Manager) TickOnce() {
 	if m.store == nil || m.fire == nil {
+		return
+	}
+	// Skipped WHOLE while firing is impossible (in production: the AI provider is
+	// unauthorized), before anything is marked. TickOnce records a matching minute
+	// regardless of whether the fire took, so ticking into a fire that must refuse
+	// would spend the job's occurrence on nothing: a nightly job would lose its
+	// night and never run it, and the log would blame a busy lane. Skipping leaves
+	// the minute unrecorded, so the job fires once the block clears.
+	if m.paused != nil && m.paused() {
+		m.log.Info("scheduler: paused; the provider is not authorized")
 		return
 	}
 	now := m.now()
