@@ -69,14 +69,17 @@ func (g *stubGate) Blocked() bool {
 }
 
 func (g *stubGate) NoticeFor(dest string) string {
-	if !g.blocked.Load() {
-		g.told.Clear()
-		return ""
-	}
-	if !g.told.Should(dest) {
+	if !g.blocked.Load() || !g.told.Should(dest) {
 		return ""
 	}
 	return gateNotice
+}
+
+func (g *stubGate) NoticeReset() {
+	if g.blocked.Load() {
+		return
+	}
+	g.told.Clear()
 }
 
 func (g *stubGate) calls() int64 { return g.n.Load() }
@@ -293,23 +296,21 @@ func TestNotifyResetIsProcessWide(t *testing.T) {
 	waitUntil(t, func() bool { return notices(c) == 2 })
 }
 
-// TestOneNoticeAcrossLayers is the composition regression the per-layer tests
-// could not see. The refusal reaches a chat from TWO places — core/chat refusing
-// a background submission, and an adapter answering a user's message — and each
-// layer used to keep its own "already told them" registry. Each was correct
-// alone; together they told one chat the same sentence twice, once for the
-// poller's refusal and once for the user's next message.
-func TestOneNoticeAcrossLayers(t *testing.T) {
+// TestBackgroundNoticeDoesNotRepeatItself: the background channel explains once
+// per chat, however many refused submissions follow.
+func TestBackgroundNoticeDoesNotRepeatItself(t *testing.T) {
 	c, gate := newFakeChat(), blockingGate()
 	s := gatedService(t, &countingRunner{}, c, gate, newFakePending())
 
-	// The background path refuses first and explains.
 	s.Inject(testChatID, "a reviewer commented")
 	waitUntil(t, func() bool { return notices(c) == 1 })
+	s.Inject(testChatID, "another comment")
+	waitUntil(t, func() bool { return gate.calls() >= 2 })
 
-	// The adapter path asks the SAME gate about the same chat, and must get nothing
-	// to send — this chat has already been told.
+	if got := notices(c); got != 1 {
+		t.Errorf("sent %d notices for two refused background submissions, want 1", got)
+	}
 	if notice := gate.NoticeFor(testChatID); notice != "" {
-		t.Errorf("the adapter would have repeated the notice: %q", notice)
+		t.Errorf("the background channel would have repeated itself: %q", notice)
 	}
 }

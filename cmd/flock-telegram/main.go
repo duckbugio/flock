@@ -556,15 +556,14 @@ func handleMessage(ctx context.Context, deps messageDeps, b *bot.Bot, msg *model
 		if deps.auth.Blocked() {
 			// Warn, matching core/chat and the VK adapter: one state, one level.
 			slog.Warn("codex unauthorized — refusing run", "chat_id", msg.Chat.ID, "user_id", msg.From.ID)
-			// One registry, owned by the gate: this chat may already have been told by
-			// a refused background submission.
-			if notice := deps.auth.NoticeFor(chatIDStr(msg.Chat.ID)); notice != "" {
+			// ReplyNoticeFor, not NoticeFor: a refused background submission must not
+			// consume the answer this person is owed.
+			if notice := deps.auth.ReplyNoticeFor(chatIDStr(msg.Chat.ID)); notice != "" {
 				sendCommandReply(ctx, b, msg.Chat.ID, notice)
 			}
 			return
 		}
-		// Clears the gate's registry when authorization is back.
-		deps.auth.NoticeFor(chatIDStr(msg.Chat.ID))
+		deps.auth.NoticeReset()
 	}
 
 	if allow, reason := chat.CheckGuards(limiter, costs, guards, msg.From.ID); !allow {

@@ -129,9 +129,21 @@ func (c Config) logger() *slog.Logger {
 type Manager struct {
 	cfg Config
 
-	// notified is the ONE "already told them" registry for the refusal notice — see
-	// NoticeFor. It has its own lock so a notice never contends with a login.
-	notified onceNotifier
+	// Two "already told them" registries for the refusal notice, one per channel it
+	// travels: notified for a refused BACKGROUND submission (a poller relay, a
+	// restart replay, a CI event) and notifiedUser for the reply to a person's own
+	// message. They are independent because they answer different questions — "has
+	// this chat been told the deployment is stuck" and "has this person been
+	// answered" — and sharing one cell means whichever fires first silences the
+	// other. A background refusal must never consume the answer a user is owed:
+	// this whole feature exists so a human learns that /login is needed.
+	//
+	// Both live here, with the state they describe, rather than one per caller —
+	// per-caller registries kept each caller's repeats down and still told one chat
+	// the same sentence twice. Each has its own lock so a notice never contends
+	// with a login.
+	notified     onceNotifier
+	notifiedUser onceNotifier
 
 	mu sync.Mutex
 	// cur is the attempt in flight, nil when idle. Holding the whole attempt behind
@@ -163,7 +175,11 @@ type session struct {
 
 // NewManager returns a Manager for cfg.
 func NewManager(cfg Config) *Manager {
-	return &Manager{cfg: cfg, notified: onceNotifier{told: map[string]bool{}}}
+	return &Manager{
+		cfg:          cfg,
+		notified:     onceNotifier{told: map[string]bool{}},
+		notifiedUser: onceNotifier{told: map[string]bool{}},
+	}
 }
 
 // onceNotifier tells each destination something at most once, until Clear.
@@ -276,36 +292,48 @@ func (m *Manager) Blocked() bool {
 	return !m.Authorized()
 }
 
-// NoticeFor returns the explanation to send to dest, or "" when dest has already
-// been told since the last time the block cleared.
-//
-// The "told once" registry lives HERE, with the state it describes, because the
-// refusal reaches a chat from two layers: an adapter answering a user's message,
-// and core/chat refusing a background submission. A registry per layer keeps each
-// layer's own repeats down but lets a chat be told twice — once by the poller's
-// refusal, once by its own next message — and neither layer's tests can see it,
-// because each exercises only itself.
+// NoticeFor returns the explanation to send to dest after refusing a BACKGROUND
+// submission, or "" when dest has already been told through that channel.
 func (m *Manager) NoticeFor(dest string) string {
-	if m == nil {
+	if m == nil || !m.Blocked() || !m.notified.Should(dest) {
 		return ""
 	}
-	if !m.Blocked() {
-		// Authorization is deployment-wide, so its return clears every destination:
-		// a chat that stayed quiet through the recovery still hears about the NEXT
-		// lapse.
-		m.notified.Clear()
-		return ""
-	}
-	if !m.notified.Should(dest) {
-		return ""
-	}
-	// "in a direct message", because that is where the command will be accepted:
-	// the caller cannot see the destination, and sending the user to /login in a
-	// group would only earn them a second refusal — possibly in the only chat they
-	// use with the bot.
-	return "Codex is not authorized yet, so I can't run anything.\n\n" +
-		"Send /login in a direct message with me and I'll walk you through the one-time browser sign-in."
+	return blockedNoticeText
 }
+
+// ReplyNoticeFor returns the explanation to send to dest in reply to a PERSON's
+// own message, or "" when that person has already been answered.
+//
+// Separate from NoticeFor on purpose: a refused poller relay or restart replay
+// must not consume the answer a user is owed. Sharing one cell meant a container
+// that came up with a lost auth.json replayed its markers, spent the chat's only
+// notice on that, and then met the user with silence — in the one feature whose
+// entire job is telling a human that /login is needed.
+func (m *Manager) ReplyNoticeFor(dest string) string {
+	if m == nil || !m.Blocked() || !m.notifiedUser.Should(dest) {
+		return ""
+	}
+	return blockedNoticeText
+}
+
+// NoticeReset forgets every destination once authorization is back, so the NEXT
+// lapse is announced afresh — including to a chat that stayed quiet through the
+// recovery. It is a named operation rather than a side effect of asking for a
+// notice, so no caller has to discard a text it never meant to send.
+func (m *Manager) NoticeReset() {
+	if m == nil || m.Blocked() {
+		return
+	}
+	m.notified.Clear()
+	m.notifiedUser.Clear()
+}
+
+// blockedNoticeText says what is wrong and where the fix is accepted. "In a
+// direct message", because that is the only place /login can start: the callers
+// cannot see the destination, and sending a user to /login in a group would only
+// earn them a second refusal — possibly in the only chat they use with the bot.
+const blockedNoticeText = "Codex is not authorized yet, so I can't run anything.\n\n" +
+	"Send /login in a direct message with me and I'll walk you through the one-time browser sign-in."
 
 // NoLoginNeededText is the reply when this deployment has no interactive login
 // at all — including when no Manager was wired up.

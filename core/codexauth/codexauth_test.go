@@ -174,9 +174,10 @@ func TestBlockedAndNoticeFor(t *testing.T) {
 	if m.Blocked() {
 		t.Error("Blocked() = true after a completed login")
 	}
-	// Asking while unblocked clears the registry, so a returning lapse is announced
-	// afresh — including to a chat that stayed quiet through the recovery.
-	m.NoticeFor("chat-1")
+	// NoticeReset (not a discarded NoticeFor) clears the registry, so a returning
+	// lapse is announced afresh — including to a chat that stayed quiet through the
+	// recovery.
+	m.NoticeReset()
 	if err := os.Remove(filepath.Join(home, "auth.json")); err != nil {
 		t.Fatalf("remove auth.json: %v", err)
 	}
@@ -1002,5 +1003,30 @@ func TestLoginAdvertisedNarrowerThanApplicable(t *testing.T) {
 	var nilManager *Manager
 	if nilManager.LoginAdvertised() {
 		t.Error("a nil Manager advertised /login")
+	}
+}
+
+// TestBackgroundRefusalDoesNotConsumeTheUsersAnswer: the two channels keep
+// independent registries. A container that comes up with a lost auth.json
+// replays its markers, which refuses and explains — and the person who then
+// writes to the bot must still be answered, because telling a human that /login
+// is needed is the entire point of the feature.
+func TestBackgroundRefusalDoesNotConsumeTheUsersAnswer(t *testing.T) {
+	m := NewManager(Config{
+		Backend: BackendCodex, AuthMode: AuthSubscription, RequireAuth: true, Home: t.TempDir(),
+	})
+
+	if background := m.NoticeFor("chat-1"); background == "" {
+		t.Fatal("the background channel said nothing while unauthorized")
+	}
+	if reply := m.ReplyNoticeFor("chat-1"); reply == "" {
+		t.Error("a background refusal swallowed the answer owed to the user")
+	}
+	// Each channel still refuses to repeat itself.
+	if repeat := m.ReplyNoticeFor("chat-1"); repeat != "" {
+		t.Errorf("the user was answered twice: %q", repeat)
+	}
+	if repeat := m.NoticeFor("chat-1"); repeat != "" {
+		t.Errorf("the background channel repeated itself: %q", repeat)
 	}
 }

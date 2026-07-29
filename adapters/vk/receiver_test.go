@@ -128,6 +128,18 @@ func (n *fakeNotice) seen() []string {
 	return append([]string(nil), n.texts...)
 }
 
+// waitUntilNotices waits for exactly want notices, tolerating the detached send.
+func waitUntilNotices(t *testing.T, n *fakeNotice, want int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && len(n.seen()) < want {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if got := n.seen(); len(got) != want {
+		t.Fatalf("got %d notices, want %d: %v", len(got), want, got)
+	}
+}
+
 // awaitOne waits for exactly ONE notice and fails if a second arrives.
 //
 // Returning on the FIRST notice would have made every "exactly one" assertion
@@ -699,8 +711,8 @@ func TestReceiverBlocksRunsWhileCodexUnauthorized(t *testing.T) {
 	if len(svc.handleCalls) != 0 {
 		t.Errorf("an unauthorized Codex deploy started %d runs, want 0", len(svc.handleCalls))
 	}
-	if len(notices.texts) != 1 || !strings.Contains(notices.texts[0], "/login") {
-		t.Errorf("notices = %v, want one notice pointing at /login", notices.texts)
+	if got := notices.awaitOne(t); !strings.Contains(got[0], "/login") {
+		t.Errorf("notices = %v, want one notice pointing at /login", got)
 	}
 }
 
@@ -1034,7 +1046,28 @@ func TestUnauthorizedNoticeReturnsAfterAuthorization(t *testing.T) {
 		t.Fatalf("remove auth.json: %v", err)
 	}
 	send()
-	if got := notices.seen(); len(got) != 2 {
-		t.Errorf("notices = %v, want the returning lapse announced again", got)
+	waitUntilNotices(t, notices, 2)
+}
+
+// TestUserIsAnsweredEvenAfterABackgroundRefusal is the scenario this split
+// exists for: a container comes up with a lost auth.json, the restart replay
+// refuses and explains to the chat, and the person who then writes must STILL be
+// answered. Sharing one registry between the two channels met them with silence,
+// in the one feature whose whole job is telling a human that /login is needed.
+func TestUserIsAnsweredEvenAfterABackgroundRefusal(t *testing.T) {
+	svc := &fakeService{}
+	notices := &fakeNotice{}
+	auth, _ := logintest.Unauthorized(t)
+	r := newTestReceiverWithAuth(svc, notices, auth)
+
+	// A background submission is refused first and takes its own notice.
+	if background := auth.NoticeFor("42"); background == "" {
+		t.Fatal("the background channel said nothing while unauthorized")
+	}
+
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 42, Text: "build it"}))
+
+	if got := notices.awaitOne(t); !strings.Contains(got[0], "/login") {
+		t.Errorf("notices = %v, want the user answered despite the background refusal", got)
 	}
 }

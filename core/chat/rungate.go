@@ -19,12 +19,16 @@ import "context"
 type RunGate interface {
 	// Blocked reports whether runs must be refused right now, without side effects.
 	Blocked() bool
-	// NoticeFor returns the explanation to send to dest, or "" when dest has
-	// already been told since the block last cleared. The registry belongs to the
-	// gate, not to its callers: the refusal reaches a chat from here AND from an
-	// adapter answering a user's message, and a registry per caller would let one
-	// chat be told twice.
+	// NoticeFor returns the explanation to send to dest after refusing a background
+	// submission, or "" when dest has already been told through that channel. The
+	// registry belongs to the gate, not to its callers, and the gate keeps a
+	// SEPARATE one for replies to a person's own message — so a refused poller
+	// relay cannot consume the answer a user is owed.
 	NoticeFor(dest string) string
+	// NoticeReset forgets every destination once the block lifts, so the next lapse
+	// is announced afresh. Named rather than a side effect of NoticeFor, so no
+	// caller has to discard a text it never meant to send.
+	NoticeReset()
 }
 
 // RunsBlocked reports whether a run submitted right now would be refused. It
@@ -62,9 +66,9 @@ func (s *Service) blockSubmit(ctx context.Context, chatID ChatID) bool {
 		return false
 	}
 	if !s.auth.Blocked() {
-		// NoticeFor clears the gate's registry when unblocked, so a chat that stayed
-		// quiet through the recovery still hears about the NEXT lapse.
-		s.auth.NoticeFor(chatID)
+		// A chat that stayed quiet through the recovery still hears about the NEXT
+		// lapse.
+		s.auth.NoticeReset()
 		return false
 	}
 

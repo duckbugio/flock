@@ -350,19 +350,23 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 			// One registry, owned by the gate: this chat may already have been told by
 			// a refused background submission, and telling it again here would be the
 			// same sentence twice.
-			if notice := r.auth.NoticeFor(chatIDStr(peerID)); notice != "" {
-				// Bounded and detached: this runs INSIDE the poll loop, which handles
-				// updates serially, and the VK client has no timeout of its own — a hung
-				// messages.send would stop every chat. It fires on a broken deployment,
-				// where it would otherwise fire on every message.
-				sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), codexauth.NotifyTimeout)
-				r.notify(sendCtx, peerID, notice)
-				cancel()
+			// ReplyNoticeFor, not NoticeFor: a refused background submission must not
+			// consume the answer this person is owed.
+			if notice := r.auth.ReplyNoticeFor(chatIDStr(peerID)); notice != "" {
+				// On its own goroutine, bounded, like /login and for the same reason: this
+				// is the poll loop, which handles updates serially, and the VK client has
+				// no timeout of its own. Waiting here would stall every chat — including
+				// the /login that fixes the state — on precisely the broken deployment
+				// where this fires. Nothing below waits for the reply.
+				go func() {
+					sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), codexauth.NotifyTimeout)
+					defer cancel()
+					r.notify(sendCtx, peerID, notice)
+				}()
 			}
 			return
 		}
-		// Clears the gate's registry when authorization is back.
-		r.auth.NoticeFor(chatIDStr(peerID))
+		r.auth.NoticeReset()
 	}
 
 	if r.guards != nil {
