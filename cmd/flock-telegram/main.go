@@ -422,6 +422,7 @@ func textHandler(
 	guards chat.GuardConfig,
 	auth *codexauth.Manager,
 ) bot.HandlerFunc {
+	authNotified := chat.NewOnceNotifier()
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		service := *svc
 		if service == nil {
@@ -432,14 +433,17 @@ func textHandler(
 		// Voice and media uploads apply only to new messages, never edits, so
 		// neither the transcriber nor the uploader is threaded here.
 		if edited := update.EditedMessage; edited != nil {
-			deps := messageDeps{cfg: cfg, service: service, limiter: limiter, costs: costs, guards: guards, auth: auth}
+			deps := messageDeps{
+				cfg: cfg, service: service, limiter: limiter, costs: costs,
+				guards: guards, auth: auth, authNotified: authNotified,
+			}
 			handleMessage(ctx, deps, b, edited, true)
 			return
 		}
 		if msg := update.Message; msg != nil {
 			deps := messageDeps{
 				cfg: cfg, service: service, vt: *vt, up: *up,
-				limiter: limiter, costs: costs, guards: guards, auth: auth,
+				limiter: limiter, costs: costs, guards: guards, auth: auth, authNotified: authNotified,
 			}
 			handleMessage(ctx, deps, b, msg, false)
 		}
@@ -479,6 +483,8 @@ type messageDeps struct {
 	// auth blocks runs while the Codex backend has no completed sign-in. Nil (and
 	// a nil *Manager) means "never blocks".
 	auth *codexauth.Manager
+	// authNotified suppresses a repeat unauthorized notice per chat.
+	authNotified *chat.OnceNotifier
 }
 
 // handleMessage applies the allow-list and the group mention-gate to one message
@@ -541,30 +547,28 @@ func handleMessage(ctx context.Context, deps messageDeps, b *bot.Bot, msg *model
 	// call and is never submitted to the dispatcher; the user gets a single
 	// professional notice. Disallowed users already returned above, so the guards
 	// only ever see allow-listed senders.
+	// Codex with no completed sign-in cannot run anything. The check comes BEFORE
+	// the guards, and so before the rate limiter counts this message: a run that
+	// cannot happen must not spend the user's window, or the first real messages
+	// after a successful /login would hit the limit. It is one os.Stat, and no paid
+	// work precedes it. Only for a message that WOULD have run — a sticker or an
+	// empty message is dropped silently below, and answering those would explain
+	// work nobody asked for. The notice is sent once per chat until authorization
+	// returns; without the limiter throttling it, the restraint belongs here.
+	if strings.TrimSpace(cleaned) != "" || isVoice || isDocument || isPhoto {
+		if notice, blocked := deps.auth.BlockedNotice(); blocked {
+			slog.Info("codex unauthorized — refusing run", "chat_id", msg.Chat.ID, "user_id", msg.From.ID)
+			if deps.authNotified.Should(chatIDStr(msg.Chat.ID)) {
+				sendCommandReply(ctx, b, msg.Chat.ID, notice)
+			}
+			return
+		}
+		deps.authNotified.Clear()
+	}
+
 	if allow, reason := chat.CheckGuards(limiter, costs, guards, msg.From.ID); !allow {
 		slog.Debug("guardrail denied message", "chat_id", msg.Chat.ID, "user_id", msg.From.ID, "reason", reason)
 		sendCommandReply(ctx, b, msg.Chat.ID, reason)
-		return
-	}
-
-	// Codex with no completed sign-in cannot run anything. Say so here — after the
-	// mention gate (so an unaddressed group message stays silent) and after the rate
-	// limit (an unauthorized deploy in a busy group would otherwise answer every
-	// single message, unthrottled), but before any paid work: the guards spend
-	// nothing, while transcription and downloads do. /login is a reserved command
-	// routed elsewhere, so it stays reachable while this gate is closed. core/chat
-	// gates the run itself; this is the early, user-facing half.
-	//
-	// Only for a message that WOULD have started a run: a sticker, an empty message
-	// or an unsupported attachment is dropped silently further down, and answering
-	// those with "not authorized" spends rate limit to tell the user about work they
-	// never asked for.
-	hasWork := strings.TrimSpace(cleaned) != "" || isVoice || isDocument || isPhoto
-	if notice, blocked := deps.auth.BlockedNotice(); blocked && hasWork {
-		// Info, not Debug: see the VK adapter — core/chat's Warn never fires for a
-		// user message, because this path answers and returns first.
-		slog.Info("codex unauthorized — refusing run", "chat_id", msg.Chat.ID, "user_id", msg.From.ID)
-		sendCommandReply(ctx, b, msg.Chat.ID, notice)
 		return
 	}
 

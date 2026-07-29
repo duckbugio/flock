@@ -129,13 +129,14 @@ type Service struct {
 	tick       time.Duration
 	nowFunc    func() time.Time
 	auth       RunGate
+	// authNotified suppresses a repeat "provider unauthorized" notice per chat.
+	authNotified *OnceNotifier
 
-	mu             sync.Mutex                 // guards runChat, lastMsg, verifyRetry, budgetNotified, authNotified and snapCache
+	mu             sync.Mutex                 // guards runChat, lastMsg, verifyRetry, budgetNotified and snapCache
 	runChat        map[string]ChatID          // active runID -> chatID, for mapping Stop back to a chat
 	lastMsg        map[ChatID]MessageID       // chatID -> the source message id of its latest submitted run
 	verifyRetry    map[ChatID][]string        // repos whose gate failed last round (re-gated even if unchanged)
 	budgetNotified map[ChatID]string          // chatID -> UTC day the budget-reached notice was last sent
-	authNotified   map[ChatID]bool            // chatID -> the "provider unauthorized" notice was already sent
 	snapCache      map[ChatID]verify.Snapshot // post-run repo fingerprints, reused as the next run's "before"
 	runSeq         atomic.Uint64
 }
@@ -209,32 +210,32 @@ func New(cfg Config) *Service {
 		maxRunes = defaultMaxMessageRunes
 	}
 	return &Service{
-		runner:     cfg.Runner,
-		chat:       cfg.Transport,
-		caps:       caps,
-		retryAfter: cfg.RetryAfter,
-		maxRunes:   maxRunes,
-		dispatch:   cfg.Dispatcher,
-		workspace:  cfg.Workspace,
-		sessions:   cfg.Sessions,
-		pending:    cfg.Pending,
-		costs:      cfg.Costs,
-		costCapUSD: cfg.CostCapUSD,
-		outbox:     cfg.Outbox,
-		nudge:      newStarNudge(cfg.StarNudge, cfg.Transport, log),
-		postrun:    cfg.PostRun,
-		opts:       cfg.Opts,
-		timeout:    cfg.Timeout,
-		log:        log,
-		tick:       tickInterval,
-		nowFunc:    time.Now,
-		auth:       cfg.Auth,
-		runChat:    map[string]ChatID{},
-		lastMsg:    map[ChatID]MessageID{},
+		runner:       cfg.Runner,
+		chat:         cfg.Transport,
+		caps:         caps,
+		retryAfter:   cfg.RetryAfter,
+		maxRunes:     maxRunes,
+		dispatch:     cfg.Dispatcher,
+		workspace:    cfg.Workspace,
+		sessions:     cfg.Sessions,
+		pending:      cfg.Pending,
+		costs:        cfg.Costs,
+		costCapUSD:   cfg.CostCapUSD,
+		outbox:       cfg.Outbox,
+		nudge:        newStarNudge(cfg.StarNudge, cfg.Transport, log),
+		postrun:      cfg.PostRun,
+		opts:         cfg.Opts,
+		timeout:      cfg.Timeout,
+		log:          log,
+		tick:         tickInterval,
+		nowFunc:      time.Now,
+		auth:         cfg.Auth,
+		authNotified: NewOnceNotifier(),
+		runChat:      map[string]ChatID{},
+		lastMsg:      map[ChatID]MessageID{},
 
 		verifyRetry:    map[ChatID][]string{},
 		budgetNotified: map[ChatID]string{},
-		authNotified:   map[ChatID]bool{},
 		snapCache:      map[ChatID]verify.Snapshot{},
 	}
 }

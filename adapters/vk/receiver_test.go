@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -981,5 +982,59 @@ func TestClassifyCarriesTheAttachment(t *testing.T) {
 	}
 	if got.doc == nil {
 		t.Fatal("classify returned workDoc with no document; the handler would panic")
+	}
+}
+
+// TestUnauthorizedNoticeIsSentOncePerPeer: without the rate limiter throttling
+// it — the gate now runs before the guards, so a refused message costs the user
+// nothing — the restraint has to live here. A busy conversation would otherwise
+// get a refusal for every message.
+func TestUnauthorizedNoticeIsSentOncePerPeer(t *testing.T) {
+	svc := &fakeService{}
+	notices := &fakeNotice{}
+	r := unauthorizedCodexReceiver(t, svc, notices)
+
+	for range 5 {
+		r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 42, Text: "build it"}))
+	}
+
+	if got := notices.awaitOne(t); !strings.Contains(got[0], "/login") {
+		t.Errorf("notice = %q, want it to point at /login", got[0])
+	}
+	if len(svc.handleCalls) != 0 {
+		t.Errorf("started %d runs while unauthorized, want 0", len(svc.handleCalls))
+	}
+}
+
+// TestUnauthorizedNoticeReturnsAfterAuthorization: told once, but told again the
+// next time the deployment lapses — otherwise a returning outage is silent.
+func TestUnauthorizedNoticeReturnsAfterAuthorization(t *testing.T) {
+	svc := &fakeService{}
+	notices := &fakeNotice{}
+	auth, home := logintest.Unauthorized(t)
+	r := newTestReceiverWithAuth(svc, notices, auth)
+
+	send := func() {
+		r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 42, Text: "build it"}))
+	}
+	send()
+	notices.awaitOne(t)
+
+	// Authorized: the message runs, and the "already told them" memory resets.
+	if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write auth.json: %v", err)
+	}
+	send()
+	if len(svc.handleCalls) != 1 {
+		t.Fatalf("Handle calls = %d, want 1 once authorized", len(svc.handleCalls))
+	}
+
+	// Lapsed again: announced afresh.
+	if err := os.Remove(filepath.Join(home, "auth.json")); err != nil {
+		t.Fatalf("remove auth.json: %v", err)
+	}
+	send()
+	if got := notices.seen(); len(got) != 2 {
+		t.Errorf("notices = %v, want the returning lapse announced again", got)
 	}
 }

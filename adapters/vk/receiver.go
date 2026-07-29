@@ -112,6 +112,7 @@ type Receiver struct {
 	eventAck       eventAckFunc
 	sched          *schedule.Manager
 	auth           *codexauth.Manager
+	authNotified   *chat.OnceNotifier
 	logger         *slog.Logger
 }
 
@@ -162,6 +163,7 @@ func NewReceiver(cfg ReceiverConfig) *Receiver {
 		eventAck:       cfg.EventAck,
 		sched:          cfg.Scheduler,
 		auth:           cfg.CodexAuth,
+		authNotified:   chat.NewOnceNotifier(),
 		logger:         log,
 	}
 }
@@ -330,42 +332,32 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 		return
 	}
 
+	text := strings.TrimSpace(cleaned)
+	// Decided ONCE, and used by both the gate and the dispatch below.
+	w := r.classify(text, msg)
+
+	// Authorization is checked BEFORE the guards, and so before the rate limiter
+	// counts this message: a run that cannot happen must not spend the user's
+	// window, or the first real messages after a successful /login would hit the
+	// limit. The check is one os.Stat and no paid work precedes it. The notice is
+	// sent once per peer until authorization returns — dropping the limiter as a
+	// throttle means supplying the restraint here, exactly as core/chat does for
+	// its own refusals.
+	if w.kind != workNone {
+		if notice, blocked := r.auth.BlockedNotice(); blocked {
+			r.logger.Info("vk: codex unauthorized — refusing run", "peer_id", peerID, "user_id", msg.FromID)
+			if r.authNotified.Should(chatIDStr(peerID)) {
+				r.notify(ctx, peerID, notice)
+			}
+			return
+		}
+		r.authNotified.Clear()
+	}
+
 	if r.guards != nil {
 		if allow, reason := r.guards(msg.FromID); !allow {
 			r.logger.Debug("vk: guardrail denied message", "peer_id", peerID, "user_id", msg.FromID, "reason", reason)
 			r.notify(ctx, peerID, reason)
-			return
-		}
-	}
-
-	// Codex with no completed sign-in cannot run anything. Say so here — after the
-	// mention gate (so an unaddressed community message stays silent) and after the
-	// guards (an unauthorized deploy in a busy conversation would otherwise answer
-	// every single message, unthrottled), but before any paid work: the guards spend
-	// nothing, while transcription and downloads do. /login is dispatched above and
-	// stays reachable while this gate is closed. core/chat gates the run itself;
-	// this is the early, user-facing half.
-	//
-	// Only for a message that WOULD have started a run: a sticker, an empty message
-	// or an unsupported attachment is dropped silently further down, and answering
-	// those with "not authorized" spends rate limit to tell the user about work they
-	// never asked for.
-	text := strings.TrimSpace(cleaned)
-	// Decided ONCE, and used by both the gate and the dispatch below. Two
-	// independent condition lists would agree only until the next attachment type is
-	// added: the new branch would run, but the gate would not know about it, so an
-	// unauthorized deploy would drop that message silently instead of pointing at
-	// /login.
-	w := r.classify(text, msg)
-
-	if w.kind != workNone {
-		if notice, blocked := r.auth.BlockedNotice(); blocked {
-			// Info, not Debug: core/chat logs its refusals at Warn, but a user message
-			// never reaches it — this adapter answers and returns first. At the default
-			// level the operator would otherwise see every background refusal and none
-			// of the human ones. The rate limiter above bounds the frequency.
-			r.logger.Info("vk: codex unauthorized — refusing run", "peer_id", peerID, "user_id", msg.FromID)
-			r.notify(ctx, peerID, notice)
 			return
 		}
 	}
@@ -428,8 +420,10 @@ type work struct {
 	photo *photoAttachment
 }
 
-// classify decides what an accepted message would submit, walking the
-// attachments ONCE. text is the mention-stripped, trimmed body. The precedence is
+// classify decides what an accepted message would submit. The decision is made
+// ONCE and used by both the unauthorized gate and the dispatch switch — that
+// single decision is the point, not the number of passes over the slice. text is
+// the mention-stripped, trimmed body. The precedence is
 // the dispatch order: a voice note counts only while there is no text to run
 // instead, and attachments only when an uploader is configured.
 func (r *Receiver) classify(text string, msg messageObject) work {

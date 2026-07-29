@@ -257,3 +257,30 @@ func TestNotifyResetIsProcessWide(t *testing.T) {
 	s.Inject(testChatID, "blocked again")
 	waitUntil(t, func() bool { return notices(c) == 2 })
 }
+
+// TestOnceNotifier covers the shared restraint directly: told once per
+// destination, everyone forgotten on Clear, and a nil notifier inert.
+func TestOnceNotifier(t *testing.T) {
+	n := NewOnceNotifier()
+
+	if !n.Should("a") {
+		t.Error("first ask for a = false, want true")
+	}
+	if n.Should("a") {
+		t.Error("second ask for a = true, want false")
+	}
+	if !n.Should("b") {
+		t.Error("first ask for b = false; destinations are independent")
+	}
+
+	n.Clear()
+	if !n.Should("a") {
+		t.Error("after Clear, a was still marked as told")
+	}
+
+	var nilNotifier *OnceNotifier
+	if !nilNotifier.Should("a") {
+		t.Error("a nil notifier suppressed a notice; it must stay inert")
+	}
+	nilNotifier.Clear()
+}

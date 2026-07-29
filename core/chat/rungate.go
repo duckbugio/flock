@@ -59,24 +59,17 @@ func (s *Service) blockSubmit(ctx context.Context, chatID ChatID) bool {
 	}
 	notice, blocked := s.auth.BlockedNotice()
 	if !blocked {
-		// Clear EVERY chat, not just this one: authorization is process-wide, so one
-		// chat submitting is proof the outage is over for all of them. Clearing only
-		// the submitting chat would leave a chat that stayed quiet through the
-		// recovery window silently un-notified when the next lapse hit it.
-		s.mu.Lock()
-		clear(s.authNotified)
-		s.mu.Unlock()
+		// Every chat, not just this one: authorization is process-wide, so one chat
+		// submitting is proof the outage is over for all of them. Clearing only the
+		// submitting chat would leave a chat that stayed quiet through the recovery
+		// window silently un-notified when the next lapse hit it.
+		s.authNotified.Clear()
 		return false
 	}
 
 	s.log.Warn("provider is not authorized — refusing run", "chat_id", chatID)
 
-	s.mu.Lock()
-	first := !s.authNotified[chatID]
-	s.authNotified[chatID] = true
-	s.mu.Unlock()
-
-	if first && notice != "" {
+	if first := s.authNotified.Should(chatID); first && notice != "" {
 		// Via notify, which bounds the send: this runs on the CALLER's goroutine, and
 		// three of the six callers are loops that must not be stalled — the PR poller
 		// dispatches inline, and the restart replay walks every stored marker. A
