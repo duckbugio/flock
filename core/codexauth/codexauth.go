@@ -446,6 +446,16 @@ func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, done chan 
 	m.mu.Unlock()
 
 	if err == nil {
+		// A clean exit is necessary but not sufficient: what actually authorizes the
+		// deployment is the credential on disk, and that is what the run gate reads.
+		// Announcing success on the exit code alone would tell the user they are
+		// signed in and then refuse their very next message.
+		if !m.CredentialsPresent() {
+			log.Error("codex login exited cleanly but persisted no credential", "codex_home", m.cfg.Home)
+			m.broadcast("The Codex CLI finished the sign-in but saved no credential in " + m.cfg.Home + ".\n\n" +
+				"Check that the directory is writable, then send /login to try again.")
+			return
+		}
 		log.Info("codex device login succeeded", "codex_home", m.cfg.Home)
 		m.broadcast("Codex is authorized. Send your next message and the team gets to work.")
 		return

@@ -14,8 +14,10 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"github.com/duckbugio/flock/adapters/telegram"
 	"github.com/duckbugio/flock/core/chat"
 	"github.com/duckbugio/flock/core/codexauth"
+	"github.com/duckbugio/flock/core/codexauth/codexauthtest"
 	"github.com/duckbugio/flock/internal/config"
 )
 
@@ -214,7 +216,7 @@ func TestLoginStatusInGroupHidesAPendingCode(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("replies = %v, want exactly one", got)
 	}
-	if strings.Contains(got[0], "XER9-NWCA2") || strings.Contains(got[0], "http") {
+	if strings.Contains(got[0], codexauthtest.DeviceCode) || strings.Contains(got[0], "http") {
 		t.Errorf("the pending code or link reached a group: %q", got[0])
 	}
 	if !strings.Contains(got[0], "in progress") {
@@ -235,7 +237,7 @@ func TestLoginStatusInPrivateShowsThePendingCode(t *testing.T) {
 		privateCommandUpdate(loginTestUserID, loginTestChatID, "/login status", len("/login")))
 
 	got := replies.seen()
-	if len(got) != 1 || !strings.Contains(got[0], "XER9-NWCA2") {
+	if len(got) != 1 || !strings.Contains(got[0], codexauthtest.DeviceCode) {
 		t.Errorf("replies = %v, want the pending code re-shown in a direct message", got)
 	}
 }
@@ -249,7 +251,7 @@ func pendingLoginManager(t *testing.T) *codexauth.Manager {
 		AuthMode:    codexauth.AuthSubscription,
 		RequireAuth: true,
 		Home:        t.TempDir(),
-		Bin:         fakeCodexLogin(t),
+		Bin:         codexauthtest.WriteCLI(t, codexauthtest.Polling),
 		Env:         []string{"PATH=" + os.Getenv("PATH")},
 	})
 	t.Cleanup(func() { m.Cancel() })
@@ -264,21 +266,6 @@ func pendingLoginManager(t *testing.T) *codexauth.Manager {
 		t.Fatal("the fake login never issued a prompt")
 	}
 	return m
-}
-
-// fakeCodexLogin writes a stand-in Codex CLI that prints the real device-auth
-// prompt and then blocks, like the real one polling for the browser step.
-func fakeCodexLogin(t *testing.T) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "codex")
-	script := "#!/bin/sh\n" +
-		"printf '%s\\n' '1. Open this link' '   https://auth.openai.com/codex/device' \\\n" +
-		"  '2. Enter this one-time code (expires in 15 minutes)' '   XER9-NWCA2'\n" +
-		"sleep 30\n"
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil { //nolint:gosec // test fixture must be executable
-		t.Fatalf("write fake codex: %v", err)
-	}
-	return path
 }
 
 // commandBot builds a bot with the reserved handlers registered and every API
@@ -397,5 +384,35 @@ func TestMenuKeepsLoginOnCodexSubscription(t *testing.T) {
 	}
 	if !found {
 		t.Error("/login is missing from the menu on a Codex subscription deployment")
+	}
+}
+
+// TestHelpListsLoginOnlyWhereItApplies keeps /help and the published command menu
+// on the SAME condition. The menu hides /login where no sign-in exists; a help
+// text that still advertises it would send the user to a command that can only
+// answer "not needed".
+func TestHelpListsLoginOnlyWhereItApplies(t *testing.T) {
+	if !strings.Contains(telegram.HelpText(true), "/login") {
+		t.Error("help omits /login where the sign-in is real")
+	}
+	if strings.Contains(telegram.HelpText(false), "/login") {
+		t.Error("help advertises /login where there is no sign-in")
+	}
+	if !strings.Contains(telegram.WelcomeText(true), "/login") {
+		t.Error("welcome omits /login where the sign-in is real")
+	}
+	if strings.Contains(telegram.WelcomeText(false), "/login") {
+		t.Error("welcome advertises /login where there is no sign-in")
+	}
+
+	// The menu and the help must agree, which is the whole point of one condition.
+	menuHasLogin := false
+	for _, c := range reservedBotCommands(codexAuthForMenu) {
+		if c.Command == loginCommand {
+			menuHasLogin = true
+		}
+	}
+	if menuHasLogin != strings.Contains(telegram.HelpText(codexAuthForMenu.Applicable()), "/login") {
+		t.Error("the command menu and /help disagree about /login")
 	}
 }

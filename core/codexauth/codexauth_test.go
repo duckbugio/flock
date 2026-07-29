@@ -25,6 +25,11 @@ type collector struct {
 
 func newCollector() *collector { return &collector{ch: make(chan string, 8)} }
 
+// persistAuth is the shell step a fake CLI uses to stand in for the browser
+// half of the flow: a real successful login writes auth.json into CODEX_HOME,
+// and that file — not the exit code — is what authorizes later runs.
+const persistAuth = "sleep 0.3\necho '{}' > \"$CODEX_HOME/auth.json\"\n"
+
 // dmSub is a private (1:1) destination — the only kind allowed to see a code.
 var dmSub = Subscriber{ID: "dm", Private: true}
 
@@ -338,7 +343,7 @@ func TestStatusTextNeverLeaksSecrets(t *testing.T) {
 // cancelled) long before a human finishes signing in, so the login must NOT be
 // tied to it.
 func TestDispatchSurvivesADeadRequestContext(t *testing.T) {
-	bin := fakeCodex(t, printBanner+"sleep 0.3\nexit 0\n")
+	bin := fakeCodex(t, printBanner+persistAuth+"exit 0\n")
 	m := NewManager(Config{
 		Backend:     BackendCodex,
 		AuthMode:    AuthSubscription,
@@ -531,7 +536,7 @@ func TestCancelWaitsForTheChild(t *testing.T) {
 // subscription, only the chat that happened to start the login would ever learn
 // whether it worked.
 func TestEveryAskerLearnsTheOutcome(t *testing.T) {
-	bin := fakeCodex(t, printBanner+"sleep 0.3\nexit 0\n")
+	bin := fakeCodex(t, printBanner+persistAuth+"exit 0\n")
 	m := NewManager(Config{
 		Backend:     BackendCodex,
 		AuthMode:    AuthSubscription,
@@ -562,7 +567,7 @@ func TestEveryAskerLearnsTheOutcome(t *testing.T) {
 // TestTheSameChatAskingTwiceIsNotToldTwice: subscriptions are keyed by
 // destination, so a user tapping /login twice does not double every later notice.
 func TestTheSameChatAskingTwiceIsNotToldTwice(t *testing.T) {
-	bin := fakeCodex(t, printBanner+"sleep 0.3\nexit 0\n")
+	bin := fakeCodex(t, printBanner+persistAuth+"exit 0\n")
 	m := NewManager(Config{
 		Backend:     BackendCodex,
 		AuthMode:    AuthSubscription,
@@ -584,5 +589,37 @@ func TestTheSameChatAskingTwiceIsNotToldTwice(t *testing.T) {
 	case extra := <-c.ch:
 		t.Errorf("the same chat was told twice; extra notice: %q", extra)
 	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestCleanExitWithoutACredentialIsNotSuccess: what authorizes the deployment is
+// the credential on disk, which is what the run gate reads. Announcing success on
+// the CLI's exit code alone would tell the user they are signed in and then
+// refuse their very next message.
+func TestCleanExitWithoutACredentialIsNotSuccess(t *testing.T) {
+	home := t.TempDir()
+	bin := fakeCodex(t, printBanner+"exit 0\n") // exits clean, writes nothing
+	m := NewManager(Config{
+		Backend:     BackendCodex,
+		AuthMode:    AuthSubscription,
+		RequireAuth: true,
+		Bin:         bin,
+		Home:        home,
+		Env:         []string{"PATH=" + os.Getenv("PATH")},
+	})
+
+	c := newCollector()
+	m.Dispatch(context.Background(), "", c.sub("dm"))
+	c.next(t) // the prompt
+
+	got := c.next(t)
+	if strings.Contains(strings.ToLower(got), "codex is authorized") {
+		t.Errorf("reported success with no persisted credential: %q", got)
+	}
+	if !strings.Contains(got, home) {
+		t.Errorf("final notice = %q, want it to name the directory that stayed empty", got)
+	}
+	if _, blocked := m.BlockedNotice(); !blocked {
+		t.Error("runs were unblocked by a login that persisted nothing")
 	}
 }

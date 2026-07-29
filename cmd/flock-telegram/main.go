@@ -993,8 +993,8 @@ func reservedHandlers(
 	cfg config.Config, svc *chat.Service, sched *schedule.Manager, auth *codexauth.Manager,
 ) map[string]bot.HandlerFunc {
 	return map[string]bot.HandlerFunc{
-		"start":      startHandler(cfg),
-		"help":       helpHandler(cfg),
+		"start":      startHandler(cfg, auth),
+		"help":       helpHandler(cfg, auth),
 		"new":        newHandler(cfg, svc),
 		"stop":       stopCommandHandler(cfg, svc),
 		"schedule":   scheduleHandler(cfg, sched),
@@ -1072,25 +1072,25 @@ func commandSender(cfg config.Config, msg *models.Message) (int64, bool) {
 // allow-list, is not mention-gated, and never touches the dispatcher or session
 // store (no Claude run) — without it /start would fall through to the text
 // handler and be forwarded to the model as a prompt.
-func startHandler(cfg config.Config) bot.HandlerFunc {
+func startHandler(cfg config.Config, auth *codexauth.Manager) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		chatID, ok := commandSender(cfg, update.Message)
 		if !ok {
 			return
 		}
-		sendCommandReply(ctx, b, chatID, telegram.WelcomeText)
+		sendCommandReply(ctx, b, chatID, telegram.WelcomeText(auth.Applicable()))
 	}
 }
 
 // helpHandler replies to /help from an allowed user with the static usage text.
 // It never touches the dispatcher or session store (no Claude run).
-func helpHandler(cfg config.Config) bot.HandlerFunc {
+func helpHandler(cfg config.Config, auth *codexauth.Manager) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		chatID, ok := commandSender(cfg, update.Message)
 		if !ok {
 			return
 		}
-		sendCommandReply(ctx, b, chatID, telegram.HelpText)
+		sendCommandReply(ctx, b, chatID, telegram.HelpText(auth.Applicable()))
 	}
 }
 

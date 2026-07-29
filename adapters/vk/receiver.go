@@ -26,11 +26,6 @@ const loginNotifyTimeout = 30 * time.Second
 // turned off (the default). It mirrors the Telegram adapter's notice.
 const scheduleDisabledText = "Scheduler is disabled. Set ENABLE_SCHEDULER=true to enable it."
 
-// welcomeText is the static reply to /start: a short greeting + the usage help,
-// mirroring the Telegram adapter's WelcomeText. It is an engineering artifact
-// (plain English, no duck flavor) and never reaches the Claude Runner.
-const welcomeText = "Hi! I'm the Flock assistant.\n\n" + HelpText
-
 // newSessionText is the static reply to /new: confirms the session was reset so
 // the next message starts a brand-new conversation.
 const newSessionText = "Started a fresh session. Your next message begins a new conversation."
@@ -406,9 +401,9 @@ func (r *Receiver) dispatchReserved(ctx context.Context, name string, msg messag
 	peerID := msg.PeerID
 	switch name {
 	case "start":
-		r.notify(ctx, peerID, welcomeText)
+		r.notify(ctx, peerID, welcomeText(r.auth.Applicable()))
 	case "help":
-		r.notify(ctx, peerID, HelpText)
+		r.notify(ctx, peerID, HelpText(r.auth.Applicable()))
 	case "new":
 		if err := r.svc.NewSession(chatIDStr(peerID)); err != nil {
 			r.logger.Error("vk: reset session", "peer_id", peerID, "error", err)
@@ -443,8 +438,12 @@ func (r *Receiver) dispatchReserved(ctx context.Context, name string, msg messag
 func (r *Receiver) dispatchLogin(ctx context.Context, msg messageObject) {
 	peerID := msg.PeerID
 	sub := codexauth.Subscriber{
-		ID:      chatIDStr(peerID),
-		Private: !isGroupPeer(peerID),
+		ID: chatIDStr(peerID),
+		// VK states the 1:1 invariant directly in the update: in a direct message the
+		// peer IS the sender. Deriving it from the peer-id range instead would call
+		// every non-conversation peer private, community peers included — too loose a
+		// test for a flag that decides who may take over the bot's account.
+		Private: peerID == msg.FromID,
 		Notify: func(text string) {
 			sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginNotifyTimeout)
 			defer cancel()

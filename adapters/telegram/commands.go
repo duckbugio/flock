@@ -82,23 +82,40 @@ func StripCommandMention(text, botUsername string) string {
 	return token[:at] + rest
 }
 
-// HelpText is the static usage message replied to an allowed user who sends
-// /help. It lists the slash commands the adapter understands. It is an
-// engineering artifact (professional English, no duck flavor) and never reaches
-// the Claude Runner.
-const HelpText = "Flock Telegram assistant — available commands:\n\n" +
-	"/help — show this message\n" +
-	"/new — start a fresh session (forget the current conversation)\n" +
-	"/stop — stop the run currently in progress\n" +
-	"/schedule — manage scheduled jobs (when enabled)\n" +
-	"/goal <criterion> — arm a goal an independent evaluator re-checks after every run " +
-	"(/goal off to disarm)\n" +
-	"/login — sign in to Codex on a subscription (not needed on other backends; /login status, /login cancel)\n\n" +
-	"Send any other message to run it through the assistant."
+// helpHeader/helpTail bracket the command list of the usage message replied to
+// an allowed user who sends /help. It is an engineering artifact (professional
+// English, no duck flavor) and never reaches the Runner.
+const (
+	helpHeader = "Flock Telegram assistant — available commands:\n\n" +
+		"/help — show this message\n" +
+		"/new — start a fresh session (forget the current conversation)\n" +
+		"/stop — stop the run currently in progress\n" +
+		"/schedule — manage scheduled jobs (when enabled)\n" +
+		"/goal <criterion> — arm a goal an independent evaluator re-checks after every run " +
+		"(/goal off to disarm)\n"
+	helpTail = "\nSend any other message to run it through the assistant."
+)
 
-// WelcomeText is the static usage message replied to an allowed user who sends
-// /start. It is a short greeting prepended to the command help so a brand-new
-// user immediately sees what the bot does and how to use it. Like HelpText it is
-// an engineering artifact (plain English, no duck flavor) and never reaches the
-// Claude Runner — the duck greeting comes from the model on a real message.
-const WelcomeText = "Hi! I'm the Flock assistant.\n\n" + HelpText
+// loginHelpLine documents /login. It is listed CONDITIONALLY, on the same
+// applicability test the published command menu uses (reservedBotCommands), so
+// the menu and /help cannot disagree: on Claude, an API-key backend or Codex
+// billing there is no sign-in to complete and the command could only answer that
+// it is not needed.
+const loginHelpLine = "/login — sign in to Codex on a subscription (/login status, /login cancel)\n"
+
+// HelpText renders the usage message. withLogin adds the /login line.
+func HelpText(withLogin bool) string {
+	if withLogin {
+		return helpHeader + loginHelpLine + helpTail
+	}
+	return helpHeader + helpTail
+}
+
+// WelcomeText is the reply to /start: a short greeting prepended to the command
+// help, so a brand-new user immediately sees what the bot does and how to use
+// it. Like HelpText it is an engineering artifact (plain English, no duck
+// flavor) and never reaches the Runner — the duck greeting comes from the model
+// on a real message.
+func WelcomeText(withLogin bool) string {
+	return "Hi! I'm the Flock assistant.\n\n" + HelpText(withLogin)
+}

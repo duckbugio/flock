@@ -10,48 +10,26 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/duckbugio/flock/core/codexauth/codexauthtest"
 )
 
-// deviceAuthBanner is what `codex login --device-auth` really prints, captured
-// from the CLI: an ANSI-colored banner, the verification URL, and the one-time
-// code on its own line. The escapes are REAL — surviving them is the point.
-const deviceAuthBanner = "\n" +
-	"Welcome to Codex [v\x1b[90m0.146.0\x1b[0m]\n" +
-	"\x1b[90mOpenAI's command-line coding agent\x1b[0m\n" +
-	"\n" +
-	"Follow these steps to sign in with ChatGPT using device code authorization:\n" +
-	"\n" +
-	"1. Open this link in your browser and sign in to your account\n" +
-	"   \x1b[94mhttps://auth.openai.com/codex/device\x1b[0m\n" +
-	"\n" +
-	"2. Enter this one-time code \x1b[90m(expires in 15 minutes)\x1b[0m\n" +
-	"   \x1b[94mXER9-NWCA2\x1b[0m\n"
-
-// The verification link and one-time code the banner carries, asserted across
-// the parser and end-to-end cases.
+// The fake CLI, its captured banner and the tokens it carries live in
+// codexauthtest so core/codexauth, the VK adapter and the Telegram adapter all
+// assert against the SAME real output.
 const (
-	deviceURL  = "https://auth.openai.com/codex/device"
-	deviceCode = "XER9-NWCA2"
+	deviceURL   = codexauthtest.DeviceURL
+	deviceCode  = codexauthtest.DeviceCode
+	printBanner = codexauthtest.PrintBanner
 )
 
-// printBanner is the shell snippet emitting deviceAuthBanner verbatim. A quoted
-// heredoc keeps the apostrophes and escapes intact without shell interpretation.
-const printBanner = "cat <<'CODEX_BANNER_EOF'" + deviceAuthBanner + "CODEX_BANNER_EOF\n"
-
-// fakeCodex writes an executable stand-in for the Codex CLI whose body is the
-// given shell script, and returns its path. The script receives the same
-// arguments the real CLI would.
+// fakeCodex writes an executable stand-in for the Codex CLI running script.
 func fakeCodex(t *testing.T, script string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("the fake CLI is a POSIX shell script")
 	}
-	path := filepath.Join(t.TempDir(), "codex")
-	body := "#!/bin/sh\n" + script
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil { //nolint:gosec // test fixture must be executable
-		t.Fatalf("write fake codex: %v", err)
-	}
-	return path
+	return codexauthtest.WriteCLI(t, script)
 }
 
 // testConfig points a Config at the fake CLI with a scratch CODEX_HOME and a
@@ -417,5 +395,39 @@ func TestURLScore(t *testing.T) {
 				t.Errorf("urlScore(%q) = %d, want %d", tt.url, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestErrorsRedactTheOneTimeCode: a failure carries the CLI's own output, which
+// is logged and may be shown in a chat — and that output contains a live
+// credential. Anyone who reads the code out of a log can complete the sign-in
+// with their own account, so it must never get that far.
+func TestErrorsRedactTheOneTimeCode(t *testing.T) {
+	bin := fakeCodex(t, printBanner+"echo 'polling failed' >&2\nexit 4\n")
+
+	err := Login(context.Background(), testConfig(t, bin), nil)
+	if err == nil {
+		t.Fatal("Login = nil, want an error")
+	}
+	if strings.Contains(err.Error(), deviceCode) {
+		t.Errorf("the one-time code leaked into an error: %q", err)
+	}
+	if strings.Contains(err.Error(), deviceURL) {
+		t.Errorf("the verification link leaked into an error: %q", err)
+	}
+	if !strings.Contains(err.Error(), "polling failed") {
+		t.Errorf("error %q lost the CLI's actual diagnosis", err)
+	}
+}
+
+// TestRedactKeepsTheDiagnosis: redaction must not swallow the message that makes
+// the failure debuggable.
+func TestRedactKeepsTheDiagnosis(t *testing.T) {
+	got := redact("visit " + deviceURL + " and enter " + deviceCode + " — connection refused")
+	if strings.Contains(got, deviceCode) || strings.Contains(got, deviceURL) {
+		t.Errorf("redact left a secret in %q", got)
+	}
+	if !strings.Contains(got, "connection refused") {
+		t.Errorf("redact(%q) dropped the diagnosis", got)
 	}
 }

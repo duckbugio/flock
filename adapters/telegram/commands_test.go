@@ -96,12 +96,12 @@ func TestStripCommandMention(t *testing.T) {
 // it can never submit a run); the constant IS the entire payload the handler
 // sends.
 func TestHelpTextListsCommands(t *testing.T) {
-	if HelpText == "" {
-		t.Fatal("HelpText is empty")
+	if HelpText(true) == "" {
+		t.Fatal("HelpText(true) is empty")
 	}
 	for _, cmd := range []string{"/help", "/new", "/stop"} {
-		if !strings.Contains(HelpText, cmd) {
-			t.Fatalf("HelpText does not mention %q:\n%s", cmd, HelpText)
+		if !strings.Contains(HelpText(true), cmd) {
+			t.Fatalf("HelpText(true) does not mention %q:\n%s", cmd, HelpText(true))
 		}
 	}
 }

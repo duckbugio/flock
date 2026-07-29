@@ -15,6 +15,7 @@ import (
 	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/chat"
 	"github.com/duckbugio/flock/core/codexauth"
+	"github.com/duckbugio/flock/core/codexauth/codexauthtest"
 	"github.com/duckbugio/flock/core/goal"
 	"github.com/duckbugio/flock/core/schedule"
 )
@@ -368,7 +369,7 @@ func TestReceiverStartTextCommand(t *testing.T) {
 	if len(svc.handleCalls) != 0 {
 		t.Errorf("/start should not start a run, got %d Handle calls", len(svc.handleCalls))
 	}
-	if len(notices.texts) != 1 || notices.texts[0] != welcomeText {
+	if len(notices.texts) != 1 || notices.texts[0] != welcomeText(false) {
 		t.Errorf("notice texts = %v, want one welcome notice", notices.texts)
 	}
 }
@@ -414,7 +415,7 @@ func TestReceiverHelpTextCommand(t *testing.T) {
 	if len(svc.handleCalls) != 0 {
 		t.Errorf("/help should not start a run, got %d Handle calls", len(svc.handleCalls))
 	}
-	if len(notices.texts) != 1 || notices.texts[0] != HelpText {
+	if len(notices.texts) != 1 || notices.texts[0] != HelpText(false) {
 		t.Errorf("notice texts = %v, want one HelpText notice", notices.texts)
 	}
 }
@@ -679,7 +680,7 @@ func TestReceiverLoginCommandStaysReachableWhileUnauthorized(t *testing.T) {
 	notices := &fakeNotice{}
 	r := unauthorizedCodexReceiver(t, svc, notices)
 
-	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 200, Text: "/login status"}))
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 42, Text: "/login status"}))
 
 	if len(svc.handleCalls) != 0 {
 		t.Errorf("/login should not start a run, got %d Handle calls", len(svc.handleCalls))
@@ -697,7 +698,7 @@ func TestReceiverLoginWithoutManagerIsInert(t *testing.T) {
 	notices := &fakeNotice{}
 	r := newTestReceiver(svc, notices, false, nil)
 
-	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 200, Text: "/login"}))
+	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 42, Text: "/login"}))
 	if len(notices.texts) != 1 || notices.texts[0] != codexauth.NoLoginNeededText {
 		t.Errorf("notices = %v, want the no-login-needed reply", notices.texts)
 	}
@@ -717,7 +718,7 @@ func pendingLoginManager(t *testing.T) *codexauth.Manager {
 		AuthMode:    codexauth.AuthSubscription,
 		RequireAuth: true,
 		Home:        t.TempDir(),
-		Bin:         fakeCodexLogin(t),
+		Bin:         codexauthtest.WriteCLI(t, codexauthtest.Polling),
 		Env:         []string{"PATH=" + os.Getenv("PATH")},
 	})
 	t.Cleanup(func() { m.Cancel() })
@@ -732,21 +733,6 @@ func pendingLoginManager(t *testing.T) *codexauth.Manager {
 		t.Fatal("the fake login never issued a prompt")
 	}
 	return m
-}
-
-// fakeCodexLogin writes a stand-in Codex CLI that prints the real device-auth
-// prompt and then blocks, like the real one polling for the browser step.
-func fakeCodexLogin(t *testing.T) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "codex")
-	script := "#!/bin/sh\n" +
-		"printf '%s\\n' '1. Open this link' '   https://auth.openai.com/codex/device' \\\n" +
-		"  '2. Enter this one-time code (expires in 15 minutes)' '   XER9-NWCA2'\n" +
-		"sleep 30\n"
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil { //nolint:gosec // test fixture must be executable
-		t.Fatalf("write fake codex: %v", err)
-	}
-	return path
 }
 
 // TestReceiverLoginRefusedInConversation: the reply goes to the PEER, so in a
@@ -786,7 +772,7 @@ func TestReceiverLoginStatusInConversationHidesAPendingCode(t *testing.T) {
 	if len(notices.texts) != 1 {
 		t.Fatalf("notices = %v, want exactly one", notices.texts)
 	}
-	if strings.Contains(notices.texts[0], "XER9-NWCA2") || strings.Contains(notices.texts[0], "http") {
+	if strings.Contains(notices.texts[0], codexauthtest.DeviceCode) || strings.Contains(notices.texts[0], "http") {
 		t.Errorf("the pending code or link reached a conversation: %q", notices.texts[0])
 	}
 	if !strings.Contains(notices.texts[0], "in progress") {
@@ -804,7 +790,7 @@ func TestReceiverLoginStatusInDirectMessageShowsTheCode(t *testing.T) {
 
 	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 42, Text: "/login status"}))
 
-	if len(notices.texts) != 1 || !strings.Contains(notices.texts[0], "XER9-NWCA2") {
+	if len(notices.texts) != 1 || !strings.Contains(notices.texts[0], codexauthtest.DeviceCode) {
 		t.Errorf("notices = %v, want the pending code re-shown in a direct message", notices.texts)
 	}
 }
@@ -822,5 +808,58 @@ func TestReceiverLoginRejectsDisallowedSender(t *testing.T) {
 
 	if len(notices.texts) != 0 {
 		t.Errorf("a disallowed sender got %v, want silence", notices.texts)
+	}
+}
+
+// TestHelpListsLoginOnlyWhereItApplies mirrors the Telegram adapter: the /login
+// line appears only where an interactive sign-in exists, so the two adapters (and
+// Telegram's command menu) cannot disagree.
+func TestHelpListsLoginOnlyWhereItApplies(t *testing.T) {
+	if !strings.Contains(HelpText(true), "/login") {
+		t.Error("help omits /login where the sign-in is real")
+	}
+	if strings.Contains(HelpText(false), "/login") {
+		t.Error("help advertises /login where there is no sign-in")
+	}
+	if strings.Contains(welcomeText(false), "/login") {
+		t.Error("welcome advertises /login where there is no sign-in")
+	}
+}
+
+// TestPrivacyFollowsTheDirectMessageInvariant: VK states 1:1 directly — in a
+// direct message the peer IS the sender. A range check on the peer id would call
+// community peers private too, which is far too loose for the flag that decides
+// who may see a code that takes over the bot's account.
+func TestPrivacyFollowsTheDirectMessageInvariant(t *testing.T) {
+	auth := pendingLoginManager(t)
+
+	tests := []struct {
+		name      string
+		fromID    int64
+		peerID    int64
+		wantsCode bool
+	}{
+		{"direct message", 42, 42, true},
+		{"conversation", 42, 2000000001, false},
+		{"community peer", 42, -1500, false},
+		{"peer that is not the sender", 42, 200, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			notices := &fakeNotice{}
+			r := newTestReceiverWithAuth(&fakeService{}, notices, auth)
+
+			r.dispatch(context.Background(), msgNewUpdate(t, messageObject{
+				FromID: tt.fromID, PeerID: tt.peerID, Text: "/login status",
+			}))
+
+			if len(notices.texts) != 1 {
+				t.Fatalf("notices = %v, want exactly one", notices.texts)
+			}
+			got := strings.Contains(notices.texts[0], codexauthtest.DeviceCode)
+			if got != tt.wantsCode {
+				t.Errorf("code shown = %v, want %v (reply: %q)", got, tt.wantsCode, notices.texts[0])
+			}
+		})
 	}
 }

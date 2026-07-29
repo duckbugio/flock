@@ -201,12 +201,12 @@ func loginResult(ctx context.Context, waitErr error, output string, sawPrompt bo
 	if waitErr != nil {
 		var ee *exec.ExitError
 		if errors.As(waitErr, &ee) {
-			return fmt.Errorf("codex login exited with code %d: %s", ee.ExitCode(), condense(output))
+			return fmt.Errorf("codex login exited with code %d: %s", ee.ExitCode(), condense(redact(output)))
 		}
-		return fmt.Errorf("codex login failed: %w: %s", waitErr, condense(output))
+		return fmt.Errorf("codex login failed: %w: %s", waitErr, condense(redact(output)))
 	}
 	if !sawPrompt {
-		return fmt.Errorf("%w: %s", ErrNoPrompt, condense(output))
+		return fmt.Errorf("%w: %s", ErrNoPrompt, condense(redact(output)))
 	}
 	return nil
 }
@@ -224,6 +224,17 @@ func isUnsupportedFlag(output string) bool {
 		strings.Contains(low, "unrecognized") ||
 		strings.Contains(low, "unknown flag") ||
 		strings.Contains(low, "invalid value")
+}
+
+// redact removes the device-login secrets from captured CLI output before it is
+// put in an error — which is logged, and may be shown in a chat. The one-time
+// code is a live credential for as long as it lasts: anyone who reads it out of
+// a log can complete the sign-in with their own account. The verification link
+// goes too, since it is only useful together with the code and adds nothing to a
+// diagnosis.
+func redact(output string) string {
+	output = urlRe.ReplaceAllString(output, "<link redacted>")
+	return codeRe.ReplaceAllString(output, "<code redacted>")
 }
 
 // condense collapses captured CLI output into one line for an error message,
