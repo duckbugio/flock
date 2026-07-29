@@ -723,16 +723,24 @@ func pendingLoginManager(t *testing.T) *codexauth.Manager {
 	})
 	t.Cleanup(func() { m.Cancel() })
 
-	got := make(chan string, 4)
+	// The immediate acknowledgement now arrives through the SAME subscriber as the
+	// prompt (that ordering is deliberate), so drain until the code shows up rather
+	// than assuming the first notice is it.
+	issued := make(chan string, 8)
 	m.Dispatch(context.Background(), "", codexauth.Subscriber{
-		ID: "dm", Private: true, Notify: func(text string) { got <- text },
+		ID: "dm", Private: true, Notify: func(text string) { issued <- text },
 	})
-	select {
-	case <-got:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the fake login never issued a prompt")
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case text := <-issued:
+			if strings.Contains(text, codexauthtest.DeviceCode) {
+				return m
+			}
+		case <-deadline:
+			t.Fatal("the fake login never issued a prompt")
+		}
 	}
-	return m
 }
 
 // TestReceiverLoginRefusedInConversation: the reply goes to the PEER, so in a
@@ -861,5 +869,15 @@ func TestPrivacyFollowsTheDirectMessageInvariant(t *testing.T) {
 				t.Errorf("code shown = %v, want %v (reply: %q)", got, tt.wantsCode, notices.texts[0])
 			}
 		})
+	}
+}
+
+// TestHelpLineComesFromTheCanonicalSet: both adapters render the /login help
+// line, so it has one home beside the canonical command set. Two literals would
+// drift silently — the adapters would still share the applicability predicate but
+// not the words.
+func TestHelpLineComesFromTheCanonicalSet(t *testing.T) {
+	if !strings.Contains(HelpText(true), chat.LoginHelpLine) {
+		t.Error("the VK help does not render the canonical /login line")
 	}
 }

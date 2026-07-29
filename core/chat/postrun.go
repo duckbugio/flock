@@ -82,6 +82,12 @@ type PostRunConfig struct {
 // resumes the job if the process dies mid-wait. ctx scopes only the budget
 // notice — the run itself executes under the Dispatcher's per-chat context.
 func (s *Service) InjectAuto(ctx context.Context, chatID ChatID, prompt string) {
+	// Before the budget check and before the marker: this path is recurring and
+	// unattended (the follow-up sweeper, CI events, verify/goal fix-ups), so an
+	// unauthorized provider would otherwise strand one marker per fire.
+	if s.blockSubmit(ctx, chatID) {
+		return
+	}
 	if !s.autoAllowed(chatID) {
 		s.log.Info("autonomy budget reached; dropping injected run", "chat_id", chatID)
 		s.notifyBudgetOnce(ctx, chatID)

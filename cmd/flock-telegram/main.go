@@ -297,10 +297,11 @@ func run() int {
 		Opts:       opts,
 		Timeout:    cfg.ClaudeTimeout(),
 		RetryAfter: telegram.RetryAfter,
-		// The provider gate at the single point every run passes through — a user
-		// message, a cron fire, a workspace follow-up, a poller relay, the restart
-		// replay. The adapters block the message path early (before paid work); this
-		// is what stops the other four from marching into an unauthenticated CLI.
+		// The provider gate on every submit path — a user message and edits of one, a
+		// cron fire, the autonomy path (follow-ups, CI events, fix-ups), a poller
+		// relay, the restart replay. The adapters block the message path early
+		// (before paid work); this is what stops the rest from marching into an
+		// unauthenticated CLI and stranding a pending marker per fire.
 		Auth:   auth,
 		Logger: logger,
 	})
@@ -1032,7 +1033,10 @@ func loginHandler(cfg config.Config, auth *codexauth.Manager) bot.HandlerFunc {
 				sendCommandReply(sendCtx, b, chatID, text)
 			},
 		}
-		sendCommandReply(ctx, b, chatID, auth.Dispatch(ctx, commandArgs(update.Message.Text), sub))
+		// An empty reply means Dispatch already delivered it through sub, in order.
+		if reply := auth.Dispatch(ctx, commandArgs(update.Message.Text), sub); reply != "" {
+			sendCommandReply(ctx, b, chatID, reply)
+		}
 	}
 }
 

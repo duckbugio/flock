@@ -104,6 +104,7 @@ func TestGateBlocksEveryRunSource(t *testing.T) {
 		{"poller relay", func(s *Service) { s.Inject(testChatID, "a reviewer commented") }},
 		{"cron fire", func(s *Service) { s.InjectScheduled(testChatID, "nightly", 7) }},
 		{"restart replay", func(s *Service) { s.ResumePending(testChatID, pending.Marker{ID: "p1", Prompt: "resume me"}) }},
+		{"autonomy follow-up", func(s *Service) { s.InjectAuto(context.Background(), testChatID, "ci went red") }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -204,6 +205,7 @@ func TestBlockedSubmitLeavesNoPendingMarker(t *testing.T) {
 		{"user message", func(s *Service) { s.Handle(context.Background(), testChatID, 7, "m1", "build it") }},
 		{"edited message", func(s *Service) { s.HandleEdit(context.Background(), testChatID, 7, "m1", "edited") }},
 		{"poller relay", func(s *Service) { s.Inject(testChatID, "a reviewer commented") }},
+		{"autonomy follow-up", func(s *Service) { s.InjectAuto(context.Background(), testChatID, "ci went red") }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -4,6 +4,8 @@ import (
 	"strings"
 
 	"github.com/go-telegram/bot/models"
+
+	"github.com/duckbugio/flock/core/chat"
 )
 
 // CommandName returns the slash command addressed at the start of msg,
@@ -96,17 +98,10 @@ const (
 	helpTail = "\nSend any other message to run it through the assistant."
 )
 
-// loginHelpLine documents /login. It is listed CONDITIONALLY, on the same
-// applicability test the published command menu uses (reservedBotCommands), so
-// the menu and /help cannot disagree: on Claude, an API-key backend or Codex
-// billing there is no sign-in to complete and the command could only answer that
-// it is not needed.
-const loginHelpLine = "/login — sign in to Codex on a subscription (/login status, /login cancel)\n"
-
 // HelpText renders the usage message. withLogin adds the /login line.
 func HelpText(withLogin bool) string {
 	if withLogin {
-		return helpHeader + loginHelpLine + helpTail
+		return helpHeader + chat.LoginHelpLine + helpTail
 	}
 	return helpHeader + helpTail
 }

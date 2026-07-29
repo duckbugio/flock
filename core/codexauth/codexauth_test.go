@@ -40,6 +40,25 @@ func (c *collector) sub(id string) Subscriber {
 	return Subscriber{ID: id, Private: true, Notify: c.notify}
 }
 
+// awaitCode drains notices until the one carrying the device code, returning it.
+// The immediate acknowledgement now arrives through the SAME subscriber (that
+// ordering is the point), so a test that only wants the prompt must skip past it.
+func (c *collector) awaitCode(t *testing.T) string {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case text := <-c.ch:
+			if strings.Contains(text, deviceCode) {
+				return text
+			}
+		case <-deadline:
+			t.Fatal("no device code within 10s")
+			return ""
+		}
+	}
+}
+
 // next returns the next notice, failing the test if none arrives in time.
 func (c *collector) next(t *testing.T) string {
 	t.Helper()
@@ -206,10 +225,15 @@ func TestDispatchFullLoginPath(t *testing.T) {
 	}
 
 	c := newCollector()
-	if reply := m.Dispatch(context.Background(), "", c.sub("chat-1")); !strings.Contains(reply, "Starting") {
-		t.Errorf("immediate reply = %q, want an acknowledgement that the sign-in started", reply)
+	if reply := m.Dispatch(context.Background(), "", c.sub("chat-1")); reply != "" {
+		t.Errorf("immediate reply = %q, want it delivered through the subscriber instead", reply)
 	}
 
+	// Order matters: the acknowledgement must not surface UNDER the code it
+	// promises, which is what sending it outside this channel used to risk.
+	if ack := c.next(t); !strings.Contains(ack, "Starting") {
+		t.Errorf("first notice = %q, want the acknowledgement first", ack)
+	}
 	prompt := c.next(t)
 	if !strings.Contains(prompt, "https://auth.openai.com/codex/device") {
 		t.Errorf("prompt %q is missing the verification link", prompt)
@@ -247,9 +271,7 @@ func TestDispatchReshowsPendingPrompt(t *testing.T) {
 
 	c := newCollector()
 	m.Dispatch(context.Background(), "", c.sub("chat-1"))
-	if prompt := c.next(t); !strings.Contains(prompt, "XER9-NWCA2") {
-		t.Fatalf("first prompt %q is missing the code", prompt)
-	}
+	c.awaitCode(t)
 
 	again := m.Dispatch(context.Background(), "", c.sub("chat-1"))
 	if !strings.Contains(again, "XER9-NWCA2") {
@@ -287,7 +309,7 @@ func TestDispatchCancel(t *testing.T) {
 
 	c := newCollector()
 	m.Dispatch(context.Background(), "", c.sub("chat-1"))
-	c.next(t) // the prompt
+	c.awaitCode(t)
 
 	if got := m.Dispatch(context.Background(), "cancel", c.sub("chat-1")); !strings.Contains(got, "Cancelled") {
 		t.Errorf("cancel = %q, want a cancellation acknowledgement", got)
@@ -358,9 +380,7 @@ func TestDispatchSurvivesADeadRequestContext(t *testing.T) {
 	m.Dispatch(ctx, "", c.sub("chat-1"))
 	cancel() // the update's context dies immediately, as it does in production
 
-	if prompt := c.next(t); !strings.Contains(prompt, "XER9-NWCA2") {
-		t.Errorf("prompt %q lost after the request context was cancelled", prompt)
-	}
+	c.awaitCode(t)
 	if done := c.next(t); !strings.Contains(strings.ToLower(done), "authorized") {
 		t.Errorf("final notice = %q, want the login to have completed anyway", done)
 	}
@@ -434,9 +454,7 @@ func TestNoCodeReachesANonPrivateDestination(t *testing.T) {
 	// A sign-in is pending, started from a direct message.
 	dm := newCollector()
 	m.Dispatch(context.Background(), "", Subscriber{ID: "dm", Private: true, Notify: dm.notify})
-	if p := dm.next(t); !strings.Contains(p, deviceCode) {
-		t.Fatalf("the private starter did not get the code: %q", p)
-	}
+	dm.awaitCode(t)
 
 	group := Subscriber{ID: "group", Private: false, Notify: func(string) {}}
 	for _, args := range []string{"", "status", "force", "again"} {
@@ -483,7 +501,7 @@ func TestGroupSubscriberNeverJoinsTheBroadcast(t *testing.T) {
 	group := newCollector()
 	dm := newCollector()
 	m.Dispatch(context.Background(), "", Subscriber{ID: "dm", Private: true, Notify: dm.notify})
-	dm.next(t) // the prompt
+	dm.awaitCode(t)
 	m.Dispatch(context.Background(), "", Subscriber{ID: "group", Private: false, Notify: group.notify})
 
 	m.Cancel()
@@ -514,9 +532,7 @@ func TestCancelWaitsForTheChild(t *testing.T) {
 
 	c := newCollector()
 	m.Dispatch(context.Background(), "", c.sub("dm"))
-	if p := c.next(t); !strings.Contains(p, deviceCode) {
-		t.Fatalf("no prompt: %q", p)
-	}
+	c.awaitCode(t)
 
 	if !m.Cancel() {
 		t.Fatal("Cancel reported nothing pending")
@@ -548,9 +564,7 @@ func TestEveryAskerLearnsTheOutcome(t *testing.T) {
 
 	first, second := newCollector(), newCollector()
 	m.Dispatch(context.Background(), "", first.sub("chat-1"))
-	if p := first.next(t); !strings.Contains(p, "XER9-NWCA2") {
-		t.Fatalf("first prompt %q is missing the code", p)
-	}
+	first.awaitCode(t)
 
 	// A different chat asks while the login is pending.
 	if again := m.Dispatch(context.Background(), "", second.sub("chat-2")); !strings.Contains(again, "XER9-NWCA2") {
@@ -579,7 +593,7 @@ func TestTheSameChatAskingTwiceIsNotToldTwice(t *testing.T) {
 
 	c := newCollector()
 	m.Dispatch(context.Background(), "", c.sub("chat-1"))
-	c.next(t) // the prompt
+	c.awaitCode(t)
 	m.Dispatch(context.Background(), "", c.sub("chat-1"))
 
 	if got := c.next(t); !strings.Contains(strings.ToLower(got), "authorized") {
@@ -610,7 +624,7 @@ func TestCleanExitWithoutACredentialIsNotSuccess(t *testing.T) {
 
 	c := newCollector()
 	m.Dispatch(context.Background(), "", c.sub("dm"))
-	c.next(t) // the prompt
+	c.awaitCode(t)
 
 	got := c.next(t)
 	if strings.Contains(strings.ToLower(got), "codex is authorized") {
@@ -621,5 +635,48 @@ func TestCleanExitWithoutACredentialIsNotSuccess(t *testing.T) {
 	}
 	if _, blocked := m.BlockedNotice(); !blocked {
 		t.Error("runs were unblocked by a login that persisted nothing")
+	}
+}
+
+// TestAckPrecedesTheCode pins the message ORDER: the acknowledgement must not
+// surface underneath the code it promises.
+func TestAckPrecedesTheCode(t *testing.T) {
+	bin := fakeCodex(t, printBanner+"sleep 30\n")
+	m := NewManager(Config{
+		Backend:     BackendCodex,
+		AuthMode:    AuthSubscription,
+		RequireAuth: true,
+		Bin:         bin,
+		Home:        t.TempDir(),
+		Env:         []string{"PATH=" + os.Getenv("PATH")},
+	})
+	t.Cleanup(func() { m.Cancel() })
+
+	c := newCollector()
+	if reply := m.Dispatch(context.Background(), "", c.sub("dm")); reply != "" {
+		t.Fatalf("Dispatch returned %q, want it delivered through the subscriber", reply)
+	}
+	// Returning the acknowledgement for the caller to send separately raced the
+	// broadcast: a CLI that printed its banner quickly got the code out first, and
+	// the user read "the code arrives in a moment" underneath the code.
+	if got := c.next(t); !strings.Contains(got, "Starting") {
+		t.Errorf("first notice = %q, want the acknowledgement before the code", got)
+	}
+	if got := c.next(t); !strings.Contains(got, deviceCode) {
+		t.Errorf("second notice = %q, want the code", got)
+	}
+}
+
+// TestDispatchStillReturnsAReplyWithoutASubscriber: a caller that cannot receive
+// notices (no Notify) must still get the text to send itself.
+func TestDispatchStillReturnsAReplyWithoutASubscriber(t *testing.T) {
+	m := NewManager(Config{
+		Backend: BackendCodex, AuthMode: AuthSubscription, RequireAuth: true, Home: t.TempDir(),
+		Bin: filepath.Join(t.TempDir(), "no-such-codex"),
+	})
+	t.Cleanup(func() { m.Cancel() })
+
+	if got := m.Dispatch(context.Background(), "", Subscriber{ID: "dm", Private: true}); got == "" {
+		t.Error("Dispatch swallowed the reply for a subscriber that cannot receive it")
 	}
 }

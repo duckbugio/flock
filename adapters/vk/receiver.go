@@ -450,7 +450,10 @@ func (r *Receiver) dispatchLogin(ctx context.Context, msg messageObject) {
 			r.notify(sendCtx, peerID, text)
 		},
 	}
-	r.notify(ctx, peerID, r.auth.Dispatch(ctx, commandArgs(msg.Text), sub))
+	// An empty reply means Dispatch already delivered it through sub, in order.
+	if reply := r.auth.Dispatch(ctx, commandArgs(msg.Text), sub); reply != "" {
+		r.notify(ctx, peerID, reply)
+	}
 }
 
 // dispatchGoal serves /goal: arm, show, or disarm the calling chat's goal via

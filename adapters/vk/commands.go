@@ -1,5 +1,7 @@
 package vk
 
+import "github.com/duckbugio/flock/core/chat"
+
 // helpHeader/helpTail bracket the command list of the VK adapter's usage
 // message. It mirrors the Telegram adapter's: VK has no native slash-command UI,
 // so these are plain text commands the receiver intercepts. It is an engineering
@@ -15,16 +17,10 @@ const (
 	helpTail = "\nSend any other message to run it through the assistant."
 )
 
-// loginHelpLine documents /login. It is listed CONDITIONALLY, on the same
-// applicability test the Telegram command menu uses, so the two adapters and the
-// menu cannot disagree: on Claude, an API-key backend or Codex billing there is
-// no sign-in to complete and the command could only answer that it is not needed.
-const loginHelpLine = "/login — sign in to Codex on a subscription (/login status, /login cancel)\n"
-
 // HelpText renders the usage message. withLogin adds the /login line.
 func HelpText(withLogin bool) string {
 	if withLogin {
-		return helpHeader + loginHelpLine + helpTail
+		return helpHeader + chat.LoginHelpLine + helpTail
 	}
 	return helpHeader + helpTail
 }

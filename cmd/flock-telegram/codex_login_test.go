@@ -15,6 +15,7 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"github.com/duckbugio/flock/adapters/telegram"
+	"github.com/duckbugio/flock/adapters/vk"
 	"github.com/duckbugio/flock/core/chat"
 	"github.com/duckbugio/flock/core/codexauth"
 	"github.com/duckbugio/flock/core/codexauth/codexauthtest"
@@ -256,16 +257,24 @@ func pendingLoginManager(t *testing.T) *codexauth.Manager {
 	})
 	t.Cleanup(func() { m.Cancel() })
 
-	issued := make(chan string, 4)
+	// The immediate acknowledgement now arrives through the SAME subscriber as the
+	// prompt (that ordering is deliberate), so drain until the code shows up rather
+	// than assuming the first notice is it.
+	issued := make(chan string, 8)
 	m.Dispatch(context.Background(), "", codexauth.Subscriber{
 		ID: "dm", Private: true, Notify: func(text string) { issued <- text },
 	})
-	select {
-	case <-issued:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the fake login never issued a prompt")
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case text := <-issued:
+			if strings.Contains(text, codexauthtest.DeviceCode) {
+				return m
+			}
+		case <-deadline:
+			t.Fatal("the fake login never issued a prompt")
+		}
 	}
-	return m
 }
 
 // commandBot builds a bot with the reserved handlers registered and every API
@@ -414,5 +423,16 @@ func TestHelpListsLoginOnlyWhereItApplies(t *testing.T) {
 	}
 	if menuHasLogin != strings.Contains(telegram.HelpText(codexAuthForMenu.Applicable()), "/login") {
 		t.Error("the command menu and /help disagree about /login")
+	}
+}
+
+// TestHelpLineComesFromTheCanonicalSet: both adapters render the same /login help
+// line from core/chat, so a wording change cannot land in one and not the other.
+func TestHelpLineComesFromTheCanonicalSet(t *testing.T) {
+	if !strings.Contains(telegram.HelpText(true), chat.LoginHelpLine) {
+		t.Error("the Telegram help does not render the canonical /login line")
+	}
+	if !strings.Contains(vk.HelpText(true), chat.LoginHelpLine) {
+		t.Error("the VK help does not render the canonical /login line")
 	}
 }

@@ -316,7 +316,9 @@ func (s Subscriber) deliver(text string) {
 // normalizeArgs canonicalizes a /login argument for comparison.
 func normalizeArgs(args string) string { return strings.ToLower(strings.TrimSpace(args)) }
 
-// Dispatch serves the /login command and returns the IMMEDIATE reply.
+// Dispatch serves the /login command and returns the immediate reply for the
+// caller to send — or "" when it has already been delivered through sub, which is
+// how the reply is kept ahead of the notices that follow it.
 //
 // The device flow outlives the command: after the immediate reply, the pending
 // login keeps running in the background and reports the verification link, the
@@ -394,8 +396,26 @@ func (m *Manager) start(base context.Context, force bool, sub Subscriber) string
 	m.subscribeLocked(sub)
 	m.mu.Unlock()
 
+	// Delivered through the SAME channel as every later notice, and BEFORE the run
+	// goroutine exists. Returning it for the adapter to send separately raced the
+	// broadcast: a CLI that printed its banner quickly could get the link and code
+	// out first, so the user read "the code arrives in a moment" underneath the
+	// code that had already arrived.
+	reply := m.ack(sub, "Starting the Codex sign-in — the link and one-time code arrive in a moment.")
 	go m.run(ctx, cancel, done)
-	return "Starting the Codex sign-in — the link and one-time code arrive in a moment."
+	return reply
+}
+
+// ack delivers an immediate reply through sub, so it cannot be overtaken by a
+// notice the caller has not sent yet. It returns the text unsent only when the
+// subscriber cannot receive it, leaving the caller to deliver it; an empty return
+// means "already delivered, send nothing".
+func (m *Manager) ack(sub Subscriber, text string) string {
+	if sub.Notify == nil {
+		return text
+	}
+	sub.deliver(text)
+	return ""
 }
 
 // subscribeLocked adds sub to the pending login's notice list, collapsing a

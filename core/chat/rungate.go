@@ -7,12 +7,15 @@ import "context"
 // completed its interactive sign-in yet (core/codexauth.Manager satisfies it).
 //
 // The gate lives HERE, at the submit paths every run enters through, rather than
-// only in the adapters' message paths. Runs reach the provider from five places —
-// a user message, a poller-injected PR comment, a cron fire, a workspace
-// follow-up and the restart replay of an interrupted run — and only the first of
-// those goes through an adapter. Gating in the adapters alone would let the other
-// four march into a CLI that cannot authenticate, once per schedule tick, with
-// nothing user-visible to explain it.
+// only in the adapters' message paths. Runs reach the provider from six places —
+// a user message, an edit of one, a poller-injected PR comment, a cron fire, the
+// autonomy path (workspace follow-ups, CI events, verify/goal fix-ups) and the
+// restart replay of an interrupted run — and only the first two go through an
+// adapter. Gating in the adapters alone would let the rest march into a CLI that
+// cannot authenticate, once per tick, with nothing user-visible to explain it.
+//
+// Every one of those six calls blockSubmit; a seventh submit path must call it
+// too. TestGateBlocksEveryRunSource enumerates them.
 type RunGate interface {
 	// BlockedNotice returns the user-facing explanation and true when runs must
 	// be blocked, or ("", false) when they may proceed.
