@@ -320,8 +320,12 @@ func TestDispatchCancel(t *testing.T) {
 	if got := m.Dispatch(context.Background(), "cancel", c.sub("chat-1")); !strings.Contains(got, "Cancelled") {
 		t.Errorf("cancel = %q, want a cancellation acknowledgement", got)
 	}
-	if got := c.next(t); !strings.Contains(got, "cancelled") {
-		t.Errorf("final notice = %q, want the cancellation reported", got)
+	// Told ONCE. The attempt's own verdict ("The Codex sign-in was cancelled") would
+	// land right behind Dispatch's acknowledgement and say the same thing again.
+	select {
+	case extra := <-c.ch:
+		t.Errorf("the cancellation was reported twice; extra notice: %q", extra)
+	case <-time.After(500 * time.Millisecond):
 	}
 }
 
@@ -493,7 +497,9 @@ func TestGroupStatusStillReportsSomethingUseful(t *testing.T) {
 // TestGroupSubscriberNeverJoinsTheBroadcast: a non-private destination must not
 // be subscribed either, or the prompt broadcast would hand it the code.
 func TestGroupSubscriberNeverJoinsTheBroadcast(t *testing.T) {
-	bin := fakeCodex(t, printBanner+"sleep 30\n")
+	// Runs to completion, so the private subscriber has a verdict to receive and the
+	// group's silence is a real result rather than nothing having happened.
+	bin := fakeCodex(t, printBanner+persistAuth+"exit 0\n")
 	m := NewManager(Config{
 		Backend:     BackendCodex,
 		AuthMode:    AuthSubscription,
@@ -510,8 +516,7 @@ func TestGroupSubscriberNeverJoinsTheBroadcast(t *testing.T) {
 	dm.awaitCode(t)
 	m.Dispatch(context.Background(), "", Subscriber{ID: "group", Private: false, Notify: group.notify})
 
-	m.Cancel()
-	if got := dm.next(t); !strings.Contains(got, "cancelled") {
+	if got := dm.next(t); !strings.Contains(strings.ToLower(got), "authorized") {
 		t.Fatalf("the private subscriber did not get the outcome: %q", got)
 	}
 	select {
@@ -824,21 +829,21 @@ func TestOutcomeGoesToTheAttemptThatProducedIt(t *testing.T) {
 	// Cancel detaches attempt A; B starts while A is still unwinding.
 	m.Cancel()
 	m.Dispatch(context.Background(), "", second.sub("chat-b"))
+	second.awaitCode(t)
 
-	// A's cancellation reaches A, and never B.
-	found := false
-	for range 3 {
-		if strings.Contains(strings.ToLower(first.next(t)), "cancelled") {
-			found = true
-			break
+	// Nothing belonging to A may surface in B's chat. Reading the live subscriber
+	// list instead of A's own snapshot is what used to send A's verdict to B —
+	// seconds after B's "Starting the sign-in", where it reads as B's own result.
+	for _, text := range drain(second) {
+		low := strings.ToLower(text)
+		if strings.Contains(low, "cancelled") || strings.Contains(low, "failed") {
+			t.Errorf("the successor's chat received the predecessor's verdict: %q", text)
 		}
 	}
-	if !found {
-		t.Error("the cancelled attempt's own chat never heard its outcome")
-	}
-	for _, text := range drain(second) {
+	// And A, having been cancelled, was told exactly once — by Cancel itself.
+	for _, text := range drain(first) {
 		if strings.Contains(strings.ToLower(text), "cancelled") {
-			t.Errorf("the successor's chat received the predecessor's verdict: %q", text)
+			t.Errorf("a cancelled attempt also announced its verdict: %q", text)
 		}
 	}
 }

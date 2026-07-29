@@ -105,6 +105,13 @@ func BuildWithPendingLogin(cfg config.Config) (
 	if err == nil || !IsPendingLogin(err) {
 		return runner, opts, info, false, err
 	}
+	// An empty CODEX_HOME cannot be fixed by signing in: there is nowhere for the
+	// credential to be written OR read, so the deployment would boot permanently
+	// blocked and a "successful" /login would report saving nothing, to a blank
+	// path. It used to fail at startup, and it still should.
+	if strings.TrimSpace(cfg.CodexHome) == "" {
+		return nil, agent.Options{}, agent.ProviderInfo{}, false, err
+	}
 	relaxed := cfg
 	relaxed.CodexRequireAuth = false
 	runner, opts, info, err = Build(relaxed)

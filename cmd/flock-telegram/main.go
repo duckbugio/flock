@@ -1030,18 +1030,22 @@ func loginHandler(cfg config.Config, auth *codexauth.Manager) bot.HandlerFunc {
 		if !ok {
 			return
 		}
+		// One bounded, detached sender for BOTH paths, as in the VK adapter: /login
+		// cancel waits out the login goroutine, so the update's own context can be
+		// gone by the time the reply is sent and the answer would vanish silently.
+		notify := func(text string) {
+			sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), codexauth.NotifyTimeout)
+			defer cancel()
+			sendCommandReply(sendCtx, b, chatID, text)
+		}
 		sub := codexauth.Subscriber{
 			ID:      chatIDStr(chatID),
 			Private: update.Message.Chat.Type == models.ChatTypePrivate,
-			Notify: func(text string) {
-				sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), codexauth.NotifyTimeout)
-				defer cancel()
-				sendCommandReply(sendCtx, b, chatID, text)
-			},
+			Notify:  notify,
 		}
 		// An empty reply means Dispatch already delivered it through sub, in order.
 		if reply := auth.Dispatch(ctx, commandArgs(update.Message.Text), sub); reply != "" {
-			sendCommandReply(ctx, b, chatID, reply)
+			notify(reply)
 		}
 	}
 }

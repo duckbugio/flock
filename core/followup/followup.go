@@ -187,7 +187,14 @@ const tick = 30 * time.Second
 // Run fires due follow-ups until ctx is cancelled, handing each to fire (in
 // production a closure over chat.Service.InjectAuto). It returns ctx.Err() on
 // cancellation.
-func Run(ctx context.Context, store *FileStore, now func() time.Time, fire func(Item)) error {
+//
+// paused reports that firing is impossible right now (in production: the AI
+// provider is unauthorized). The WHOLE sweep is skipped while it holds — Due is
+// not called at all. That is the point: Due is take-then-fire, removing what it
+// returns, so sweeping into a fire that drops the item would delete scheduled
+// work permanently. Skipping instead leaves each item in the store, due, to fire
+// once the block clears. A nil paused never pauses.
+func Run(ctx context.Context, store *FileStore, now func() time.Time, paused func() bool, fire func(Item)) error {
 	if now == nil {
 		now = time.Now
 	}
@@ -198,10 +205,22 @@ func Run(ctx context.Context, store *FileStore, now func() time.Time, fire func(
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
-			for _, it := range store.Due(now()) {
-				fire(it)
-			}
+			sweep(store, now(), paused, fire)
 		}
+	}
+}
+
+// sweep fires everything due, unless firing is impossible right now.
+//
+// The pause check comes BEFORE Due deliberately: Due is take-then-fire, removing
+// what it returns, so sweeping into a fire that would drop the item deletes
+// scheduled work permanently.
+func sweep(store *FileStore, now time.Time, paused func() bool, fire func(Item)) {
+	if paused != nil && paused() {
+		return
+	}
+	for _, it := range store.Due(now) {
+		fire(it)
 	}
 }
 

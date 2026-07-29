@@ -22,6 +22,18 @@ type RunGate interface {
 	BlockedNotice() (string, bool)
 }
 
+// RunsBlocked reports whether a run submitted right now would be refused. It
+// lets a caller that would DESTROY work by submitting — the follow-up sweep takes
+// each due item out of its store before firing it — skip the attempt entirely and
+// try again later, instead of handing it to a gate that drops it.
+func (s *Service) RunsBlocked() bool {
+	if s.auth == nil {
+		return false
+	}
+	_, blocked := s.auth.BlockedNotice()
+	return blocked
+}
+
 // blockSubmit reports whether a submission must be refused because the provider
 // is unauthorized, and tells the chat once why.
 //

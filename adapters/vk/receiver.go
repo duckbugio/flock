@@ -388,7 +388,10 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 	default:
 		// A kind added to classify but not handled here would otherwise fall through
 		// to the text run and submit whatever is in text — possibly nothing.
-		r.logger.Warn("vk: unhandled work kind; dropping message", "kind", w.kind, "peer_id", peerID)
+		// .String() explicitly: both binaries log through slog's JSONHandler, which
+		// marshals a named int as a number — the Stringer would never be consulted and
+		// the operator would read "kind":4, exactly what naming it was meant to avoid.
+		r.logger.Warn("vk: unhandled work kind; dropping message", "kind", w.kind.String(), "peer_id", peerID)
 		return
 	}
 

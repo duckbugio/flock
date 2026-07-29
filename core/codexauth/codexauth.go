@@ -143,8 +143,13 @@ type Manager struct {
 // session is one device-login attempt. The run goroutine owns its lifetime; every
 // field is guarded by Manager.mu.
 type session struct {
-	cancel context.CancelFunc
-	done   chan struct{} // closed when this attempt's goroutine has returned
+	// cancelled records that this attempt was ended deliberately, so its verdict is
+	// not also announced: Cancel already told the chat, and "The Codex sign-in was
+	// cancelled" arriving after "Cancelled the pending Codex login" is the same news
+	// twice.
+	cancelled bool
+	cancel    context.CancelFunc
+	done      chan struct{} // closed when this attempt's goroutine has returned
 	// prompt is the verification link and one-time code, once issued.
 	prompt    Prompt
 	hasPrompt bool
@@ -260,6 +265,10 @@ func (m *Manager) statusText(private bool) string {
 		return pendingElsewhereText
 	case cur != nil && hasPrompt:
 		return "Codex device login is in progress — finish it in the browser:\n\n" + promptText(prompt)
+	case cur != nil && !private:
+		// Not "the code arrives in a moment": a non-private destination never
+		// subscribes, so nothing would ever arrive there.
+		return pendingElsewhereText
 	case cur != nil:
 		return "Codex device login is starting; the link and code arrive in a moment."
 	case m.cfg.HasAccessToken:
@@ -548,9 +557,15 @@ func (m *Manager) run(ctx context.Context, s *session) {
 	if m.cur == s {
 		m.cur = nil
 	}
+	cancelled := s.cancelled
 	subs := append([]Subscriber(nil), s.subs...)
 	m.mu.Unlock()
 
+	if cancelled {
+		// Cancel already answered the user; the verdict would only repeat it.
+		log.Info("codex device login cancelled")
+		return
+	}
 	deliverAll(subs, m.outcome(err, log))
 }
 
@@ -609,6 +624,7 @@ func (m *Manager) Cancel() bool {
 		m.mu.Unlock()
 		return false
 	}
+	s.cancelled = true
 	m.cur = nil
 	m.mu.Unlock()
 

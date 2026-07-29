@@ -74,7 +74,11 @@ func StartFollowups(ctx context.Context, svc *chat.Service, pr chat.PostRunConfi
 		return
 	}
 	go func() {
-		if err := followup.Run(ctx, pr.Followups, nil, func(it followup.Item) {
+		// svc.RunsBlocked pauses the sweep entirely while the provider is
+		// unauthorized. Without it the sweep would keep TAKING due items from the
+		// store and handing them to an InjectAuto that refuses them — scheduled work
+		// deleted for good, and not replayed after the sign-in.
+		if err := followup.Run(ctx, pr.Followups, nil, svc.RunsBlocked, func(it followup.Item) {
 			svc.InjectAuto(ctx, it.ChatID, chat.FollowupPrompt(it))
 		}); err != nil && ctx.Err() == nil {
 			logger.Error("follow-up loop stopped", "error", err)

@@ -267,3 +267,26 @@ func TestCodexAuthConfigMirrorsTheRunner(t *testing.T) {
 		}
 	}
 }
+
+// TestEmptyCodexHomeStaysFatal: a blank CODEX_HOME is not "nobody has signed in
+// yet", it is a misconfiguration no sign-in can fix — there is nowhere to write
+// the credential and nowhere to read it back. Relaxing it would boot a deployment
+// that is blocked forever, whose "successful" /login reports saving nothing to a
+// blank path.
+func TestEmptyCodexHomeStaysFatal(t *testing.T) {
+	// CodexHome is left at its zero value on purpose: that is the misconfiguration.
+	runner, _, _, pendingLogin, err := BuildWithPendingLogin(config.Config{
+		AIBackend:        config.AIBackendCodex,
+		CodexAuthMode:    config.CodexAuthSubscription,
+		CodexRequireAuth: true,
+	})
+	if !errors.Is(err, config.ErrCodexSubscriptionAuthRequired) {
+		t.Fatalf("error = %v, want the auth-required error to stay fatal", err)
+	}
+	if pendingLogin {
+		t.Error("pendingLogin = true for a deployment with nowhere to store a credential")
+	}
+	if runner != nil {
+		t.Error("a runner was built for a deployment that cannot ever authenticate")
+	}
+}
