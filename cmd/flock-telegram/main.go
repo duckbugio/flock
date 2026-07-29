@@ -422,7 +422,6 @@ func textHandler(
 	guards chat.GuardConfig,
 	auth *codexauth.Manager,
 ) bot.HandlerFunc {
-	authNotified := chat.NewOnceNotifier()
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		service := *svc
 		if service == nil {
@@ -435,7 +434,7 @@ func textHandler(
 		if edited := update.EditedMessage; edited != nil {
 			deps := messageDeps{
 				cfg: cfg, service: service, limiter: limiter, costs: costs,
-				guards: guards, auth: auth, authNotified: authNotified,
+				guards: guards, auth: auth,
 			}
 			handleMessage(ctx, deps, b, edited, true)
 			return
@@ -443,7 +442,7 @@ func textHandler(
 		if msg := update.Message; msg != nil {
 			deps := messageDeps{
 				cfg: cfg, service: service, vt: *vt, up: *up,
-				limiter: limiter, costs: costs, guards: guards, auth: auth, authNotified: authNotified,
+				limiter: limiter, costs: costs, guards: guards, auth: auth,
 			}
 			handleMessage(ctx, deps, b, msg, false)
 		}
@@ -483,8 +482,6 @@ type messageDeps struct {
 	// auth blocks runs while the Codex backend has no completed sign-in. Nil (and
 	// a nil *Manager) means "never blocks".
 	auth *codexauth.Manager
-	// authNotified suppresses a repeat unauthorized notice per chat.
-	authNotified *chat.OnceNotifier
 }
 
 // handleMessage applies the allow-list and the group mention-gate to one message
@@ -556,15 +553,18 @@ func handleMessage(ctx context.Context, deps messageDeps, b *bot.Bot, msg *model
 	// work nobody asked for. The notice is sent once per chat until authorization
 	// returns; without the limiter throttling it, the restraint belongs here.
 	if strings.TrimSpace(cleaned) != "" || isVoice || isDocument || isPhoto {
-		if notice, blocked := deps.auth.BlockedNotice(); blocked {
+		if deps.auth.Blocked() {
 			// Warn, matching core/chat and the VK adapter: one state, one level.
 			slog.Warn("codex unauthorized — refusing run", "chat_id", msg.Chat.ID, "user_id", msg.From.ID)
-			if deps.authNotified.Should(chatIDStr(msg.Chat.ID)) {
+			// One registry, owned by the gate: this chat may already have been told by
+			// a refused background submission.
+			if notice := deps.auth.NoticeFor(chatIDStr(msg.Chat.ID)); notice != "" {
 				sendCommandReply(ctx, b, msg.Chat.ID, notice)
 			}
 			return
 		}
-		deps.authNotified.Clear()
+		// Clears the gate's registry when authorization is back.
+		deps.auth.NoticeFor(chatIDStr(msg.Chat.ID))
 	}
 
 	if allow, reason := chat.CheckGuards(limiter, costs, guards, msg.From.ID); !allow {

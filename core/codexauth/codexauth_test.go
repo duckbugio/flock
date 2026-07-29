@@ -148,23 +148,40 @@ func TestAuthorizedRechecksTheAuthFile(t *testing.T) {
 	}
 }
 
-// TestBlockedNotice: an unauthorized deployment blocks runs with a notice naming
-// the one command that fixes it, and never blocks once authorized.
-func TestBlockedNotice(t *testing.T) {
+// TestBlockedAndNoticeFor: an unauthorized deployment refuses runs and explains
+// itself ONCE per destination — the registry lives with the auth state, because
+// the same refusal reaches a chat both from an adapter answering a user and from
+// core/chat refusing a background submission. A registry per caller keeps each
+// caller's repeats down and still tells one chat twice.
+func TestBlockedAndNoticeFor(t *testing.T) {
 	home := t.TempDir()
 	m := NewManager(Config{Backend: BackendCodex, AuthMode: AuthSubscription, RequireAuth: true, Home: home})
 
-	notice, blocked := m.BlockedNotice()
-	if !blocked {
-		t.Fatal("BlockedNotice() reported no block while unauthorized")
+	if !m.Blocked() {
+		t.Fatal("Blocked() = false while unauthorized")
 	}
-	if !strings.Contains(notice, "/login") {
+	if notice := m.NoticeFor("chat-1"); !strings.Contains(notice, "/login") {
 		t.Errorf("notice %q should tell the user to send /login", notice)
+	}
+	if repeat := m.NoticeFor("chat-1"); repeat != "" {
+		t.Errorf("the same chat was told twice: %q", repeat)
+	}
+	if other := m.NoticeFor("chat-2"); other == "" {
+		t.Error("a different chat was silenced by the first one's notice")
 	}
 
 	writeAuthFile(t, home)
-	if _, blocked := m.BlockedNotice(); blocked {
-		t.Error("BlockedNotice() still blocks after a completed login")
+	if m.Blocked() {
+		t.Error("Blocked() = true after a completed login")
+	}
+	// Asking while unblocked clears the registry, so a returning lapse is announced
+	// afresh — including to a chat that stayed quiet through the recovery.
+	m.NoticeFor("chat-1")
+	if err := os.Remove(filepath.Join(home, "auth.json")); err != nil {
+		t.Fatalf("remove auth.json: %v", err)
+	}
+	if again := m.NoticeFor("chat-1"); again == "" {
+		t.Error("a returning lapse was not announced")
 	}
 }
 
@@ -178,7 +195,7 @@ func TestNilManagerIsInert(t *testing.T) {
 	if !m.Authorized() {
 		t.Error("nil Manager reported unauthorized")
 	}
-	if _, blocked := m.BlockedNotice(); blocked {
+	if m.Blocked() {
 		t.Error("nil Manager blocked a run")
 	}
 	if m.Cancel() {
@@ -221,7 +238,7 @@ func TestDispatchFullLoginPath(t *testing.T) {
 		Env:         []string{"PATH=" + os.Getenv("PATH")},
 	})
 
-	if _, blocked := m.BlockedNotice(); !blocked {
+	if !m.Blocked() {
 		t.Fatal("runs were not blocked before the login")
 	}
 
@@ -250,7 +267,7 @@ func TestDispatchFullLoginPath(t *testing.T) {
 	if !strings.Contains(strings.ToLower(done), "authorized") {
 		t.Errorf("final notice = %q, want a success confirmation", done)
 	}
-	if _, blocked := m.BlockedNotice(); blocked {
+	if m.Blocked() {
 		t.Error("runs are still blocked after a successful login")
 	}
 }
@@ -409,7 +426,7 @@ func TestRequireAuthFalseNeverBlocks(t *testing.T) {
 	if !m.Authorized() {
 		t.Error("Authorized() = false with CODEX_REQUIRE_AUTH=false")
 	}
-	if _, blocked := m.BlockedNotice(); blocked {
+	if m.Blocked() {
 		t.Error("runs were blocked with CODEX_REQUIRE_AUTH=false")
 	}
 	status := m.StatusText()
@@ -649,7 +666,7 @@ func TestCleanExitWithoutACredentialIsNotSuccess(t *testing.T) {
 	if !strings.Contains(got, home) {
 		t.Errorf("final notice = %q, want it to name the directory that stayed empty", got)
 	}
-	if _, blocked := m.BlockedNotice(); !blocked {
+	if !m.Blocked() {
 		t.Error("runs were unblocked by a login that persisted nothing")
 	}
 }
@@ -949,10 +966,10 @@ func TestBlockedNoticePointsAtADirectMessage(t *testing.T) {
 	m := NewManager(Config{
 		Backend: BackendCodex, AuthMode: AuthSubscription, RequireAuth: true, Home: t.TempDir(),
 	})
-	notice, blocked := m.BlockedNotice()
-	if !blocked {
-		t.Fatal("BlockedNotice reported no block while unauthorized")
+	if !m.Blocked() {
+		t.Fatal("Blocked() = false while unauthorized")
 	}
+	notice := m.NoticeFor("dm")
 	if !strings.Contains(notice, "direct message") {
 		t.Errorf("notice = %q, want it to name where /login is accepted", notice)
 	}

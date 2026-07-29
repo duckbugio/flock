@@ -17,9 +17,14 @@ import "context"
 // Every one of those six calls blockSubmit; a seventh submit path must call it
 // too. TestGateBlocksEveryRunSource enumerates them.
 type RunGate interface {
-	// BlockedNotice returns the user-facing explanation and true when runs must
-	// be blocked, or ("", false) when they may proceed.
-	BlockedNotice() (string, bool)
+	// Blocked reports whether runs must be refused right now, without side effects.
+	Blocked() bool
+	// NoticeFor returns the explanation to send to dest, or "" when dest has
+	// already been told since the block last cleared. The registry belongs to the
+	// gate, not to its callers: the refusal reaches a chat from here AND from an
+	// adapter answering a user's message, and a registry per caller would let one
+	// chat be told twice.
+	NoticeFor(dest string) string
 }
 
 // RunsBlocked reports whether a run submitted right now would be refused. It
@@ -30,8 +35,7 @@ func (s *Service) RunsBlocked() bool {
 	if s.auth == nil {
 		return false
 	}
-	_, blocked := s.auth.BlockedNotice()
-	return blocked
+	return s.auth.Blocked()
 }
 
 // blockSubmit reports whether a submission must be refused because the provider
@@ -57,19 +61,16 @@ func (s *Service) blockSubmit(ctx context.Context, chatID ChatID) bool {
 	if s.auth == nil {
 		return false
 	}
-	notice, blocked := s.auth.BlockedNotice()
-	if !blocked {
-		// Every chat, not just this one: authorization is process-wide, so one chat
-		// submitting is proof the outage is over for all of them. Clearing only the
-		// submitting chat would leave a chat that stayed quiet through the recovery
-		// window silently un-notified when the next lapse hit it.
-		s.authNotified.Clear()
+	if !s.auth.Blocked() {
+		// NoticeFor clears the gate's registry when unblocked, so a chat that stayed
+		// quiet through the recovery still hears about the NEXT lapse.
+		s.auth.NoticeFor(chatID)
 		return false
 	}
 
 	s.log.Warn("provider is not authorized — refusing run", "chat_id", chatID)
 
-	if first := s.authNotified.Should(chatID); first && notice != "" {
+	if notice := s.auth.NoticeFor(chatID); notice != "" {
 		// Via notify, which bounds the send: this runs on the CALLER's goroutine, and
 		// three of the six callers are loops that must not be stalled — the PR poller
 		// dispatches inline, and the restart replay walks every stored marker. A

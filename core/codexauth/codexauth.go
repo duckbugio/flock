@@ -129,6 +129,10 @@ func (c Config) logger() *slog.Logger {
 type Manager struct {
 	cfg Config
 
+	// notified is the ONE "already told them" registry for the refusal notice — see
+	// NoticeFor. It has its own lock so a notice never contends with a login.
+	notified onceNotifier
+
 	mu sync.Mutex
 	// cur is the attempt in flight, nil when idle. Holding the whole attempt behind
 	// ONE pointer is what keeps the state machine honest: "is a login pending",
@@ -158,7 +162,36 @@ type session struct {
 }
 
 // NewManager returns a Manager for cfg.
-func NewManager(cfg Config) *Manager { return &Manager{cfg: cfg} }
+func NewManager(cfg Config) *Manager {
+	return &Manager{cfg: cfg, notified: onceNotifier{told: map[string]bool{}}}
+}
+
+// onceNotifier tells each destination something at most once, until Clear.
+type onceNotifier struct {
+	mu   sync.Mutex
+	told map[string]bool
+}
+
+// Should reports whether dest still needs to be told, marking it as told.
+func (n *onceNotifier) Should(dest string) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.told == nil {
+		n.told = map[string]bool{}
+	}
+	if n.told[dest] {
+		return false
+	}
+	n.told[dest] = true
+	return true
+}
+
+// Clear forgets every destination, so the next occurrence is announced again.
+func (n *onceNotifier) Clear() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	clear(n.told)
+}
 
 // Applicable reports whether an interactive login means anything on this
 // deployment: only the Codex backend in subscription mode has one.
@@ -232,20 +265,46 @@ func (m *Manager) CredentialsPresent() bool {
 // NeedsLogin is the inverse of Authorized, for callers that read better that way.
 func (m *Manager) NeedsLogin() bool { return !m.Authorized() }
 
-// BlockedNotice returns the reply to send instead of starting a run while Codex
-// is unauthorized, and whether the run must be blocked at all. Blocking here —
-// rather than letting the run fail deep inside the CLI — is what makes the
-// unauthorized state recoverable: the user is told the one command that fixes it.
-func (m *Manager) BlockedNotice() (string, bool) {
-	if m == nil || m.Authorized() {
-		return "", false
+// Blocked reports whether runs must be refused right now. It has no side effects,
+// so a caller that only needs to know — the follow-up sweeper and the cron
+// scheduler, which skip their whole pass rather than consume work — can ask
+// freely.
+func (m *Manager) Blocked() bool {
+	if m == nil {
+		return false
+	}
+	return !m.Authorized()
+}
+
+// NoticeFor returns the explanation to send to dest, or "" when dest has already
+// been told since the last time the block cleared.
+//
+// The "told once" registry lives HERE, with the state it describes, because the
+// refusal reaches a chat from two layers: an adapter answering a user's message,
+// and core/chat refusing a background submission. A registry per layer keeps each
+// layer's own repeats down but lets a chat be told twice — once by the poller's
+// refusal, once by its own next message — and neither layer's tests can see it,
+// because each exercises only itself.
+func (m *Manager) NoticeFor(dest string) string {
+	if m == nil {
+		return ""
+	}
+	if !m.Blocked() {
+		// Authorization is deployment-wide, so its return clears every destination:
+		// a chat that stayed quiet through the recovery still hears about the NEXT
+		// lapse.
+		m.notified.Clear()
+		return ""
+	}
+	if !m.notified.Should(dest) {
+		return ""
 	}
 	// "in a direct message", because that is where the command will be accepted:
-	// this gate cannot see the destination, and sending the user to /login in a
+	// the caller cannot see the destination, and sending the user to /login in a
 	// group would only earn them a second refusal — possibly in the only chat they
 	// use with the bot.
 	return "Codex is not authorized yet, so I can't run anything.\n\n" +
-		"Send /login in a direct message with me and I'll walk you through the one-time browser sign-in.", true
+		"Send /login in a direct message with me and I'll walk you through the one-time browser sign-in."
 }
 
 // NoLoginNeededText is the reply when this deployment has no interactive login

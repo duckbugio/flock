@@ -112,7 +112,6 @@ type Receiver struct {
 	eventAck       eventAckFunc
 	sched          *schedule.Manager
 	auth           *codexauth.Manager
-	authNotified   *chat.OnceNotifier
 	logger         *slog.Logger
 }
 
@@ -163,7 +162,6 @@ func NewReceiver(cfg ReceiverConfig) *Receiver {
 		eventAck:       cfg.EventAck,
 		sched:          cfg.Scheduler,
 		auth:           cfg.CodexAuth,
-		authNotified:   chat.NewOnceNotifier(),
 		logger:         log,
 	}
 }
@@ -344,17 +342,27 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 	// throttle means supplying the restraint here, exactly as core/chat does for
 	// its own refusals.
 	if w.kind != workNone {
-		if notice, blocked := r.auth.BlockedNotice(); blocked {
+		if r.auth.Blocked() {
 			// Warn, matching core/chat's identical refusal: an operator filtering on
 			// Warn would otherwise see the background refusals and miss the user-facing
 			// ones, which are the signal that the deployment needs /login right now.
 			r.logger.Warn("vk: codex unauthorized — refusing run", "peer_id", peerID, "user_id", msg.FromID)
-			if r.authNotified.Should(chatIDStr(peerID)) {
-				r.notify(ctx, peerID, notice)
+			// One registry, owned by the gate: this chat may already have been told by
+			// a refused background submission, and telling it again here would be the
+			// same sentence twice.
+			if notice := r.auth.NoticeFor(chatIDStr(peerID)); notice != "" {
+				// Bounded and detached: this runs INSIDE the poll loop, which handles
+				// updates serially, and the VK client has no timeout of its own — a hung
+				// messages.send would stop every chat. It fires on a broken deployment,
+				// where it would otherwise fire on every message.
+				sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), codexauth.NotifyTimeout)
+				r.notify(sendCtx, peerID, notice)
+				cancel()
 			}
 			return
 		}
-		r.authNotified.Clear()
+		// Clears the gate's registry when authorization is back.
+		r.auth.NoticeFor(chatIDStr(peerID))
 	}
 
 	if r.guards != nil {

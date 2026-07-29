@@ -4,6 +4,7 @@ package chat
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,14 +35,48 @@ func (r *countingRunner) calls() int64 { return r.n.Load() }
 type stubGate struct {
 	blocked atomic.Bool
 	n       atomic.Int64
+	told    stubTold
 }
 
-func (g *stubGate) BlockedNotice() (string, bool) {
-	g.n.Add(1)
-	if !g.blocked.Load() {
-		return "", false
+// stubTold mirrors the real gate's "told once per destination" registry.
+type stubTold struct {
+	mu   sync.Mutex
+	told map[string]bool
+}
+
+func (s *stubTold) Should(dest string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.told == nil {
+		s.told = map[string]bool{}
 	}
-	return gateNotice, true
+	if s.told[dest] {
+		return false
+	}
+	s.told[dest] = true
+	return true
+}
+
+func (s *stubTold) Clear() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clear(s.told)
+}
+
+func (g *stubGate) Blocked() bool {
+	g.n.Add(1)
+	return g.blocked.Load()
+}
+
+func (g *stubGate) NoticeFor(dest string) string {
+	if !g.blocked.Load() {
+		g.told.Clear()
+		return ""
+	}
+	if !g.told.Should(dest) {
+		return ""
+	}
+	return gateNotice
 }
 
 func (g *stubGate) calls() int64 { return g.n.Load() }
@@ -258,29 +293,23 @@ func TestNotifyResetIsProcessWide(t *testing.T) {
 	waitUntil(t, func() bool { return notices(c) == 2 })
 }
 
-// TestOnceNotifier covers the shared restraint directly: told once per
-// destination, everyone forgotten on Clear, and a nil notifier inert.
-func TestOnceNotifier(t *testing.T) {
-	n := NewOnceNotifier()
+// TestOneNoticeAcrossLayers is the composition regression the per-layer tests
+// could not see. The refusal reaches a chat from TWO places — core/chat refusing
+// a background submission, and an adapter answering a user's message — and each
+// layer used to keep its own "already told them" registry. Each was correct
+// alone; together they told one chat the same sentence twice, once for the
+// poller's refusal and once for the user's next message.
+func TestOneNoticeAcrossLayers(t *testing.T) {
+	c, gate := newFakeChat(), blockingGate()
+	s := gatedService(t, &countingRunner{}, c, gate, newFakePending())
 
-	if !n.Should("a") {
-		t.Error("first ask for a = false, want true")
-	}
-	if n.Should("a") {
-		t.Error("second ask for a = true, want false")
-	}
-	if !n.Should("b") {
-		t.Error("first ask for b = false; destinations are independent")
-	}
+	// The background path refuses first and explains.
+	s.Inject(testChatID, "a reviewer commented")
+	waitUntil(t, func() bool { return notices(c) == 1 })
 
-	n.Clear()
-	if !n.Should("a") {
-		t.Error("after Clear, a was still marked as told")
+	// The adapter path asks the SAME gate about the same chat, and must get nothing
+	// to send — this chat has already been told.
+	if notice := gate.NoticeFor(testChatID); notice != "" {
+		t.Errorf("the adapter would have repeated the notice: %q", notice)
 	}
-
-	var nilNotifier *OnceNotifier
-	if !nilNotifier.Should("a") {
-		t.Error("a nil notifier suppressed a notice; it must stay inert")
-	}
-	nilNotifier.Clear()
 }
