@@ -7,7 +7,7 @@ import "github.com/duckbugio/flock/core/chat"
 // slash-command UI, so these are plain text commands the receiver intercepts.
 const helpTitle = "Flock VK assistant — available commands:\n\n"
 
-// HelpText renders the usage message. withLogin adds the /login line, on the same
+// HelpText renders the usage message. login adds the /login line, on the same
 // condition that publishes /login in Telegram's command menu. It is an
 // engineering artifact (professional English, no duck flavor).
 func HelpText(login chat.LoginVisibility) string { return helpTitle + chat.HelpBody(login) }

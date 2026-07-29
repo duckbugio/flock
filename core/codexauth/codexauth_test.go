@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -734,4 +735,121 @@ func TestCancelIsPrivateOnly(t *testing.T) {
 	if reply := m.Dispatch(context.Background(), "cancel", dmSub); !strings.Contains(reply, "Cancelled") {
 		t.Errorf("direct-message cancel = %q, want it to work", reply)
 	}
+}
+
+// TestCancelLeavesNoPendingStateEvenOnTimeout is the state-machine regression.
+// The drain is reachable in normal operation — the login goroutine may be inside
+// a notice delivery, bounded by NotifyTimeout, which is longer than cancelDrain.
+// When that happened, Cancel cleared the cancel func but left the attempt marked
+// running: the next /login re-showed the code it had just killed, and the next
+// /login cancel answered "nothing is pending". The attempt is now detached before
+// any waiting, so a timeout leaves nothing behind.
+func TestCancelLeavesNoPendingStateEvenOnTimeout(t *testing.T) {
+	bin := fakeCodex(t, printBanner+"sleep 30\n")
+	m := NewManager(Config{
+		Backend:     BackendCodex,
+		AuthMode:    AuthSubscription,
+		RequireAuth: true,
+		Bin:         bin,
+		Home:        t.TempDir(),
+		Env:         []string{"PATH=" + os.Getenv("PATH")},
+	})
+	t.Cleanup(func() { m.Cancel() })
+
+	// A subscriber that takes the acknowledgement and then wedges on the prompt,
+	// standing in for a transport that drops into a 429 back-off. The login
+	// goroutine is thus stuck inside a delivery — which is what makes the drain
+	// reachable, since a delivery is bounded by NotifyTimeout, not by cancelDrain.
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	var delivered atomic.Int64
+	stuck := Subscriber{ID: "dm", Private: true, Notify: func(string) {
+		if delivered.Add(1) > 1 {
+			<-release
+		}
+	}}
+
+	m.Dispatch(context.Background(), "", stuck)
+	waitFor(t, func() bool { return delivered.Load() > 1 })
+
+	if !m.Cancel() {
+		t.Fatal("Cancel reported nothing pending")
+	}
+	if got := m.StatusText(); strings.Contains(got, "in progress") {
+		t.Errorf("StatusText = %q after Cancel; the attempt was left marked pending", got)
+	}
+	if m.Cancel() {
+		t.Error("a second Cancel found something pending")
+	}
+	// The decisive symptom: a fresh /login must not be answered with the dead code.
+	if got := m.Dispatch(context.Background(), "", dmSub); strings.Contains(got, "already pending") {
+		t.Errorf("a fresh /login after cancel = %q, want a new attempt", got)
+	}
+}
+
+// TestOutcomeGoesToTheAttemptThatProducedIt: the verdict is delivered to a
+// snapshot of THIS attempt's subscribers. Reading the live list instead let a
+// successor's chat receive the predecessor's failure — seconds after its own
+// "Starting the sign-in" — while the chat that actually ran it heard nothing.
+func TestOutcomeGoesToTheAttemptThatProducedIt(t *testing.T) {
+	m := NewManager(Config{
+		Backend:     BackendCodex,
+		AuthMode:    AuthSubscription,
+		RequireAuth: true,
+		Bin:         fakeCodex(t, printBanner+"sleep 30\n"),
+		Home:        t.TempDir(),
+		Env:         []string{"PATH=" + os.Getenv("PATH")},
+	})
+	t.Cleanup(func() { m.Cancel() })
+
+	first, second := newCollector(), newCollector()
+	m.Dispatch(context.Background(), "", first.sub("chat-a"))
+	first.awaitCode(t)
+
+	// Cancel detaches attempt A; B starts while A is still unwinding.
+	m.Cancel()
+	m.Dispatch(context.Background(), "", second.sub("chat-b"))
+
+	// A's cancellation reaches A, and never B.
+	found := false
+	for range 3 {
+		if strings.Contains(strings.ToLower(first.next(t)), "cancelled") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("the cancelled attempt's own chat never heard its outcome")
+	}
+	for _, text := range drain(second) {
+		if strings.Contains(strings.ToLower(text), "cancelled") {
+			t.Errorf("the successor's chat received the predecessor's verdict: %q", text)
+		}
+	}
+}
+
+// drain returns every notice delivered so far, without blocking.
+func drain(c *collector) []string {
+	var out []string
+	for {
+		select {
+		case text := <-c.ch:
+			out = append(out, text)
+		default:
+			return out
+		}
+	}
+}
+
+// waitFor polls cond until it holds or the test times out.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("condition not met before deadline")
 }

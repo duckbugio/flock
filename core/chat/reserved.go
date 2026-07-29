@@ -34,7 +34,7 @@ var ReservedCommands = []ReservedCommand{
 // to stay in step with, for the same reason as LoginHelpLine: two byte-identical
 // copies share a predicate, never their words, and drift in silence.
 //
-// withLogin adds the /login entry, on the same condition that publishes /login in
+// login adds the /login entry, on the same condition that publishes /login in
 // Telegram's command menu.
 func HelpBody(login LoginVisibility) string {
 	body := helpCommands

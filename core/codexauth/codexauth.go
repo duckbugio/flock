@@ -129,13 +129,27 @@ func (c Config) logger() *slog.Logger {
 type Manager struct {
 	cfg Config
 
-	mu      sync.Mutex
-	running bool
-	cancel  context.CancelFunc
-	last    Prompt
-	hasLast bool
-	subs    []Subscriber
-	done    chan struct{} // closed when the in-flight login goroutine has returned
+	mu sync.Mutex
+	// cur is the attempt in flight, nil when idle. Holding the whole attempt behind
+	// ONE pointer is what keeps the state machine honest: "is a login pending",
+	// "whose code is this", and "who is waiting to hear the outcome" are answers
+	// about one attempt, and swapping the pointer under the lock moves all of them
+	// at once. Kept as separate fields they could — and did — disagree: a Cancel
+	// that timed out cleared the cancel func but left the attempt marked running,
+	// so the next /login re-showed a code that had just been killed.
+	cur *session
+}
+
+// session is one device-login attempt. The run goroutine owns its lifetime; every
+// field is guarded by Manager.mu.
+type session struct {
+	cancel context.CancelFunc
+	done   chan struct{} // closed when this attempt's goroutine has returned
+	// prompt is the verification link and one-time code, once issued.
+	prompt    Prompt
+	hasPrompt bool
+	// subs are the destinations waiting on THIS attempt's outcome.
+	subs []Subscriber
 }
 
 // NewManager returns a Manager for cfg.
@@ -227,15 +241,22 @@ func (m *Manager) statusText(private bool) string {
 		return m.notApplicableText()
 	}
 	m.mu.Lock()
-	running, last, hasLast := m.running, m.last, m.hasLast
+	cur := m.cur
+	var (
+		prompt    Prompt
+		hasPrompt bool
+	)
+	if cur != nil {
+		prompt, hasPrompt = cur.prompt, cur.hasPrompt
+	}
 	m.mu.Unlock()
 
 	switch {
-	case running && hasLast && !private:
+	case cur != nil && hasPrompt && !private:
 		return pendingElsewhereText
-	case running && hasLast:
-		return "Codex device login is in progress — finish it in the browser:\n\n" + promptText(last)
-	case running:
+	case cur != nil && hasPrompt:
+		return "Codex device login is in progress — finish it in the browser:\n\n" + promptText(prompt)
+	case cur != nil:
 		return "Codex device login is starting; the link and code arrive in a moment."
 	case m.cfg.HasAccessToken:
 		return "Codex is authorized with a configured access token. No browser login needed."
@@ -381,12 +402,12 @@ func (m *Manager) start(base context.Context, force bool, sub Subscriber) string
 		return LoginPrivateOnlyText
 	}
 	m.mu.Lock()
-	if m.running {
-		m.subscribeLocked(sub)
-		last, hasLast := m.last, m.hasLast
+	if cur := m.cur; cur != nil {
+		subscribeLocked(cur, sub)
+		prompt, hasPrompt := cur.prompt, cur.hasPrompt
 		m.mu.Unlock()
-		if hasLast {
-			return "A Codex login is already pending — finish this one:\n\n" + promptText(last)
+		if hasPrompt {
+			return "A Codex login is already pending — finish this one:\n\n" + promptText(prompt)
 		}
 		return "A Codex login is already starting; the link and code arrive in a moment."
 	}
@@ -400,15 +421,11 @@ func (m *Manager) start(base context.Context, force bool, sub Subscriber) string
 
 	// context.WithoutCancel: the login must survive the update whose handler
 	// started it. The timeout is the real bound.
+	//nolint:gosec // G118: cancel is owned by the session — run defers it, Cancel calls it.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(base), m.cfg.timeout())
-	done := make(chan struct{})
-	m.running = true
-	m.cancel = cancel
-	m.done = done
-	m.hasLast = false
-	m.last = Prompt{}
-	m.subs = nil
-	m.subscribeLocked(sub)
+	cur := &session{cancel: cancel, done: make(chan struct{})}
+	subscribeLocked(cur, sub)
+	m.cur = cur
 	m.mu.Unlock()
 
 	// Delivered through the SAME channel as every later notice, and BEFORE the run
@@ -417,7 +434,7 @@ func (m *Manager) start(base context.Context, force bool, sub Subscriber) string
 	// out first, so the user read "the code arrives in a moment" underneath the
 	// code that had already arrived.
 	reply := m.ack(sub, "Starting the Codex sign-in — the link and one-time code arrive in a moment.")
-	go m.run(ctx, cancel, done)
+	go m.run(ctx, cur)
 	return reply
 }
 
@@ -433,106 +450,122 @@ func (m *Manager) ack(sub Subscriber, text string) string {
 	return ""
 }
 
-// subscribeLocked adds sub to the pending login's notice list, collapsing a
-// destination that is already subscribed. The caller must hold m.mu. Only
-// private destinations subscribe: the broadcast carries the one-time code.
-func (m *Manager) subscribeLocked(sub Subscriber) {
+// subscribeLocked adds sub to this attempt's notice list, collapsing a
+// destination that is already subscribed. The caller must hold Manager.mu. Only
+// private destinations subscribe: the notices carry the one-time code.
+func subscribeLocked(s *session, sub Subscriber) {
 	if sub.Notify == nil || !sub.Private {
 		return
 	}
-	for _, existing := range m.subs {
+	for _, existing := range s.subs {
 		if existing.ID == sub.ID {
 			return
 		}
 	}
-	m.subs = append(m.subs, sub)
+	s.subs = append(s.subs, sub)
 }
 
-// broadcast delivers text to every current subscriber. The list is copied under
-// the lock so a delivery (which does network I/O) never holds it.
-func (m *Manager) broadcast(text string) {
+// subscribers snapshots this attempt's destinations, so a delivery (which does
+// network I/O) never holds the lock.
+func (m *Manager) subscribers(s *session) []Subscriber {
 	m.mu.Lock()
-	subs := append([]Subscriber(nil), m.subs...)
-	m.mu.Unlock()
+	defer m.mu.Unlock()
+	return append([]Subscriber(nil), s.subs...)
+}
+
+// deliverAll sends text to every destination in subs.
+func deliverAll(subs []Subscriber, text string) {
 	for _, sub := range subs {
 		sub.deliver(text)
 	}
 }
 
-// run drives one login attempt and reports its result to every subscriber.
-// Closing done is what lets Cancel wait for the child to actually be gone.
-func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, done chan struct{}) {
-	defer close(done)
-	defer cancel()
+// run drives one login attempt and reports its result to the destinations waiting
+// on THAT attempt. Closing s.done is what lets Cancel wait for the goroutine to
+// unwind.
+func (m *Manager) run(ctx context.Context, s *session) {
+	defer close(s.done)
+	defer s.cancel()
 	log := m.cfg.logger()
 
 	err := Login(ctx, m.cfg, func(p Prompt) {
 		m.mu.Lock()
-		m.last, m.hasLast = p, true
+		s.prompt, s.hasPrompt = p, true
 		m.mu.Unlock()
 		log.Info("codex device login prompt issued", "url", p.URL, "expires_in", p.ExpiresIn)
-		m.broadcast(promptText(p))
+		deliverAll(m.subscribers(s), promptText(p))
 	})
 
+	// Detach and snapshot in ONE critical section, and only if this attempt is
+	// still the current one. A cancelled attempt has already been detached, and a
+	// successor may be running by now: without the identity check this would clear
+	// the successor's state, and without the snapshot the verdict below would be
+	// delivered to whoever is subscribed at that instant — the successor's chat
+	// reading a failure as its own, the original never hearing its outcome.
 	m.mu.Lock()
-	m.running = false
-	m.cancel = nil
-	m.done = nil
+	if m.cur == s {
+		m.cur = nil
+	}
+	subs := append([]Subscriber(nil), s.subs...)
 	m.mu.Unlock()
 
-	if err == nil {
-		// A clean exit is necessary but not sufficient: what actually authorizes the
-		// deployment is the credential on disk, and that is what the run gate reads.
-		// Announcing success on the exit code alone would tell the user they are
-		// signed in and then refuse their very next message.
-		if !m.CredentialsPresent() {
-			log.Error("codex login exited cleanly but persisted no credential", "codex_home", m.cfg.Home)
-			m.broadcast("The Codex CLI finished the sign-in but saved no credential in " + m.cfg.Home + ".\n\n" +
-				"Check that the directory is writable, then send /login to try again.")
-			return
-		}
-		log.Info("codex device login succeeded", "codex_home", m.cfg.Home)
-		m.broadcast("Codex is authorized. Send your next message and the team gets to work.")
-		return
-	}
-	log.Warn("codex device login failed", "error", err)
-	m.broadcast(failureText(err))
+	deliverAll(subs, m.outcome(err, log))
 }
 
-// cancelDrain bounds how long Cancel waits for the login child to be reaped.
-// Login signals the process GROUP and escalates to SIGKILL after killGrace, so
-// the real wait is milliseconds; the bound only stops shutdown from hanging on a
-// pathological child.
+// outcome turns a finished attempt into the text its subscribers are told, and
+// logs it.
+func (m *Manager) outcome(err error, log *slog.Logger) string {
+	if err != nil {
+		log.Warn("codex device login failed", "error", err)
+		return failureText(err)
+	}
+	// A clean exit is necessary but not sufficient: what actually authorizes the
+	// deployment is the credential on disk, and that is what the run gate reads.
+	// Announcing success on the exit code alone would tell the user they are
+	// signed in and then refuse their very next message.
+	if !m.CredentialsPresent() {
+		log.Error("codex login exited cleanly but persisted no credential", "codex_home", m.cfg.Home)
+		return "The Codex CLI finished the sign-in but saved no credential in " + m.cfg.Home + ".\n\n" +
+			"Check that the directory is writable, then send /login to try again."
+	}
+	log.Info("codex device login succeeded", "codex_home", m.cfg.Home)
+	return "Codex is authorized. Send your next message and the team gets to work."
+}
+
+// cancelDrain bounds how long Cancel waits for the login goroutine to unwind.
 const cancelDrain = 5 * time.Second
 
 // Cancel aborts a pending login, reporting whether there was one.
 //
-// It WAITS for the login goroutine to return rather than just cancelling its
-// context. Two things depend on that. On shutdown, `defer auth.Cancel()` is the
-// only thing that ends a login deliberately detached from every request context
-// — returning before the child is signalled and reaped would leave an orphaned
-// polling process, which is exactly what the defer exists to prevent. And a
-// /login issued right after a cancel must not be answered with "already pending"
-// plus a code that is already dead.
+// The attempt is detached IMMEDIATELY, before any waiting: from the caller's next
+// instruction the Manager is idle, so a /login that follows starts fresh instead
+// of being answered "already pending" with the code just killed. The wait that
+// follows is only for the goroutine to finish unwinding, and a timeout is
+// therefore harmless — there is no state left to be inconsistent. That matters
+// because the wait is genuinely reachable: the goroutine may be inside a notice
+// delivery, which is bounded by NotifyTimeout, longer than cancelDrain.
+//
+// Killing the child does NOT depend on that wait either: cancelling the context
+// makes Login signal the whole process group at once (SIGTERM, SIGKILL after
+// killGrace). So `defer auth.Cancel()` on shutdown still guarantees no orphaned
+// polling process, even when the drain times out.
 func (m *Manager) Cancel() bool {
 	if m == nil {
 		return false
 	}
 	m.mu.Lock()
-	if !m.running || m.cancel == nil {
+	s := m.cur
+	if s == nil {
 		m.mu.Unlock()
 		return false
 	}
-	cancel, done := m.cancel, m.done
-	m.cancel = nil
+	m.cur = nil
 	m.mu.Unlock()
 
-	cancel()
-	if done != nil {
-		select {
-		case <-done:
-		case <-time.After(cancelDrain):
-		}
+	s.cancel()
+	select {
+	case <-s.done:
+	case <-time.After(cancelDrain):
 	}
 	return true
 }
