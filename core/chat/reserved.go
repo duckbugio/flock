@@ -25,7 +25,7 @@ var ReservedCommands = []ReservedCommand{
 	{Name: "stop", Description: "Stop the run currently in progress"},
 	{Name: "schedule", Description: "Manage scheduled jobs"},
 	{Name: "goal", Description: "Arm a goal an independent evaluator re-checks after every run"},
-	{Name: "login", Description: "Sign in to Codex on a subscription (other backends need no login)"},
+	{Name: "login", Description: "Sign in to Codex on a subscription (send it in a direct message)"},
 }
 
 // HelpBody is the shared body of both adapters' /help: the command list and the
@@ -84,7 +84,8 @@ const helpTail = "\nSend any other message to run it through the assistant."
 // applicability predicate, not the words. Adapters append it only when an
 // interactive sign-in exists, the same condition that publishes /login in
 // Telegram's command menu.
-const LoginHelpLine = "/login — sign in to Codex on a subscription (/login status, /login cancel)\n"
+const LoginHelpLine = "/login — sign in to Codex on a subscription; send it in a direct message " +
+	"(/login status, /login cancel)\n"
 
 // IsReservedCommand reports whether name is one of the bot's reserved commands.
 // The match is case-insensitive (name is normalized to lower case) and exact:

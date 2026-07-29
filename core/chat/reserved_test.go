@@ -115,3 +115,20 @@ func TestHelpBodyIsTheSharedSource(t *testing.T) {
 		}
 	}
 }
+
+// TestLoginHelpLineNamesTheDirectMessageRequirement: this line is rendered in
+// group chats and published in Telegram's global command menu, so the one
+// requirement that decides whether the command works at all belongs in it.
+func TestLoginHelpLineNamesTheDirectMessageRequirement(t *testing.T) {
+	if !strings.Contains(chat.LoginHelpLine, "direct message") {
+		t.Errorf("LoginHelpLine = %q, want the direct-message requirement", chat.LoginHelpLine)
+	}
+	for _, c := range chat.ReservedCommands {
+		if c.Name != "login" {
+			continue
+		}
+		if !strings.Contains(c.Description, "direct message") {
+			t.Errorf("the menu description %q omits the direct-message requirement", c.Description)
+		}
+	}
+}

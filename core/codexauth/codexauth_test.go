@@ -274,12 +274,17 @@ func TestDispatchReshowsPendingPrompt(t *testing.T) {
 	m.Dispatch(context.Background(), "", c.sub("chat-1"))
 	c.awaitCode(t)
 
-	again := m.Dispatch(context.Background(), "", c.sub("chat-1"))
-	if !strings.Contains(again, "XER9-NWCA2") {
-		t.Errorf("second /login = %q, want the pending code re-shown", again)
+	// The re-show goes through the subscriber (so a broadcast cannot overtake it),
+	// which is why Dispatch itself returns nothing for the adapter to send.
+	if again := m.Dispatch(context.Background(), "", c.sub("chat-1")); again != "" {
+		t.Errorf("second /login returned %q, want it delivered through the subscriber", again)
 	}
-	if !strings.Contains(again, "already pending") {
-		t.Errorf("second /login = %q, want it to say a login is already pending", again)
+	reshow := c.next(t)
+	if !strings.Contains(reshow, deviceCode) {
+		t.Errorf("re-show = %q, want the pending code", reshow)
+	}
+	if !strings.Contains(reshow, "already pending") {
+		t.Errorf("re-show = %q, want it to say a login is already pending", reshow)
 	}
 
 	//nolint:gosec // the path is a test-owned temp file
@@ -567,10 +572,12 @@ func TestEveryAskerLearnsTheOutcome(t *testing.T) {
 	m.Dispatch(context.Background(), "", first.sub("chat-1"))
 	first.awaitCode(t)
 
-	// A different chat asks while the login is pending.
-	if again := m.Dispatch(context.Background(), "", second.sub("chat-2")); !strings.Contains(again, "XER9-NWCA2") {
-		t.Fatalf("second /login = %q, want the pending code re-shown", again)
+	// A different chat asks while the login is pending and is re-shown the code
+	// through its own subscription.
+	if again := m.Dispatch(context.Background(), "", second.sub("chat-2")); again != "" {
+		t.Fatalf("second /login returned %q, want it delivered through the subscriber", again)
 	}
+	second.awaitCode(t)
 
 	for name, c := range map[string]*collector{"starter": first, "joiner": second} {
 		if got := c.next(t); !strings.Contains(strings.ToLower(got), "authorized") {
@@ -595,7 +602,10 @@ func TestTheSameChatAskingTwiceIsNotToldTwice(t *testing.T) {
 	c := newCollector()
 	m.Dispatch(context.Background(), "", c.sub("chat-1"))
 	c.awaitCode(t)
+	// Asking again re-shows the code to the asker — that is what asking is for —
+	// but must not double every notice that FOLLOWS.
 	m.Dispatch(context.Background(), "", c.sub("chat-1"))
+	c.awaitCode(t)
 
 	if got := c.next(t); !strings.Contains(strings.ToLower(got), "authorized") {
 		t.Fatalf("final notice = %q, want the success confirmation", got)
@@ -852,4 +862,88 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("condition not met before deadline")
+}
+
+// TestSilenceWithoutACodeIsReported guards against the package's own failure
+// mode returning by the back door. If the parser never pairs a URL with a code —
+// a changed banner, a code printed with an unexpected prefix — the user would
+// read "the link and one-time code arrive in a moment" and then hear nothing for
+// DeviceCodeTTL. That is "it just hangs" with friendlier wording, and it is the
+// symptom this package exists to remove.
+func TestSilenceWithoutACodeIsReported(t *testing.T) {
+	restore := promptWarnAfter
+	promptWarnAfter = 50 * time.Millisecond
+	t.Cleanup(func() { promptWarnAfter = restore })
+
+	// A CLI that prints something unparseable and then polls, as a drifted banner
+	// would.
+	bin := fakeCodex(t, "echo 'signing you in, please hold'\nsleep 30\n")
+	m := NewManager(Config{
+		Backend:     BackendCodex,
+		AuthMode:    AuthSubscription,
+		RequireAuth: true,
+		Bin:         bin,
+		Home:        t.TempDir(),
+		Env:         []string{"PATH=" + os.Getenv("PATH")},
+	})
+	t.Cleanup(func() { m.Cancel() })
+
+	c := newCollector()
+	m.Dispatch(context.Background(), "", c.sub("dm"))
+	if ack := c.next(t); !strings.Contains(ack, "Starting") {
+		t.Fatalf("first notice = %q, want the acknowledgement", ack)
+	}
+
+	got := c.next(t)
+	if !strings.Contains(got, "hasn't printed a sign-in code") {
+		t.Errorf("notice = %q, want the no-code warning", got)
+	}
+	if !strings.Contains(got, "/login cancel") {
+		t.Errorf("notice = %q, want it to name the way out", got)
+	}
+}
+
+// TestNoSilenceWarningOnceTheCodeArrives: the guard must stay quiet on the happy
+// path, or every login would carry a spurious "no code yet".
+func TestNoSilenceWarningOnceTheCodeArrives(t *testing.T) {
+	restore := promptWarnAfter
+	promptWarnAfter = 50 * time.Millisecond
+	t.Cleanup(func() { promptWarnAfter = restore })
+
+	m := NewManager(Config{
+		Backend:     BackendCodex,
+		AuthMode:    AuthSubscription,
+		RequireAuth: true,
+		Bin:         fakeCodex(t, printBanner+"sleep 30\n"),
+		Home:        t.TempDir(),
+		Env:         []string{"PATH=" + os.Getenv("PATH")},
+	})
+	t.Cleanup(func() { m.Cancel() })
+
+	c := newCollector()
+	m.Dispatch(context.Background(), "", c.sub("dm"))
+	c.awaitCode(t)
+
+	select {
+	case extra := <-c.ch:
+		t.Errorf("a warning fired after the code arrived: %q", extra)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestBlockedNoticePointsAtADirectMessage: the run gate cannot see the
+// destination, so the notice it sends must be correct in a group too — telling a
+// user to send /login where it will be refused earns them two refusals in a row,
+// possibly in the only chat they use with the bot.
+func TestBlockedNoticePointsAtADirectMessage(t *testing.T) {
+	m := NewManager(Config{
+		Backend: BackendCodex, AuthMode: AuthSubscription, RequireAuth: true, Home: t.TempDir(),
+	})
+	notice, blocked := m.BlockedNotice()
+	if !blocked {
+		t.Fatal("BlockedNotice reported no block while unauthorized")
+	}
+	if !strings.Contains(notice, "direct message") {
+		t.Errorf("notice = %q, want it to name where /login is accepted", notice)
+	}
 }

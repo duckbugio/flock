@@ -219,8 +219,12 @@ func (m *Manager) BlockedNotice() (string, bool) {
 	if m == nil || m.Authorized() {
 		return "", false
 	}
+	// "in a direct message", because that is where the command will be accepted:
+	// this gate cannot see the destination, and sending the user to /login in a
+	// group would only earn them a second refusal — possibly in the only chat they
+	// use with the bot.
 	return "Codex is not authorized yet, so I can't run anything.\n\n" +
-		"Send /login and I'll walk you through the one-time browser sign-in.", true
+		"Send /login in a direct message with me and I'll walk you through the one-time browser sign-in.", true
 }
 
 // NoLoginNeededText is the reply when this deployment has no interactive login
@@ -406,10 +410,14 @@ func (m *Manager) start(base context.Context, force bool, sub Subscriber) string
 		subscribeLocked(cur, sub)
 		prompt, hasPrompt := cur.prompt, cur.hasPrompt
 		m.mu.Unlock()
+		// Through ack for the same reason the fresh-start branch below uses it: this
+		// caller is already subscribed (a line above), so a reply the ADAPTER sends
+		// can be overtaken by a broadcast — leaving "the code arrives in a moment"
+		// sitting under a code that already arrived.
 		if hasPrompt {
-			return "A Codex login is already pending — finish this one:\n\n" + promptText(prompt)
+			return m.ack(sub, "A Codex login is already pending — finish this one:\n\n"+promptText(prompt))
 		}
-		return "A Codex login is already starting; the link and code arrive in a moment."
+		return m.ack(sub, "A Codex login is already starting; the link and code arrive in a moment.")
 	}
 	// CredentialsPresent, not Authorized: with CODEX_REQUIRE_AUTH=false the policy
 	// answer is always "authorized", which would make /login unusable on exactly
@@ -488,11 +496,32 @@ func (m *Manager) run(ctx context.Context, s *session) {
 	defer s.cancel()
 	log := m.cfg.logger()
 
+	// Guard against the very symptom this package exists to remove. If the parser
+	// never pairs a URL with a code — a changed banner, a code printed with an
+	// unexpected prefix — the user would otherwise read "the link and one-time code
+	// arrive in a moment" and then hear nothing for DeviceCodeTTL, which is exactly
+	// "it just hangs" wearing a friendlier hat. Say so instead, and name the way out.
+	warn := time.AfterFunc(promptWarnAfter, func() {
+		m.mu.Lock()
+		silent := m.cur == s && !s.hasPrompt
+		subs := append([]Subscriber(nil), s.subs...)
+		m.mu.Unlock()
+		if !silent {
+			return
+		}
+		log.Warn("codex printed no device-login code yet", "after", promptWarnAfter)
+		deliverAll(subs, noPromptYetText)
+	})
+	defer warn.Stop()
+
 	err := Login(ctx, m.cfg, func(p Prompt) {
 		m.mu.Lock()
 		s.prompt, s.hasPrompt = p, true
 		m.mu.Unlock()
-		log.Info("codex device login prompt issued", "url", p.URL, "expires_in", p.ExpiresIn)
+		// No URL: it pairs with the code, which is why redact strips it from captured
+		// output. Codex may also start emitting verification_uri_complete, which
+		// embeds the code in the link itself.
+		log.Info("codex device login prompt issued", "expires_in", p.ExpiresIn)
 		deliverAll(m.subscribers(s), promptText(p))
 	})
 
@@ -531,6 +560,14 @@ func (m *Manager) outcome(err error, log *slog.Logger) string {
 	log.Info("codex device login succeeded", "codex_home", m.cfg.Home)
 	return "Codex is authorized. Send your next message and the team gets to work."
 }
+
+// promptWarnAfter is how long the CLI may stay silent before the user is told
+// that no code has appeared. A variable so tests need not wait it out.
+var promptWarnAfter = 45 * time.Second
+
+// noPromptYetText reports a sign-in that has produced no code yet.
+const noPromptYetText = "The Codex CLI still hasn't printed a sign-in code.\n\n" +
+	"It may just be slow to start. If nothing arrives shortly, /login cancel stops it and /login tries again."
 
 // cancelDrain bounds how long Cancel waits for the login goroutine to unwind.
 const cancelDrain = 5 * time.Second
