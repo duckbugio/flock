@@ -350,38 +350,40 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 	// or an unsupported attachment is dropped silently further down, and answering
 	// those with "not authorized" spends rate limit to tell the user about work they
 	// never asked for.
-	if notice, blocked := r.auth.BlockedNotice(); blocked && r.hasWork(cleaned, msg) {
+	text := strings.TrimSpace(cleaned)
+	// Decided ONCE, and used by both the gate and the dispatch below. Two
+	// independent condition lists would agree only until the next attachment type is
+	// added: the new branch would run, but the gate would not know about it, so an
+	// unauthorized deploy would drop that message silently instead of pointing at
+	// /login.
+	kind := r.workKind(text, msg)
+
+	if notice, blocked := r.auth.BlockedNotice(); blocked && kind != workNone {
 		r.logger.Debug("vk: codex unauthorized — blocking run", "peer_id", peerID)
 		r.notify(ctx, peerID, notice)
 		return
 	}
 
-	text := strings.TrimSpace(cleaned)
-
-	// Voice: transcribe the first audio_message attachment (gate already passed, so
-	// we only pay for transcription on an accepted message).
-	if att := firstAudioMessage(msg.Attachments); att != nil && r.voice != nil && text == "" {
-		r.handleVoice(ctx, msg, att)
+	switch kind {
+	case workNone:
 		return
-	}
-
-	// Inbound document / photo: save to the per-chat uploads dir (outside every git
-	// tree) and submit a run referencing the saved path (a photo also attaches a
-	// vision content block).
-	if r.uploads != nil {
-		if doc := firstDoc(msg.Attachments); doc != nil {
-			r.handleDocument(ctx, msg, doc, text)
-			return
-		}
-		if ph := firstPhoto(msg.Attachments); ph != nil {
-			r.handlePhoto(ctx, msg, ph, text)
-			return
-		}
-	}
-
-	if text == "" {
+	case workVoice:
+		// Transcribe the first audio_message attachment (gate already passed, so we
+		// only pay for transcription on an accepted message).
+		r.handleVoice(ctx, msg, firstAudioMessage(msg.Attachments))
 		return
+	case workDoc:
+		// Save to the per-chat uploads dir (outside every git tree) and submit a run
+		// referencing the saved path.
+		r.handleDocument(ctx, msg, firstDoc(msg.Attachments), text)
+		return
+	case workPhoto:
+		// As workDoc, and the run also carries a vision content block.
+		r.handlePhoto(ctx, msg, firstPhoto(msg.Attachments), text)
+		return
+	case workText:
 	}
+
 	// Fold any quoted/replied-to/forwarded original into the prompt so the run sees
 	// the context the user is referring to, not just their new text. QuotedPrompt is
 	// a strict no-op when there is no quote, so a normal message stays unchanged.
@@ -390,17 +392,39 @@ func (r *Receiver) onMessageNew(ctx context.Context, msg messageObject) {
 	r.svc.Handle(ctx, chatIDStr(peerID), msg.FromID, msgIDStr(msg.ConversationMessageID), text)
 }
 
-// hasWork reports whether this message carries something the receiver would
-// actually submit: text (after the mention gate stripped the address), a voice
-// note to transcribe, or an attachment to save. It mirrors the branches below.
-func (r *Receiver) hasWork(cleaned string, msg messageObject) bool {
-	if strings.TrimSpace(cleaned) != "" {
-		return true
+// workKind names what an accepted message would submit. workNone means the
+// receiver would drop it, which is also what decides whether the unauthorized
+// notice is worth sending.
+type workKind int
+
+const (
+	workNone workKind = iota
+	workText
+	workVoice
+	workDoc
+	workPhoto
+)
+
+// workKind classifies an accepted message. text is the mention-stripped, trimmed
+// body. The precedence is the dispatch order: a voice note counts only while
+// there is no text to run instead, and attachments only when an uploader is
+// configured.
+func (r *Receiver) workKind(text string, msg messageObject) workKind {
+	if text == "" && r.voice != nil && firstAudioMessage(msg.Attachments) != nil {
+		return workVoice
 	}
-	if r.voice != nil && firstAudioMessage(msg.Attachments) != nil {
-		return true
+	if r.uploads != nil {
+		if firstDoc(msg.Attachments) != nil {
+			return workDoc
+		}
+		if firstPhoto(msg.Attachments) != nil {
+			return workPhoto
+		}
 	}
-	return r.uploads != nil && (firstDoc(msg.Attachments) != nil || firstPhoto(msg.Attachments) != nil)
+	if text != "" {
+		return workText
+	}
+	return workNone
 }
 
 // dispatchReserved acts on a reserved command (caller already confirmed the name
@@ -456,6 +480,16 @@ func (r *Receiver) dispatchReserved(ctx context.Context, name string, msg messag
 // long gone by the time a user finishes in a browser.
 func (r *Receiver) dispatchLogin(ctx context.Context, msg messageObject) {
 	peerID := msg.PeerID
+	// One bounded, detached sender for BOTH paths. This handler runs on its own
+	// goroutine, so the poll loop's context may be cancelled while it is still
+	// working — on the raw context the replies to /login status, /login cancel and
+	// the direct-message refusal would be dropped silently at shutdown, and none of
+	// them would carry a deadline of its own.
+	notify := func(text string) {
+		sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), codexauth.NotifyTimeout)
+		defer cancel()
+		r.notify(sendCtx, peerID, text)
+	}
 	sub := codexauth.Subscriber{
 		ID: chatIDStr(peerID),
 		// VK states the 1:1 invariant directly in the update: in a direct message the
@@ -463,15 +497,11 @@ func (r *Receiver) dispatchLogin(ctx context.Context, msg messageObject) {
 		// every non-conversation peer private, community peers included — too loose a
 		// test for a flag that decides who may take over the bot's account.
 		Private: peerID == msg.FromID,
-		Notify: func(text string) {
-			sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), codexauth.NotifyTimeout)
-			defer cancel()
-			r.notify(sendCtx, peerID, text)
-		},
+		Notify:  notify,
 	}
 	// An empty reply means Dispatch already delivered it through sub, in order.
 	if reply := r.auth.Dispatch(ctx, commandArgs(msg.Text), sub); reply != "" {
-		r.notify(ctx, peerID, reply)
+		notify(reply)
 	}
 }
 

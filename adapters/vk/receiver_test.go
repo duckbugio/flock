@@ -127,18 +127,29 @@ func (n *fakeNotice) seen() []string {
 	return append([]string(nil), n.texts...)
 }
 
-// await waits for at least one notice to arrive and returns everything seen.
-func (n *fakeNotice) await(t *testing.T) []string {
+// awaitOne waits for exactly ONE notice and fails if a second arrives.
+//
+// Returning on the FIRST notice would have made every "exactly one" assertion
+// mean "at least one": a second message almost never lands before the snapshot is
+// read. That matters most for the privacy regressions here — they look for the
+// device code in notice [0], so an implementation that also broadcast it to the
+// conversation as a second message would keep them green.
+func (n *fakeNotice) awaitOne(t *testing.T) []string {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if got := n.seen(); len(got) > 0 {
-			return got
-		}
+	for time.Now().Before(deadline) && len(n.seen()) == 0 {
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatal("no notice arrived")
-	return nil
+	got := n.seen()
+	if len(got) != 1 {
+		t.Fatalf("got %d notices, want 1: %v", len(got), got)
+	}
+	// Give a stray second a chance to show up, so "exactly one" means it.
+	time.Sleep(50 * time.Millisecond)
+	if extra := n.seen(); len(extra) != 1 {
+		t.Fatalf("got %d notices, want 1: %v", len(extra), extra)
+	}
+	return got
 }
 
 // newTestReceiver builds a Receiver wired to the fakes, allowing user 42, group
@@ -714,8 +725,8 @@ func TestReceiverLoginCommandStaysReachableWhileUnauthorized(t *testing.T) {
 	if len(svc.handleCalls) != 0 {
 		t.Errorf("/login should not start a run, got %d Handle calls", len(svc.handleCalls))
 	}
-	if len(notices.await(t)) != 1 || !strings.Contains(notices.await(t)[0], "NOT authorized") {
-		t.Errorf("notices = %v, want the login status reply", notices.seen())
+	if got := notices.awaitOne(t); !strings.Contains(got[0], "NOT authorized") {
+		t.Errorf("notices = %v, want the login status reply", got)
 	}
 }
 
@@ -728,8 +739,8 @@ func TestReceiverLoginWithoutManagerIsInert(t *testing.T) {
 	r := newTestReceiver(svc, notices, false, nil)
 
 	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 42, Text: "/login"}))
-	if len(notices.await(t)) != 1 || notices.await(t)[0] != codexauth.NoLoginNeededText {
-		t.Errorf("notices = %v, want the no-login-needed reply", notices.seen())
+	if got := notices.awaitOne(t); got[0] != codexauth.NoLoginNeededText {
+		t.Errorf("notices = %v, want the no-login-needed reply", got)
 	}
 
 	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 200, Text: "build it"}))
@@ -750,10 +761,11 @@ func TestReceiverLoginRefusedInConversation(t *testing.T) {
 	// 2000000000+ is VK's conversation (chat) peer range.
 	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 2000000001, Text: "/login"}))
 
-	if len(notices.await(t)) != 1 || !strings.Contains(notices.await(t)[0], "direct message") {
-		t.Fatalf("notices = %v, want the refusal pointing at a direct message", notices.seen())
+	got := notices.awaitOne(t)
+	if !strings.Contains(got[0], "direct message") {
+		t.Fatalf("notices = %v, want the refusal pointing at a direct message", got)
 	}
-	if strings.Contains(notices.await(t)[0], "http") {
+	if strings.Contains(got[0], "http") {
 		t.Error("the refusal leaked a link into the conversation")
 	}
 }
@@ -772,14 +784,12 @@ func TestReceiverLoginStatusInConversationHidesAPendingCode(t *testing.T) {
 		FromID: 42, PeerID: 2000000001, Text: "/login status",
 	}))
 
-	if len(notices.await(t)) != 1 {
-		t.Fatalf("notices = %v, want exactly one", notices.seen())
+	got := notices.awaitOne(t)
+	if strings.Contains(got[0], codexauthtest.DeviceCode) || strings.Contains(got[0], "http") {
+		t.Errorf("the pending code or link reached a conversation: %q", got[0])
 	}
-	if strings.Contains(notices.await(t)[0], codexauthtest.DeviceCode) || strings.Contains(notices.await(t)[0], "http") {
-		t.Errorf("the pending code or link reached a conversation: %q", notices.await(t)[0])
-	}
-	if !strings.Contains(notices.await(t)[0], "in progress") {
-		t.Errorf("status = %q, want it to still report the pending sign-in", notices.await(t)[0])
+	if !strings.Contains(got[0], "in progress") {
+		t.Errorf("status = %q, want it to still report the pending sign-in", got[0])
 	}
 }
 
@@ -793,8 +803,8 @@ func TestReceiverLoginStatusInDirectMessageShowsTheCode(t *testing.T) {
 
 	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 42, Text: "/login status"}))
 
-	if len(notices.await(t)) != 1 || !strings.Contains(notices.await(t)[0], codexauthtest.DeviceCode) {
-		t.Errorf("notices = %v, want the pending code re-shown in a direct message", notices.seen())
+	if got := notices.awaitOne(t); !strings.Contains(got[0], codexauthtest.DeviceCode) {
+		t.Errorf("notices = %v, want the pending code re-shown in a direct message", got)
 	}
 }
 
@@ -856,12 +866,10 @@ func TestPrivacyFollowsTheDirectMessageInvariant(t *testing.T) {
 				FromID: tt.fromID, PeerID: tt.peerID, Text: "/login status",
 			}))
 
-			if len(notices.await(t)) != 1 {
-				t.Fatalf("notices = %v, want exactly one", notices.seen())
-			}
-			got := strings.Contains(notices.await(t)[0], codexauthtest.DeviceCode)
+			shown := notices.awaitOne(t)
+			got := strings.Contains(shown[0], codexauthtest.DeviceCode)
 			if got != tt.wantsCode {
-				t.Errorf("code shown = %v, want %v (reply: %q)", got, tt.wantsCode, notices.await(t)[0])
+				t.Errorf("code shown = %v, want %v (reply: %q)", got, tt.wantsCode, notices.awaitOne(t)[0])
 			}
 		})
 	}
@@ -906,7 +914,7 @@ func TestRealMessagesStillGetTheUnauthorizedNotice(t *testing.T) {
 
 	r.dispatch(context.Background(), msgNewUpdate(t, messageObject{FromID: 42, PeerID: 42, Text: "build it"}))
 
-	if got := notices.await(t); !strings.Contains(got[0], "/login") {
+	if got := notices.awaitOne(t); !strings.Contains(got[0], "/login") {
 		t.Errorf("notice = %q, want it to point at /login", got[0])
 	}
 }
@@ -931,5 +939,33 @@ func TestLoginDoesNotBlockThePollLoop(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("dispatch blocked on /login; the poll loop would stall with it")
 	}
-	notices.await(t)
+	notices.awaitOne(t)
+}
+
+// TestWorkKindDrivesBothGateAndDispatch pins the single decision: whatever the
+// receiver would submit is exactly what the unauthorized gate answers about. Two
+// independent condition lists would agree only until the next attachment type is
+// added to the dispatch switch.
+func TestWorkKindDrivesBothGateAndDispatch(t *testing.T) {
+	r := newTestReceiver(&fakeService{}, &fakeNotice{}, false, nil)
+	r.uploads = nil
+	r.voice = nil
+
+	tests := []struct {
+		name string
+		text string
+		msg  messageObject
+		want workKind
+	}{
+		{"plain text", "build it", messageObject{}, workText},
+		{"nothing at all", "", messageObject{}, workNone},
+		{"attachment with no uploader", "", messageObject{Attachments: []attachment{{Type: "doc"}}}, workNone},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := r.workKind(tt.text, tt.msg); got != tt.want {
+				t.Errorf("workKind = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }

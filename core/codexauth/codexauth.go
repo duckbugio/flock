@@ -296,10 +296,18 @@ func (m *Manager) notApplicableText() string {
 		", which authenticates from its configured credentials."
 }
 
-// LoginPrivateOnlyText refuses to start a sign-in outside a 1:1 chat.
+// LoginPrivateOnlyText refuses to START a sign-in outside a 1:1 chat.
 const LoginPrivateOnlyText = "Send /login in a direct message with me, not here.\n\n" +
 	"The reply carries a one-time code that authorizes an account for the whole bot, " +
 	"and everyone in this chat would see it."
+
+// cancelPrivateOnlyText refuses to abort a sign-in from outside a 1:1 chat. It is
+// separate from LoginPrivateOnlyText because the reason differs: a cancel reply
+// carries no code, so explaining the refusal in terms of one would be simply
+// untrue. What is at stake is control — the sign-in belongs to the direct message
+// running it, and its confirmation would reveal that one is under way.
+const cancelPrivateOnlyText = "Send /login cancel in a direct message with me, not here.\n\n" +
+	"A sign-in is controlled from the direct message it runs in."
 
 // pendingElsewhereText reports a pending sign-in without reprinting its code. It
 // is deliberately neutral about WHOSE direct message: the code is re-shown to any
@@ -387,7 +395,7 @@ func (m *Manager) Dispatch(base context.Context, args string, sub Subscriber) st
 		// direct message, and the confirmation would itself reveal that one is
 		// underway. Control of the login stays on the 1:1 channel that owns it.
 		if !sub.Private {
-			return LoginPrivateOnlyText
+			return cancelPrivateOnlyText
 		}
 		if m.Cancel() {
 			return "Cancelled the pending Codex login."

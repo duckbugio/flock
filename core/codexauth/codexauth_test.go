@@ -735,8 +735,13 @@ func TestCancelIsPrivateOnly(t *testing.T) {
 	c.awaitCode(t)
 
 	got := m.Dispatch(context.Background(), "cancel", Subscriber{ID: "group"})
-	if got != LoginPrivateOnlyText {
-		t.Errorf("group cancel = %q, want the direct-message refusal", got)
+	if got != cancelPrivateOnlyText {
+		t.Errorf("group cancel = %q, want the cancel-specific refusal", got)
+	}
+	// The refusal must explain ITSELF: a cancel reply carries no code, so borrowing
+	// the start refusal's reasoning would simply be untrue.
+	if strings.Contains(got, "one-time code") {
+		t.Errorf("cancel refusal = %q, want it not to claim a code is at stake", got)
 	}
 	if !strings.Contains(m.StatusText(), "in progress") {
 		t.Error("a group aborted a sign-in owned by a direct message")
