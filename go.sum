@@ -1,6 +1,6 @@
 github.com/caarlos0/env/v11 v11.4.1 h1:fYwH0sWEsBSMPG7t4e/PEfTFzrWrpjyygXyUnWiSwEw=
 github.com/caarlos0/env/v11 v11.4.1/go.mod h1:qupehSf/Y0TUTsxKywqRt/vJjN5nz6vauiYEUUr8P4U=
-github.com/go-telegram/bot v1.22.0 h1:zK29OoTYMmR5emJrCtGa2SjaGleeZiUB/C1i7kc2lXE=
-github.com/go-telegram/bot v1.22.0/go.mod h1:i2TRs7fXWIeaceF3z7KzsMt/he0TwkVC680mvdTFYeM=
+github.com/go-telegram/bot v1.23.0 h1:CKKQq115G/GUGBG8uuWl5uXbiBHyVjZBp/qqOLWZjJk=
+github.com/go-telegram/bot v1.23.0/go.mod h1:i2TRs7fXWIeaceF3z7KzsMt/he0TwkVC680mvdTFYeM=
 golang.org/x/sync v0.22.0 h1:SZjpbeLmrCk4xhRSZFNZW5gFUeCeFgjekvI/+gfScek=
 golang.org/x/sync v0.22.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
