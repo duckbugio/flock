@@ -308,9 +308,12 @@ func run() int {
 		StarNudge:  starNudge,
 		PostRun:    postRun,
 		Opts:       opts,
-		Timeout:    cfg.ClaudeTimeout(),
-		RetryAfter: telegram.RetryAfter,
-		Logger:     logger,
+		// Let a turn-limit stop name the knob that raises the cap. Empty for a
+		// provider that applies no turn cap, which keeps the knob out of the message.
+		MaxTurnsEnv: airunner.TurnLimitEnv(provider.Name),
+		Timeout:     cfg.ClaudeTimeout(),
+		RetryAfter:  telegram.RetryAfter,
+		Logger:      logger,
 	})
 
 	// Background cron scheduler (OFF by default). When enabled, open the durable

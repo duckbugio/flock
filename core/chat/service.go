@@ -124,10 +124,13 @@ type Service struct {
 	nudge      *starNudge
 	postrun    PostRunConfig
 	opts       agent.Options
-	timeout    time.Duration
-	log        *slog.Logger
-	tick       time.Duration
-	nowFunc    func() time.Time
+	// maxTurnsEnv names the environment variable that configures opts.MaxTurns,
+	// supplied by the adapter so core/chat never hardcodes a provider env name.
+	maxTurnsEnv string
+	timeout     time.Duration
+	log         *slog.Logger
+	tick        time.Duration
+	nowFunc     func() time.Time
 
 	mu             sync.Mutex                 // guards runChat, lastMsg, verifyRetry, budgetNotified and snapCache
 	runChat        map[string]ChatID          // active runID -> chatID, for mapping Stop back to a chat
@@ -172,6 +175,12 @@ type Config struct {
 	// zero value disables all of it (see PostRunConfig).
 	PostRun PostRunConfig
 	Opts    agent.Options // Model/MaxTurns/Env for every run; Workdir is set per chat
+	// MaxTurnsEnv names the environment variable that configures Opts.MaxTurns for
+	// the active provider, so a terminal message can point the operator at the knob
+	// that raises the cap. Empty (the default) means the provider has no such knob
+	// and no variable is ever named. It exists so core/chat stays free of provider
+	// env names; the adapter derives it from the provider it built.
+	MaxTurnsEnv string
 	// Timeout bounds a single run's delivery; 0 means no deadline. On timeout the
 	// run is cancelled but the captured session_id is still stored (plan §7.3).
 	Timeout time.Duration
@@ -202,27 +211,28 @@ func New(cfg Config) *Service {
 		maxRunes = defaultMaxMessageRunes
 	}
 	return &Service{
-		runner:     cfg.Runner,
-		chat:       cfg.Transport,
-		caps:       caps,
-		retryAfter: cfg.RetryAfter,
-		maxRunes:   maxRunes,
-		dispatch:   cfg.Dispatcher,
-		workspace:  cfg.Workspace,
-		sessions:   cfg.Sessions,
-		pending:    cfg.Pending,
-		costs:      cfg.Costs,
-		costCapUSD: cfg.CostCapUSD,
-		outbox:     cfg.Outbox,
-		nudge:      newStarNudge(cfg.StarNudge, cfg.Transport, log),
-		postrun:    cfg.PostRun,
-		opts:       cfg.Opts,
-		timeout:    cfg.Timeout,
-		log:        log,
-		tick:       tickInterval,
-		nowFunc:    time.Now,
-		runChat:    map[string]ChatID{},
-		lastMsg:    map[ChatID]MessageID{},
+		runner:      cfg.Runner,
+		chat:        cfg.Transport,
+		caps:        caps,
+		retryAfter:  cfg.RetryAfter,
+		maxRunes:    maxRunes,
+		dispatch:    cfg.Dispatcher,
+		workspace:   cfg.Workspace,
+		sessions:    cfg.Sessions,
+		pending:     cfg.Pending,
+		costs:       cfg.Costs,
+		costCapUSD:  cfg.CostCapUSD,
+		outbox:      cfg.Outbox,
+		nudge:       newStarNudge(cfg.StarNudge, cfg.Transport, log),
+		postrun:     cfg.PostRun,
+		opts:        cfg.Opts,
+		maxTurnsEnv: cfg.MaxTurnsEnv,
+		timeout:     cfg.Timeout,
+		log:         log,
+		tick:        tickInterval,
+		nowFunc:     time.Now,
+		runChat:     map[string]ChatID{},
+		lastMsg:     map[ChatID]MessageID{},
 
 		verifyRetry:    map[ChatID][]string{},
 		budgetNotified: map[ChatID]string{},
@@ -821,7 +831,12 @@ func (s *Service) finish(
 	case runErr != nil:
 		text = FinalError(runErr)
 	default:
-		text = Final(res)
+		// s.opts is the single source of truth for the cap behind any result that
+		// reaches here: run() copies s.opts and overwrites only Images/Workdir/
+		// SessionID, so the main run never overrides MaxTurns; the evaluator's
+		// EvalMaxTurns override applies to runEvaluator, whose result is consumed
+		// inside the post-run loop and never passes through finish.
+		text = Final(res, RunLimits{MaxTurns: s.opts.MaxTurns, MaxTurnsEnv: s.maxTurnsEnv})
 	}
 
 	// Fence-aware chunking so a code block that crosses a chunk boundary stays
@@ -928,7 +943,10 @@ func (s *Service) finish(
 // mirrors the terminal cases finish handles: a run cancelled by a deploy shutdown
 // (resuming) keeps its marker and auto-resumes, so it reads "paused … will resume";
 // a user Stop / per-run timeout (ctxErr set, no Result or error) reads "stopped"; a
-// RunError or an is_error Result reads "failed"; and a clean Result reads "done".
+// run the agent turn cap cut short reads "turn limit reached", because it is a
+// configured cutoff rather than a failure and the answer bubble right above says
+// so — "failed" here would contradict it; any OTHER RunError or is_error Result
+// reads "failed"; and a clean Result reads "done".
 func completionNotice(res *agent.RunResult, runErr, ctxErr error, total time.Duration, resuming bool) string {
 	elapsed := formatElapsed(int64(total / time.Second))
 	switch {
@@ -936,6 +954,11 @@ func completionNotice(res *agent.RunResult, runErr, ctxErr error, total time.Dur
 		return "⏳ Paused after " + elapsed + " — will resume after restart"
 	case ctxErr != nil && res == nil && runErr == nil:
 		return "⏹ Stopped after " + elapsed
+	// runErr must be nil to claim a clean turn-limit stop: with one set, finish
+	// renders FinalError instead of the turn-limit explanation, so the notice keeps
+	// the failure wording that matches the delivered answer.
+	case runErr == nil && res != nil && res.IsError && res.Subtype == turnLimitSubtype:
+		return "⏹ Turn limit reached after " + elapsed
 	case runErr != nil || (res != nil && res.IsError):
 		return "⚠️ Failed after " + elapsed
 	default:

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +87,19 @@ func TestLoad(t *testing.T) {
 				t.Fatalf("SlogLevel() = %v, want %v", cfg.SlogLevel(), tt.wantLevel)
 			}
 		})
+	}
+}
+
+// TestClaudeMaxTurnsEnvMatchesStructTag pins the exported knob name to the struct
+// tag that actually parses it, so renaming one without the other cannot silently
+// make the terminal turn-limit message point at a variable nobody reads.
+func TestClaudeMaxTurnsEnvMatchesStructTag(t *testing.T) {
+	field, ok := reflect.TypeOf(Config{}).FieldByName("ClaudeMaxTurns")
+	if !ok {
+		t.Fatal("Config has no ClaudeMaxTurns field")
+	}
+	if got := field.Tag.Get("env"); got != ClaudeMaxTurnsEnv {
+		t.Fatalf("ClaudeMaxTurns env tag = %q, want ClaudeMaxTurnsEnv %q", got, ClaudeMaxTurnsEnv)
 	}
 }
 

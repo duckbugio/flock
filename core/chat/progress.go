@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -341,17 +342,24 @@ func subagentLabel(input json.RawMessage) string {
 // that becomes empty after stripping (all-metacharacter) falls back to the constant
 // so the active stage is never rendered blank.
 func sanitizeStageLabel(label string) string {
-	cleaned := strings.Map(func(r rune) rune {
-		if strings.ContainsRune(stageLabelMeta, r) {
-			return -1
-		}
-		return r
-	}, label)
-	cleaned = collapseWhitespace(cleaned)
+	cleaned := collapseWhitespace(stripRunes(label, stageLabelMeta))
 	if cleaned == "" {
 		return stageLabelFallbck
 	}
 	return cleaned
+}
+
+// stripRunes removes every rune of meta from s. It backs both markdown-safety
+// sanitizers in this file, which strip DIFFERENT sets because they render into
+// different contexts (sanitizeStageLabel into bare inline text, sanitizeEnvName
+// into an inline-code span).
+func stripRunes(s, meta string) string {
+	return strings.Map(func(r rune) rune {
+		if strings.ContainsRune(meta, r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // activityLine renders the one-line activity summary for an event, or false if
@@ -831,30 +839,148 @@ func (p *Progress) Frame() string {
 	return assemble([]string{capLine(lines[0], budget)})
 }
 
+// turnLimitSubtype is the provider result subtype for a run the agent turn cap
+// cut short. It is the only error subtype whose cause we can state truthfully,
+// so it is the only one with dedicated wording.
+const turnLimitSubtype = "error_max_turns"
+
+// RunLimits carries the run-level caps the terminal renderer needs to explain a
+// stop that was caused by a configured limit rather than by a failure. The zero
+// value means "unknown": the renderer then omits every clause it cannot state
+// truthfully, so callers that have no limits to report lose nothing.
+type RunLimits struct {
+	// MaxTurns is the agent turn cap actually in force for the run. Non-positive
+	// means no cap was passed to the provider; what the provider then does on its
+	// own is unverified, so no message states it.
+	MaxTurns int
+	// MaxTurnsEnv names the environment variable that configures MaxTurns, so a
+	// message can point at the knob without core/chat knowing any env name.
+	// Empty means the active provider has no such knob and none is mentioned.
+	MaxTurnsEnv string
+}
+
 // Final renders the terminal message text for a successful run result. A
 // result that carries no text (e.g. an error subtype with an empty body) yields
-// a short placeholder so the user is never left with an empty message.
-func Final(res *agent.RunResult) string {
+// a short placeholder so the user is never left with an empty message. limits
+// describes the caps the run ran under; the zero value renders the generic
+// wording.
+func Final(res *agent.RunResult, limits RunLimits) string {
 	if res == nil {
 		return "(no result)"
 	}
 	text := strings.TrimSpace(res.Text)
 	if res.IsError {
-		if text == "" {
-			// Surface the result subtype (e.g. "error_max_turns") when present so the
-			// cause isn't fully opaque; fall back to the plain message otherwise.
-			if res.Subtype != "" {
-				text = "the run ended with an error (" + res.Subtype + ")"
-			} else {
-				text = "the run ended with an error"
-			}
-		}
-		return "⚠️ " + text
+		return "⚠️ " + errorBody(res, limits, text)
 	}
 	if text == "" {
 		return "(empty response)"
 	}
 	return text
+}
+
+// errorBody renders the terminal message body (everything after the warning sign)
+// for an error result, where text is the result's already-trimmed text. Only a
+// subtype whose cause we can state truthfully gets dedicated wording; every other
+// one keeps the generic message with the raw subtype appended, so the cause is at
+// least not fully opaque.
+func errorBody(res *agent.RunResult, limits RunLimits, text string) string {
+	switch res.Subtype {
+	case turnLimitSubtype:
+		// The result text this subtype carries is a fixed boilerplate sentence from the
+		// provider ("Reached the maximum number of turns." — see
+		// core/claude/testdata/error.jsonl) that states exactly what the explanation's
+		// own first sentence states, minus the actionable knob and the raw subtype
+		// token. Echoing it would open the message with a duplicate of its own next
+		// line, so it is dropped. The rule is gated on the SUBTYPE, never on matching
+		// the sentence: a reworded boilerplate must not start leaking back in, and
+		// every OTHER subtype still keeps whatever text came with the result.
+		return turnLimitExplanation(res, limits)
+	default:
+		if text != "" {
+			return text
+		}
+		if res.Subtype != "" {
+			return "the run ended with an error (" + res.Subtype + ")"
+		}
+		return "the run ended with an error"
+	}
+}
+
+// envNameMeta is the set of characters stripped from an operator-supplied env-var
+// name before it is rendered inside an inline-code span (see sanitizeEnvName).
+// Only the backtick can escape such a span: every other markdown metacharacter is
+// inert between backticks, both on the rich-markdown path and on the legacy
+// MarkdownToHTML one (which stashes and HTML-escapes code spans before any
+// formatting pass runs). The set is deliberately NARROWER than stageLabelMeta,
+// which strips "_" — legal and common in an env var name, so reusing it here would
+// print a knob that does not exist.
+const envNameMeta = "`"
+
+// sanitizeEnvName makes an operator-supplied environment-variable name safe to
+// interpolate into an inline-code span: it drops the characters that could close
+// the span (envNameMeta) and collapses whitespace, since a newline also ends a code
+// span and would leave the backticks visible. An odd backtick count desyncs the
+// rich-markdown parser and takes the WHOLE message off the rich path, so this is a
+// by-construction guarantee rather than a validation. The name is NOT truncated: a
+// shortened knob name would be a wrong one. An empty result means there is nothing
+// safe to name, and callers drop the whole clause rather than render empty
+// backticks.
+func sanitizeEnvName(name string) string {
+	return collapseWhitespace(stripRunes(name, envNameMeta))
+}
+
+// turnLimitExplanation spells out a stop caused by the agent turn cap: that it is
+// a configured cutoff rather than a failure, what survived it, and which knob
+// raises it — reporting the value actually in force rather than any default, since
+// deployments override it. Every clause whose limit is unknown is dropped, so a
+// zero RunLimits still yields a truthful (if shorter) message.
+func turnLimitExplanation(res *agent.RunResult, limits RunLimits) string {
+	// strings.Builder writes never return an error, so the results are discarded.
+	var b strings.Builder
+	_, _ = b.WriteString("The run stopped because it reached its turn limit")
+	// num_turns is the provider's own counter and its semantics are unverified: it
+	// can both undershoot and exceed the cap. The sentence already states that the
+	// cap was reached, so a count that disagrees with it reads as a bug ("3 of 40
+	// turns" as much as "501 of 250 turns"). The count is therefore rendered ONLY
+	// when it corroborates the cap exactly and is silently omitted otherwise — the
+	// sentence stands on its own without it. A positive cap is still required so an
+	// unknown cap (0) can never be corroborated by a zero count.
+	if limits.MaxTurns > 0 && res.NumTurns == limits.MaxTurns {
+		_, _ = b.WriteString(" (" + strconv.Itoa(res.NumTurns) + " of " + strconv.Itoa(limits.MaxTurns) + " turns)")
+	}
+	_, _ = b.WriteString(" — not a crash, timeout or API error.")
+	// Workspace state survives, but the run's conversation context may not: a
+	// terminal is_error Result while resuming clears this chat's stored session (the
+	// self-heal in Service.run), so the next message then starts a FRESH session
+	// with no memory of what was in flight. A run that was itself a fresh session
+	// keeps its id and does resume — hence "may not", which is exact for both paths.
+	_, _ = b.WriteString(" Everything already written, committed or pushed is kept in the workspace,")
+	_, _ = b.WriteString(" but the stopped run's chat context may not carry over —")
+	_, _ = b.WriteString(" restate anything you want continued in your next message.")
+	// The knob name is operator-supplied (chat.Config.MaxTurnsEnv is exported), so
+	// it is sanitized before it lands inside the inline-code span; a name left empty
+	// by sanitizing names nothing and drops the clause with it.
+	if env := sanitizeEnvName(limits.MaxTurnsEnv); env != "" {
+		if limits.MaxTurns > 0 {
+			_, _ = b.WriteString(" To allow longer runs, raise `" + env + "` (current: " +
+				strconv.Itoa(limits.MaxTurns) + ") and restart the bot.")
+		} else {
+			// Still nothing is claimed about WHAT the provider's fallback cap is — that
+			// behaviour is unverified — only that the limit which bound this run was not
+			// one this bot set. Without that connective the sentence reads as a
+			// contradiction of the opening one ("reached its turn limit" / "no turn cap
+			// is configured"). "Raise it" would be wrong too: the only way to reach this
+			// branch is an explicitly zeroed cap.
+			_, _ = b.WriteString(" No turn cap is configured for this bot, so the run was bound by" +
+				" whatever default the provider applies. Set `" + env + "` and restart the bot to control it.")
+		}
+	}
+	// Keep the raw token: it is the provider's stable, unlocalized name for this
+	// stop, so it is what an operator matches against provider docs and issue
+	// reports — and nothing on this path logs it, so the delivered message is the
+	// only place it ever surfaces.
+	_, _ = b.WriteString(" (" + turnLimitSubtype + ")")
+	return b.String()
 }
 
 // FinalError renders the terminal message text when a run fails without a
