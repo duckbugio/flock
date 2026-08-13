@@ -136,9 +136,45 @@
     mode: "0600"
   no_log: true
 
-- name: Pull image and (re)start the bot
+# The update path, off unless the operator asks for it with -e bot_image_pull=true.
+# It fetches every service in the stack, not just the bot: the sidecar tags float within a
+# major too (docker:27-dind, caddy:2-alpine), and dind is privileged — pulling only the bot
+# would leave a privileged container with no path to a security fix at all. Nothing here is
+# automatic; the operator still picks the moment. The (re)start below then recreates the
+# containers on whatever was fetched.
+# changed_when is where the answer to "did a new image arrive?" belongs: compose prints
+# "Pull complete" once per layer it actually downloaded, and prints none of those lines when
+# every tag already resolved to the local image. (A "Pulling"/"Pulled" pair is printed per
+# service either way, so it answers nothing.) The narrow case this misses is a fetch that
+# only re-points a tag at layers the host already has: nothing is downloaded, so it reports
+# ok. The (re)start below recreates the container on every run (--force-recreate), so it
+# reports changed whether or not the image moved — its flag says nothing about that.
+- name: Fetch the current images (opt-in update)
   ansible.builtin.command:
-    cmd: docker compose up -d --pull always --force-recreate
+    cmd: docker compose pull
+    chdir: "{{ app_dir }}"
+  when: bot_image_pull | bool
+  register: image_fetch
+  async: 1800
+  poll: 15
+  # The defaults are for the timeout case: an async job that did not finish in time comes
+  # back without stdout/stderr, and reading them straight raises "'dict object' has no
+  # attribute 'stderr'", which replaces Ansible's own "did not complete within 1800s" with
+  # a puzzle. Present output is unaffected.
+  changed_when: >-
+    'Pull complete' in ((image_fetch.stderr | default('')) + (image_fetch.stdout | default('')))
+
+# No --pull here: this task does not go looking for a newer build, so a run made for a token
+# rotation or a limit change recreates the container on whatever the tag points to on THIS
+# host. Compose's default policy does fetch an image the host has none of (first install, or
+# one the weekly prune reclaimed after a `compose down`), which resolves the tag again; short
+# of that, moving to a new image is the explicit fetch above or the operator's own pull.
+# --force-recreate stays: with the local image unchanged it recreates the container only (so
+# a changed .env is picked up even on compose versions older than v2.14, which don't detect
+# that themselves), not the image.
+- name: (Re)start the bot on its current image
+  ansible.builtin.command:
+    cmd: docker compose up -d --force-recreate
     chdir: "{{ app_dir }}"
   async: 1800
   poll: 15
@@ -158,5 +194,19 @@
   until: bot_state.stdout == "running"
 
 - name: Report status
+  vars:
+    # Restates the fetch task's own changed flag (see its comment above) rather than echoing
+    # its output: compose prints a line per layer and per status transition, so quoting it
+    # here would put hundreds of progress lines into one debug string and still leave the
+    # reader to interpret them.
+    image_fetch_report: >-
+      {{ 'not requested (bot_image_pull=false) — no update fetch ran'
+         if ((image_fetch is not defined) or (image_fetch.skipped | default(false)))
+         else ('a new image was downloaded; the (re)start above recreated the stack on it'
+               if (image_fetch.changed | default(false))
+               else 'nothing downloaded — the tags already resolved to the local images') }}
   ansible.builtin.debug:
-    msg: "{{ container_prefix }}-bot is {{ bot_state.stdout }} — check logs with: docker compose -f {{ app_dir }}/docker-compose.yml logs -f"
+    msg:
+      - "{{ container_prefix }}-bot is {{ bot_state.stdout }} on the local copy of {{ bot_image }}"
+      - "image fetch: {{ image_fetch_report }}"
+      - "logs: docker compose -f {{ app_dir }}/docker-compose.yml logs -f"

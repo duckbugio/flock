@@ -2,7 +2,14 @@
 services:
   bot:
     image: {{ bot_image }}
-    pull_policy: always
+    # No pull policy override on purpose: compose's default is "missing", so an `up`
+    # (playbook run, host reboot recovery) reuses the image this host already has for the
+    # tag rather than re-resolving it — even though bot_image tracks a moving tag. Two
+    # things still change the version an `up` starts: the local tag having been moved out
+    # of band (the role's opt-in bot_image_pull task, or a `docker compose pull` on the
+    # host), and the image being absent altogether — first install, or a prune reclaimed
+    # it — where "missing" fetches the tag from the registry to have something to run.
+    # Updating is therefore a deliberate pull followed by `up -d`, not a by-product of it.
     container_name: {{ container_prefix }}-bot
     restart: unless-stopped
     # Graceful drain on deploy: give the bot up to 75s after SIGTERM to drain

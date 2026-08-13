@@ -107,7 +107,7 @@ GITEA_POLL_INTERVAL=90
 - **语音消息：** `ENABLE_VOICE_MESSAGES=true`、`VOICE_PROVIDER=mistral|openai|local`，外加 `MISTRAL_API_KEY`（或 `OPENAI_API_KEY`）。语音会被转写并作为命令运行。
 - **dind 边车容器：** `docker compose --profile dind up -d` 为团队提供容器化的 linters/测试（设置 `DOCKER_HOST=tcp://dind:2375`）。
 - **按聊天隔离：** 每个聊天都会获得一个 `/workspace/chat_<id>`（一对一 → 私有；群组 → 一个共享工作区）；不同聊天彼此完全隔离并行运行，受 `MAX_CONCURRENT_CHAT_RUNS` 限制。在群组中，设置 `REQUIRE_GROUP_MENTION=true` 可让机器人仅在被 @提及或被回复时才响应。
-- **Ansible 部署**（Telegram）：从 `adapters/telegram/deploy` 一条命令配置一台 VPS——将 `inventories/example` 复制为你自己的 `inventories/<name>/`（已 gitignore），填好 inventory/vars/vault，然后执行 `ansible-playbook -i inventories/<name>/inventory.ini playbook.yml`。该角色会拉取预构建镜像；设置 `bot_image` 以固定某个标签。
+- **Ansible 部署**（Telegram）：从 `adapters/telegram/deploy` 一条命令配置一台 VPS——将 `inventories/example` 复制为你自己的 `inventories/<name>/`（已 gitignore），填好 inventory/vars/vault，然后执行 `ansible-playbook -i inventories/<name>/inventory.ini playbook.yml`。该角色在首次运行时拉取预构建镜像，之后一直沿用它：普通的重复运行不会去寻找更新的构建——它只是用该标签在这台主机本地已指向的镜像重启容器；除非这台主机上已没有该标签的副本（首次安装，或 `compose down` 加上每周清理），此时 Compose 会重新拉取它以便启动整个技术栈。要更新，请附带 `-e bot_image_pull=true` 重新运行，这会更新整个技术栈（bot 以及已启用的 sidecar——dind、Caddy）并重建容器；设置 `bot_image` 可固定某个标签——固定之后，换版本要靠修改这个值并正常运行，而不是靠这个开关：固定标签没有更新的目标可供重新解析。
 
 ## 安全
 
