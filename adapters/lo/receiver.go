@@ -76,6 +76,7 @@ func (r *Receiver) Run(ctx context.Context) error {
 			}
 			continue
 		}
+		previousOffset := offset
 		sort.SliceStable(updates, func(i, j int) bool { return updates[i].ID < updates[j].ID })
 		for _, update := range updates {
 			if ctx.Err() != nil {
@@ -90,8 +91,8 @@ func (r *Receiver) Run(ctx context.Context) error {
 			r.HandleUpdate(ctx, update)
 			offset = update.ID + 1
 		}
-		// Empty immediate responses from a proxy must not become a busy polling loop.
-		if len(updates) == 0 && !wait(ctx, time.Second) {
+		// Empty or stale-only immediate responses must not become a busy polling loop.
+		if offset == previousOffset && !wait(ctx, time.Second) {
 			return ctx.Err()
 		}
 	}

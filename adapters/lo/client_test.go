@@ -313,3 +313,21 @@ func TestWebhookPreflightOnlyFallsBackForUnsupportedMethods(t *testing.T) {
 		})
 	}
 }
+
+type failingTransport struct{}
+
+func (failingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("connection refused for " + testToken)
+}
+
+func TestNetworkErrorKeepsReasonWithoutCredential(t *testing.T) {
+	t.Parallel()
+	api, err := lo.NewClient("https://lo.example", testToken, &http.Client{Transport: failingTransport{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = api.GetMe(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), testToken) {
+		t.Fatalf("unsafe or unhelpful error: %v", err)
+	}
+}

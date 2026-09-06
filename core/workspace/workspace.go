@@ -136,11 +136,6 @@ Keep generated artifacts in the workspace or the task repository as appropriate,
 and report their paths. Do not claim that a local path is a downloadable chat
 attachment. Summarize important findings in the text answer.
 
-The runtime image provides a screenshot command for your own inspection:
-
-    shot <url> <out.png> [--full] [--width=N] [--height=N] [--wait=ms]
-
-Screenshots stay local. Authenticated pages may require additional setup.
 `
 
 // shotConvention is appended to every rendered CLAUDE.md so the dev-team agents
@@ -157,8 +152,9 @@ page using the bundled system Chromium:
     shot <url> <out.png> [--full] [--width=N] [--height=N] [--wait=ms]
 
 Use ` + "`--full`" + ` for a full-page capture (it autoscrolls first to load lazy
-content). Writing the PNG into ` + "`outbox/`" + ` delivers it to the user in chat
-(see the outbox convention above). Known limit: pages that require authentication —
+content). Follow the file-delivery convention above: transports with an outbox can
+deliver the PNG from ` + "`outbox/`" + `; otherwise keep it local and report its path.
+Known limit: pages that require authentication —
 e.g. a Telegram Mini App that needs ` + "`initData`" + ` — will not render.
 `
 
@@ -206,8 +202,8 @@ func (r *Renderer) renderClaudeMD(ws string) error {
 		rendered += localFilesConvention
 	} else {
 		rendered += outboxConvention
-		rendered += shotConvention
 	}
+	rendered += shotConvention
 	rendered += followupConvention
 
 	dst := filepath.Join(ws, "CLAUDE.md")

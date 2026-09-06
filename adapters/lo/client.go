@@ -91,7 +91,12 @@ func (c *Client) call(ctx context.Context, method string, body, out any) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return errors.New("LO request failed before receiving a response")
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err // The outer URL contains the bot credential.
+		}
+		reason := strings.ReplaceAll(err.Error(), c.token, "[REDACTED]")
+		return fmt.Errorf("LO request failed before receiving a response: %s", reason)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))

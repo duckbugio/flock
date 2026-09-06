@@ -229,3 +229,21 @@ func TestIgnoredMessagesDoNotSpendGuardBudget(t *testing.T) {
 		t.Fatalf("calls=%d prompts=%v", calls, svc.prompts)
 	}
 }
+
+func TestStaleOnlyPollingBatchBacksOff(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	api := client(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		reply(w, `{"ok":true,"result":[{"update_id":1}]}`)
+	})
+	receiver := lo.NewReceiver(lo.ReceiverConfig{Client: api})
+	ctx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
+	defer cancel()
+	if err := receiver.Run(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("polls=%d; expected initial batch then one stale batch", got)
+	}
+}
