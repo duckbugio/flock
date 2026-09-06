@@ -167,8 +167,11 @@ func hasMedia(msg *Message) bool {
 }
 
 func (r *Receiver) notify(ctx context.Context, chatID, text string) {
-	if _, err := r.cfg.Transport.Send(ctx, chatID, text, "", false); err != nil {
-		r.cfg.Logger.Warn("lo: notice delivery failed", "error", err)
+	for _, chunk := range chat.ChunkFencedSize(text, r.cfg.Transport.Capabilities().MaxMessageRunes) {
+		if _, err := r.cfg.Transport.Send(ctx, chatID, chunk, "", false); err != nil {
+			r.cfg.Logger.Warn("lo: notice delivery failed", "error", err)
+			return
+		}
 	}
 }
 

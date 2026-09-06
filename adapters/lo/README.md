@@ -62,7 +62,9 @@ this adapter does not promise exactly-once agent execution or automatic resume.
   `reply_markup`, `reply_parameters`, `parse_mode` or `rich_message` is sent.
 - `LO_ENABLE_DRAFTS=true` opts into private-chat `sendMessageDraft`: stable
   nonzero draft ID per run, full accumulated progress text, final `sendMessage`.
-  The core keeps draft IDs separate from message IDs. Initial refusal (including
+  The core keeps draft IDs separate from message IDs and explicitly clears the
+  draft with empty text before final delivery, including cancellation. Cleanup
+  has a separate two-second budget; its failure never prevents the final send. Initial refusal (including
   groups or older LO versions) falls back to the editable anchor. The core's
   three-second cadence respects the existing backoff behavior; no token-by-token
   database edits are needed. This streams **Flock's progress frame**, not every

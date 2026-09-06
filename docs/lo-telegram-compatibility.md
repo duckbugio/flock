@@ -23,7 +23,7 @@ their deployment before enabling optional flags.
 | --- | --- | --- |
 | Incoming text | `getUpdates`, positive offset acknowledgement | Long polling; separate LO user allow-list; group mention gate |
 | Persistent answer / progress edits | `sendMessage`, `editMessageText`, `deleteMessage` | Implemented with numeric IDs and plain text |
-| Ephemeral progress | `sendMessageDraft` is a 501 stub | Opt-in `LO_ENABLE_DRAFTS`; stable draft ID per run; final answer is a real `sendMessage`; initial failure falls back to an editable anchor |
+| Ephemeral progress | `sendMessageDraft` is a 501 stub | Opt-in `LO_ENABLE_DRAFTS`; stable draft ID per run; explicit empty-text cleanup before a real final `sendMessage`; initial failure falls back to an editable anchor |
 | HTML / entities | `sendMessage` accepts only `chat_id`, `text` | Formatting source is sent as plain text; unsupported fields are never transmitted |
 | Stop button | Callback keyboard fields rejected; `answerCallbackQuery` and `editMessageReplyMarkup` are stubs | `/stop` remains available to allowed users even when request/cost guards reject new work |
 | Command menu | `setMyCommands` / `getMyCommands` / `deleteMyCommands` are stubs | Text commands work; registration is separately opt-in |
@@ -82,7 +82,8 @@ These are adapter/runtime limitations, not evidence of missing LO endpoints:
 The adapter has HTTP-fixture tests for method payloads, numeric IDs, retry delays,
 credential redaction, redirect refusal, malformed envelopes, draft identity,
 UTF-16 rejection, inbound gates, ordered polling acknowledgement, webhook conflicts
-and quoted context. Core tests cover native draft completion, progress size limits,
+and quoted context. Core tests cover native draft completion and cleanup (including cancellation and
+cleanup failure), progress size limits,
 fallback to the persistent anchor and workspace instructions without file-delivery
 promises.
 

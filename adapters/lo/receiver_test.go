@@ -6,9 +6,11 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/duckbugio/flock/adapters/lo"
 	"github.com/duckbugio/flock/core/goal"
@@ -154,5 +156,50 @@ func TestPollingAcknowledgesInOrderAndStopsOnConflict(t *testing.T) {
 	}
 	if strings.Join(svc.prompts, ",") != "first,second" {
 		t.Fatal(svc.prompts)
+	}
+}
+
+func TestMentionRemovalPreservesEarlierPrefixAndWhitespace(t *testing.T) {
+	t.Parallel()
+	svc := &serviceSpy{}
+	receiver := lo.NewReceiver(lo.ReceiverConfig{
+		Service: svc, Username: "flock", IsAllowed: func(int64) bool { return true },
+	})
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: inbound("@flockbot  and\n@FLOCK fix this")})
+	if len(svc.prompts) != 1 || svc.prompts[0] != "@flockbot  and\n fix this" {
+		t.Fatal(svc.prompts)
+	}
+}
+
+func TestLongCommandNoticeIsChunkedWithoutLosingText(t *testing.T) {
+	t.Parallel()
+	const reasonRunes = 5000
+	reason := strings.Repeat("😀", reasonRunes)
+	var mu sync.Mutex
+	var parts []string
+	api := client(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if utf8.RuneCountInString(body.Text) > 2048 {
+			t.Error("oversized chunk")
+		}
+		mu.Lock()
+		parts = append(parts, body.Text)
+		mu.Unlock()
+		reply(w, `{"ok":true,"result":{"message_id":1}}`)
+	})
+	receiver := lo.NewReceiver(lo.ReceiverConfig{
+		Service: &serviceSpy{}, Transport: lo.NewTransport(api, false), IsAllowed: func(int64) bool { return true },
+		Guards: func(int64) (bool, string) { return false, reason },
+	})
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: inbound("work")})
+	mu.Lock()
+	defer mu.Unlock()
+	if len(parts) < 2 || strings.Join(parts, "") != reason {
+		t.Fatal("long notice was lost or truncated")
 	}
 }

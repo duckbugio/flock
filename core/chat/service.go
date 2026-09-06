@@ -31,20 +31,18 @@ import (
 // minEditInterval), so this is the progress refresh cadence.
 const tickInterval = 1 * time.Second
 
-// minEditInterval throttles real edits in the rate-limited fallback path. Drafts
-// (the primary live path) have no Telegram rate limit and refresh every
-// tickInterval; the Edit fallback IS rate-limited, so when a run falls back to
-// editing the anchor we additionally cap real edits to at most one per
-// minEditInterval. A 1s ticker would otherwise hammer the throttled Edit endpoint,
-// drawing 429s whose back-off parks render() and freezes the counter. Drafts are
-// never throttled by this — only the fallback edit branch.
+// minEditInterval throttles both persistent edits and ephemeral drafts. Both
+// paths also share the server-provided 429 backoff in throttledUntil. The ticker
+// advances the in-memory frame every second; delivery runs at this slower cadence.
 const minEditInterval = 3 * time.Second
 
-// anchorText is the persistent progress message sent at the start of a run. It
-// carries the Stop button and is edited IN PLACE with the live "Working… (Ns)"
-// frame on each (throttled) tick, then edited into the final answer — so a whole
-// run is exactly ONE chat bubble, identical on every platform. This initial text
-// shows only until the first tick replaces it with the live frame.
+// draftClearTimeout bounds best-effort cleanup so it cannot starve final delivery.
+const draftClearTimeout = 2 * time.Second
+
+// anchorText is the initial progress text for both drafts and persistent anchors.
+// The first progress tick replaces it. A persistent anchor may carry a Stop
+// button and is edited into the final answer; a draft is cleared before sending
+// a new persistent answer.
 const anchorText = "⏳ Working…"
 
 // workspaceEnsurer resolves a chat's isolated workspace path, creating it (and
@@ -627,7 +625,11 @@ loop:
 	// which case the NEXT request is denied (the crossing request still ran).
 	s.recordCost(chatID, userID, finalResult)
 
-	s.finish(ctx, chatID, progressMsgID, markerID, finalResult, finalErr, ctx.Err(), s.nowFunc().Sub(start))
+	draftRunID := ""
+	if usingDraft {
+		draftRunID = runID
+	}
+	s.finish(ctx, chatID, progressMsgID, markerID, draftRunID, finalResult, finalErr, s.nowFunc().Sub(start))
 
 	// Self-heal a stale/poisoned resume id: when a run that USED a resume session
 	// id terminates with an is_error Result, drop the stored session for this chat
@@ -810,12 +812,22 @@ func (s *Service) clearLanePending(chatID ChatID) {
 // finish renders the terminal message and replaces the progress message with it
 // (chunked when the answer exceeds the platform's message size limit).
 func (s *Service) finish(
-	ctx context.Context, chatID ChatID, progressMsgID MessageID, markerID string,
-	res *agent.RunResult, runErr, ctxErr error, total time.Duration,
+	ctx context.Context, chatID ChatID, progressMsgID MessageID, markerID, draftRunID string,
+	res *agent.RunResult, runErr error, total time.Duration,
 ) {
 	// Use a background context for delivery: the run ctx may be cancelled by Stop
 	// or shutdown, but the final message should still reach the user.
+	ctxErr := ctx.Err()
 	deliverCtx := context.WithoutCancel(ctx)
+	if draftRunID != "" {
+		if draft, ok := s.chat.(DraftTransport); ok {
+			clearCtx, cancel := context.WithTimeout(deliverCtx, draftClearTimeout)
+			if err := draft.ClearDraft(clearCtx, chatID, draftRunID); err != nil {
+				s.log.Debug("clear progress draft", "error", err)
+			}
+			cancel()
+		}
+	}
 	// Clear this run's interrupted-run marker by id whenever the run REACHED a
 	// terminal — it delivered a Result or errored — so a finished run is never
 	// auto-resumed after a later restart. The marker is KEPT only for a run that

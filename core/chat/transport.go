@@ -88,4 +88,6 @@ type Capabilities struct {
 // a run, not a MessageID. The terminal answer is always persisted through Send.
 type DraftTransport interface {
 	SendDraft(ctx context.Context, chatID ChatID, runID, text string) error
+	// ClearDraft removes ephemeral progress without creating a persistent message.
+	ClearDraft(ctx context.Context, chatID ChatID, runID string) error
 }

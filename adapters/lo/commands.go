@@ -93,10 +93,13 @@ func addressedText(text, username string) (string, bool) {
 		}
 	}
 	if username != "" {
+		pos := 0
 		for _, field := range fields {
+			index := pos + strings.Index(text[pos:], field)
 			if strings.EqualFold(field, "@"+username) {
-				return strings.TrimSpace(strings.Replace(text, field, "", 1)), true
+				return strings.TrimSpace(text[:index] + text[index+len(field):]), true
 			}
+			pos = index + len(field)
 		}
 	}
 	return text, true

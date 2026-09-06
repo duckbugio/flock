@@ -19,7 +19,8 @@ const (
 	requestTimeout     = 65 * time.Second
 	maxResponseBytes   = 2 << 20
 	pollTimeoutSeconds = 30
-	pollBatchSize      = 100
+	// Leave room for full-size Unicode text plus quoted messages under the response cap.
+	pollBatchSize = 25
 )
 
 // Client sends Bot API requests only to its configured LO endpoint.

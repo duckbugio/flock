@@ -222,3 +222,67 @@ func TestActiveWebhookIsNeverDeleted(t *testing.T) {
 		t.Fatal("accepted active webhook")
 	}
 }
+
+func TestClearDraftUsesSameIDAndEmptyText(t *testing.T) {
+	t.Parallel()
+	type payload struct {
+		ID   json.Number `json:"draft_id"` //nolint:tagliatelle // Bot API wire spelling.
+		Text string      `json:"text"`
+	}
+	var mu sync.Mutex
+	var requests []payload
+	api := client(t, func(w http.ResponseWriter, r *http.Request) {
+		var body payload
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		mu.Lock()
+		requests = append(requests, body)
+		mu.Unlock()
+		reply(w, `{"ok":true,"result":true}`)
+	})
+	transport := lo.NewTransport(api, true)
+	if err := transport.SendDraft(t.Context(), "77", "run", "working"); err != nil {
+		t.Fatal(err)
+	}
+	if err := transport.ClearDraft(t.Context(), "77", "run"); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requests) != 2 || requests[0].ID != requests[1].ID || requests[1].Text != "" {
+		t.Fatalf("requests=%+v", requests)
+	}
+}
+
+func TestPollingBatchFitsFullSizeUnicodeReplies(t *testing.T) {
+	t.Parallel()
+	const batchSize = 25
+	text := strings.Repeat("界", 4096)
+	api := client(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Limit int `json:"limit"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if body.Limit != batchSize {
+			t.Errorf("limit=%d", body.Limit)
+		}
+		updates := make([]lo.Update, batchSize)
+		for i := range updates {
+			message := inbound(text)
+			message.Reply = inbound(text)
+			updates[i] = lo.Update{ID: int64(i + 1), Message: message}
+		}
+		raw, err := json.Marshal(map[string]any{"ok": true, "result": updates})
+		if err != nil {
+			t.Error(err)
+		}
+		reply(w, string(raw))
+	})
+	updates, err := api.GetUpdates(t.Context(), 0)
+	if err != nil || len(updates) != batchSize {
+		t.Fatalf("count=%d err=%v", len(updates), err)
+	}
+}

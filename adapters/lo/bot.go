@@ -144,6 +144,18 @@ func (*Transport) SendStarNudge(context.Context, chat.ChatID, string) (chat.Mess
 // SendDraft maps one run to a stable, non-zero int64 draft ID. It never returns a
 // synthetic message ID; the shared service persists the final text with Send.
 func (t *Transport) SendDraft(ctx context.Context, chatID, runID, text string) error {
+	if err := messageText(text); err != nil {
+		return err
+	}
+	return t.sendDraft(ctx, chatID, runID, text)
+}
+
+// ClearDraft explicitly removes the run's ephemeral progress using LO's empty-text contract.
+func (t *Transport) ClearDraft(ctx context.Context, chatID, runID string) error {
+	return t.sendDraft(ctx, chatID, runID, "")
+}
+
+func (t *Transport) sendDraft(ctx context.Context, chatID, runID, text string) error {
 	if !t.drafts {
 		return ErrUnsupported
 	}
@@ -154,9 +166,6 @@ func (t *Transport) SendDraft(ctx context.Context, chatID, runID, text string) e
 	if id < 0 {
 		return ErrUnsupported
 	} // LO drafts are private-chat only.
-	if err := messageText(text); err != nil {
-		return err
-	}
 	digest := sha256.Sum256([]byte(runID))
 	const positiveMask = uint64(1<<63 - 1)
 	draftID := binary.BigEndian.Uint64(digest[:8]) & positiveMask
