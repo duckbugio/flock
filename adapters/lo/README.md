@@ -57,7 +57,9 @@ this adapter does not promise exactly-once agent execution or automatic resume.
 ## Behavior
 
 - Private chats and groups; group prompts require an exact `@botname` token or
-  `/command@botname` when `REQUIRE_GROUP_MENTION=true`.
+  `/command@botname` when `REQUIRE_GROUP_MENTION=true`. This requires a bot
+  username from LO. Startup warns if it is missing; use private chats or disable
+  the mention requirement until the bot has a username.
 - `/start`, `/help`, `/new`, `/stop`, `/goal`, `/schedule`; other slash commands
   reach the selected AI provider unchanged. `/stop` works while another run is
   active because admission uses Flock's nonblocking dispatcher.

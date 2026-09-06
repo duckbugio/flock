@@ -60,6 +60,9 @@ func run() int {
 		logger.Error("authenticate LO bot", "error", err)
 		return 1
 	}
+	if self.Username == "" {
+		logger.Warn("LO bot has no username; group mentions cannot match; use private chats or set REQUIRE_GROUP_MENTION=false")
+	}
 	if err := api.CheckPolling(ctx); err != nil {
 		logger.Error("LO polling unavailable", "error", err)
 		return 1

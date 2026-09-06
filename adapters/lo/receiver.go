@@ -126,18 +126,18 @@ func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
 		r.reserved(ctx, chatID, msg.From.ID, name, args)
 		return
 	}
-	if r.cfg.Guards != nil {
-		if allowed, reason := r.cfg.Guards(msg.From.ID); !allowed {
-			r.notify(ctx, chatID, reason)
-			return
-		}
-	}
 	if hasMedia(msg) {
 		r.notify(ctx, chatID, "Attachments are not supported yet. Please send the relevant text or a repository path.")
 		return
 	}
 	if text == "" {
 		return
+	}
+	if r.cfg.Guards != nil {
+		if allowed, reason := r.cfg.Guards(msg.From.ID); !allowed {
+			r.notify(ctx, chatID, reason)
+			return
+		}
 	}
 	if msg.Reply != nil {
 		quoted := msg.Reply.Text

@@ -203,3 +203,29 @@ func TestLongCommandNoticeIsChunkedWithoutLosingText(t *testing.T) {
 		t.Fatal("long notice was lost or truncated")
 	}
 }
+
+func TestIgnoredMessagesDoNotSpendGuardBudget(t *testing.T) {
+	t.Parallel()
+	svc := &serviceSpy{}
+	api := client(t, func(w http.ResponseWriter, _ *http.Request) { reply(w, `{"ok":true,"result":{"message_id":1}}`) })
+	calls := 0
+	receiver := lo.NewReceiver(lo.ReceiverConfig{
+		Service: svc, Transport: lo.NewTransport(api, false), Username: "flock",
+		IsAllowed: func(int64) bool { return true }, RequireMention: true,
+		Guards: func(int64) (bool, string) { calls++; return true, "" },
+	})
+	media := inbound("photo")
+	media.Photo = json.RawMessage(`[{}]`)
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: media})
+	empty := inbound("@flock")
+	empty.Chat.ID, empty.Chat.Type = -42, "group"
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: empty})
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: inbound("")})
+	if calls != 0 {
+		t.Fatalf("ignored messages spent %d guard calls", calls)
+	}
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: inbound("hello")})
+	if calls != 1 || len(svc.prompts) != 1 {
+		t.Fatalf("calls=%d prompts=%v", calls, svc.prompts)
+	}
+}
