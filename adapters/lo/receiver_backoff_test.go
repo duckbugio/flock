@@ -28,3 +28,14 @@ func TestPollingRetryDelayIsBounded(t *testing.T) {
 		})
 	}
 }
+
+func TestTransientPollingErrorsRemainRetryable(t *testing.T) {
+	t.Parallel()
+	for _, code := range []int{
+		http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway,
+	} {
+		if fatalAPIError(&APIError{Code: code}) {
+			t.Fatalf("status %d classified as permanent", code)
+		}
+	}
+}

@@ -116,6 +116,9 @@ func (c *Client) call(ctx context.Context, method string, body, out any) error {
 		} `json:"parameters"`
 	}
 	if err := json.Unmarshal(data, &envelope); err != nil {
+		if resp.StatusCode >= http.StatusMultipleChoices {
+			return &APIError{Code: resp.StatusCode, Description: "non-JSON HTTP error response"}
+		}
 		return fmt.Errorf("LO returned an invalid API envelope (HTTP %d)", resp.StatusCode)
 	}
 	if !envelope.OK || resp.StatusCode != http.StatusOK {

@@ -107,8 +107,12 @@ func addressedText(text, username string) (string, bool) {
 
 func fatalAPIError(err error) bool {
 	var apiErr *APIError
-	return errors.As(err, &apiErr) &&
-		(apiErr.Code == http.StatusUnauthorized || apiErr.Code == http.StatusForbidden || apiErr.Code == http.StatusConflict)
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return (apiErr.Code >= 400 && apiErr.Code < 500 &&
+		apiErr.Code != http.StatusRequestTimeout && apiErr.Code != http.StatusTooManyRequests) ||
+		apiErr.Code == http.StatusNotImplemented
 }
 
 // SetCommands registers the shared reserved command list only when explicitly enabled.

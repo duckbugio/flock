@@ -142,6 +142,9 @@ func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
 		if quoted == "" {
 			quoted = msg.Reply.Caption
 		}
+		if hasMedia(msg.Reply) {
+			quoted += "\n[Quoted attachment is unavailable to this bot; ask the user for its contents if needed.]"
+		}
 		author := ""
 		if msg.Reply.From != nil {
 			author = msg.Reply.From.Username

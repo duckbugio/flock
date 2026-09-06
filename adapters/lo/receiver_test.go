@@ -247,3 +247,45 @@ func TestStaleOnlyPollingBatchBacksOff(t *testing.T) {
 		t.Fatalf("polls=%d; expected initial batch then one stale batch", got)
 	}
 }
+
+func TestPollingStopsOnPermanentHTTPFailure(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{
+		http.StatusBadRequest, http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented,
+	} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+			var calls atomic.Int32
+			api := client(t, func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(status)
+				reply(w, "unsupported")
+			})
+			receiver := lo.NewReceiver(lo.ReceiverConfig{Client: api})
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			err := receiver.Run(ctx)
+			var apiErr *lo.APIError
+			if !errors.As(err, &apiErr) || apiErr.Code != status || calls.Load() != 1 {
+				t.Fatalf("calls=%d err=%v", calls.Load(), err)
+			}
+		})
+	}
+}
+
+func TestQuotedAttachmentIsExplicitInPrompt(t *testing.T) {
+	t.Parallel()
+	for _, caption := range []string{"", "diagram caption"} {
+		svc := &serviceSpy{}
+		receiver := lo.NewReceiver(lo.ReceiverConfig{Service: svc, IsAllowed: func(int64) bool { return true }})
+		msg := inbound("explain this")
+		msg.Reply = inbound("")
+		msg.Reply.Caption = caption
+		msg.Reply.Photo = json.RawMessage(`[{}]`)
+		receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
+		if len(svc.prompts) != 1 ||
+			!strings.Contains(svc.prompts[0], "Quoted attachment is unavailable") || !strings.Contains(svc.prompts[0], caption) {
+			t.Fatalf("prompts=%v", svc.prompts)
+		}
+	}
+}
