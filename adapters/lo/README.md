@@ -40,8 +40,15 @@ stores live below `<APPROVED_DIRECTORY>/lo`, isolating equal numeric chat IDs.
 Explicit store-path overrides and authentication volumes should also be unique
 to the LO deployment.
 
+Graceful shutdown honors `SHUTDOWN_DRAIN_SECONDS` (45 seconds by default, capped
+at 60 with a startup warning). Compose allows 75 seconds, leaving room for the
+shared dispatcher's ten-second post-cancel delivery window.
+
 Run one polling replica per token. Startup checks `getMe` and `getWebhookInfo`;
-an existing webhook is an error, never automatically deleted. `getUpdates`
+an existing webhook is an error, never automatically deleted. Explicit API
+404/501 from `getWebhookInfo` logs a warning and continues to polling; `getUpdates`
+still refuses a webhook/poller conflict with 409. Authentication failures and other
+startup-check errors remain fatal. `getUpdates`
 retains queued messages, advances the offset after dispatch, and does not request
 callback/edited-message updates it cannot handle. As with ordinary long polling,
 a crash before the next offset acknowledgement can redeliver the last batch;

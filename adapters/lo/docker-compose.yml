@@ -9,8 +9,8 @@ services:
         FLOCK_COMMAND: flock-lo
     restart: unless-stopped
     env_file: .env
-    # 5s dispatcher drain + 10s post-cancel delivery; leave 15s before SIGKILL.
-    stop_grace_period: 30s
+    # Default drain 45s, capped at 60s, plus 10s post-cancel delivery: at most 70s < 75s.
+    stop_grace_period: 75s
     volumes:
       - workspace:/workspace
       - claude_home:/home/claude/.claude

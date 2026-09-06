@@ -26,10 +26,7 @@ import (
 	"github.com/duckbugio/flock/internal/config"
 )
 
-const (
-	shutdownTimeout = 5 * time.Second
-	workspaceMode   = 0o700
-)
+const workspaceMode = 0o700
 
 func main() { os.Exit(run()) }
 
@@ -126,8 +123,12 @@ func run() int {
 	}
 	limiter := ratelimit.New(cfg.RateLimitRequests, cfg.RateLimitWindow())
 	dispatcher := dispatch.New(cfg.MaxConcurrentChatRuns)
+	if cfg.ShutdownDrainClamped() {
+		logger.Warn("SHUTDOWN_DRAIN_SECONDS above cap; clamped",
+			"configured_seconds", cfg.ShutdownDrainSeconds, "effective", cfg.ShutdownDrain())
+	}
 	defer func() {
-		drain, stop := context.WithTimeout(context.Background(), shutdownTimeout)
+		drain, stop := context.WithTimeout(context.Background(), cfg.ShutdownDrain())
 		defer stop()
 		if err := dispatcher.Shutdown(drain); err != nil {
 			logger.Warn("dispatcher drain", "error", err)

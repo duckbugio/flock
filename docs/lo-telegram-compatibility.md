@@ -21,6 +21,7 @@ their deployment before enabling optional flags.
 
 | Flock behavior | LO main contract | Adapter behavior |
 | --- | --- | --- |
+| Webhook preflight | `getWebhookInfo` is registered on main | Refuses active webhooks; explicit 404/501 on older deployments falls back to polling conflict detection |
 | Incoming text | `getUpdates`, positive offset acknowledgement | Long polling; separate LO user allow-list; group mention gate |
 | Persistent answer / progress edits | `sendMessage`, `editMessageText`, `deleteMessage` | Implemented with numeric IDs and plain text |
 | Ephemeral progress | `sendMessageDraft` is a 501 stub | Opt-in `LO_ENABLE_DRAFTS`; stable draft ID per run; explicit empty-text cleanup before a real final `sendMessage`; initial failure falls back to an editable anchor |

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -196,12 +197,18 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64) ([]Update, error)
 	return updates, err
 }
 
-// CheckPolling refuses a webhook deployment rather than silently removing its webhook.
+// CheckPolling refuses an active webhook without mutating it. Older deployments
+// that explicitly lack this read method fall back to getUpdates' conflict check.
 func (c *Client) CheckPolling(ctx context.Context) error {
 	var info struct {
 		URL string `json:"url"`
 	}
 	if err := c.call(ctx, "getWebhookInfo", struct{}{}, &info); err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && (apiErr.Code == http.StatusNotFound || apiErr.Code == http.StatusNotImplemented) {
+			slog.Warn("LO deployment does not support getWebhookInfo; continuing with polling")
+			return nil
+		}
 		return err
 	}
 	if info.URL != "" {

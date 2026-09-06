@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -284,5 +285,31 @@ func TestPollingBatchFitsFullSizeUnicodeReplies(t *testing.T) {
 	updates, err := api.GetUpdates(t.Context(), 0)
 	if err != nil || len(updates) != batchSize {
 		t.Fatalf("count=%d err=%v", len(updates), err)
+	}
+}
+
+func TestWebhookPreflightOnlyFallsBackForUnsupportedMethods(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		code      int
+		wantError bool
+	}{
+		{http.StatusNotFound, false},
+		{http.StatusNotImplemented, false},
+		{http.StatusUnauthorized, true},
+		{http.StatusForbidden, true},
+		{http.StatusInternalServerError, true},
+		{http.StatusTooManyRequests, true},
+	} {
+		t.Run(strconv.Itoa(test.code), func(t *testing.T) {
+			t.Parallel()
+			api := client(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.code)
+				reply(w, fmt.Sprintf(`{"ok":false,"error_code":%d,"description":"fixture"}`, test.code))
+			})
+			if err := api.CheckPolling(t.Context()); (err != nil) != test.wantError {
+				t.Fatalf("error=%v wantError=%v", err, test.wantError)
+			}
+		})
 	}
 }
