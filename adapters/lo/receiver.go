@@ -66,10 +66,7 @@ func (r *Receiver) Run(ctx context.Context) error {
 			if fatalAPIError(err) {
 				return err
 			}
-			delay, ok := RetryAfter(err)
-			if !ok {
-				delay = time.Second
-			}
+			delay := pollingRetryDelay(err)
 			r.cfg.Logger.Warn("lo: polling failed; retrying", "error", err)
 			if !wait(ctx, delay) {
 				return ctx.Err()
@@ -185,4 +182,15 @@ func wait(ctx context.Context, delay time.Duration) bool {
 	case <-timer.C:
 		return true
 	}
+}
+
+// pollingRetryDelay keeps a faulty server hint from suspending reception for hours.
+// Match the delivery loop's maximum wait while retaining shorter server hints.
+func pollingRetryDelay(err error) time.Duration {
+	const maxWait = 30 * time.Second
+	delay, ok := RetryAfter(err)
+	if !ok {
+		return time.Second
+	}
+	return min(delay, maxWait)
 }
