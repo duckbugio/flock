@@ -131,3 +131,21 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  lo-image:
+    name: Build LO image (no push)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./adapters/telegram/Dockerfile
+          build-args: FLOCK_COMMAND=flock-lo
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha,scope=lo
+          cache-to: type=gha,mode=max,scope=lo

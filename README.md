@@ -11,7 +11,7 @@
 
 # Flock
 
-**Run a Claude Code AI dev team on your server and drive it from chat.** Describe a feature in Telegram or VK; the team plans it, builds it on a branch, tests it, reviews it, and opens a PR — each chat in its own isolated workspace.
+**Run a Claude Code AI dev team on your server and drive it from chat.** Describe a feature in Telegram, VK or LO; the team plans it, builds it on a branch, tests it, reviews it, and opens a PR — each chat in its own isolated workspace.
 
 [![CI](https://github.com/duckbugio/flock/actions/workflows/ci.yml/badge.svg)](https://github.com/duckbugio/flock/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -50,12 +50,14 @@ Everything else in [`.env.example`](adapters/telegram/.env.example) has sensible
 | `VK_GROUP_ID` | your community's numeric id (long-poll server + mention parse) |
 | `VK_ALLOWED_USERS` | comma-separated VK user IDs allowed to use the bot |
 
+**LO** has a text-first adapter with its own allow-list and workspace namespace. Build it locally using [`adapters/lo/`](adapters/lo/README.md); no prebuilt LO image is published by this change. See the [LO / Telegram compatibility audit](docs/lo-telegram-compatibility.md) for supported commands, optional streaming, and platform gaps.
+
 ## Highlights
 
 - **The conversation is the task source** — describe what you want in chat and review the PR that comes back; the agent's shell and editor are sandboxed inside the container.
 - **A real dev-team pipeline, not a single prompt** — spec-first acceptance criteria, build/regression gates, and an arbiter that breaks loops.
 - **Autonomy loops** — the bot **verifies its own "done"** by re-running the repo's check gate itself; `/goal` arms an **independent evaluator** that loops the team until your criterion actually holds; `/schedule` runs recurring jobs; an optional **CI watch** reacts to red builds (and can auto-merge green PRs) — all under a per-chat daily autonomy budget. See [Autonomy loops](#autonomy-loops).
-- **Multi-transport** — **Telegram** and **VK** today, both on the same core; a new platform is a thin adapter, not a fork.
+- **Multi-transport** — **Telegram**, **VK** and a text-first **LO** adapter on the same core; a new platform is a thin adapter, not a fork.
 - **PR reactions without inbound webhooks** — the bot *polls* your git host for new review comments and routes each back to the chat that opened the PR.
 - **Subscription-friendly** — authenticate with a Claude Pro/Max token (no per-token cost) or an Anthropic API key.
 

@@ -88,6 +88,13 @@ var (
 // deployment need not set TELEGRAM_BOT_TOKEN and vice versa, while the shared
 // core config is parsed once and reused.
 type Config struct {
+	// LO uses its own credentials and user-ID namespace; no Telegram defaults apply.
+	LOBotToken         string  `env:"LO_BOT_TOKEN"`
+	LOAPIURL           string  `env:"LO_API_URL"`
+	LOAllowedUsers     []int64 `env:"LO_ALLOWED_USERS" envSeparator:","`
+	LOEnableDrafts     bool    `env:"LO_ENABLE_DRAFTS" envDefault:"false"`
+	LORegisterCommands bool    `env:"LO_REGISTER_COMMANDS" envDefault:"false"`
+
 	// Telegram (cmd/flock-telegram). Validated by ValidateTelegram, not env-required.
 	TelegramBotToken    string `env:"TELEGRAM_BOT_TOKEN"`
 	TelegramBotUsername string `env:"TELEGRAM_BOT_USERNAME"`
@@ -946,4 +953,36 @@ func (c Config) CIWatchEnabled() bool {
 		return false
 	}
 	return c.CIWatchGitHub() || c.GiteaAPIURL != ""
+}
+
+// ValidateLO rejects incomplete transport configuration before contacting any endpoint.
+func (c Config) ValidateLO() error {
+	if strings.TrimSpace(c.LOBotToken) == "" {
+		return errors.New("LO_BOT_TOKEN is required")
+	}
+	if strings.TrimSpace(c.LOAPIURL) == "" {
+		return errors.New("LO_API_URL is required")
+	}
+	if len(c.LOAllowedUsers) == 0 {
+		return errors.New("LO_ALLOWED_USERS must contain at least one LO user ID")
+	}
+	for _, id := range c.LOAllowedUsers {
+		if id <= 0 {
+			return errors.New("LO_ALLOWED_USERS must contain positive LO user IDs")
+		}
+	}
+	return nil
+}
+
+// IsLOAllowed never falls back to the Telegram or VK allow-list.
+func (c Config) IsLOAllowed(userID int64) bool {
+	if userID <= 0 {
+		return false
+	}
+	for _, allowed := range c.LOAllowedUsers {
+		if allowed == userID {
+			return true
+		}
+	}
+	return false
 }

@@ -22,10 +22,12 @@ COPY core/ ./core/
 COPY adapters/ ./adapters/
 COPY internal/ ./internal/
 
+ARG FLOCK_COMMAND=flock-telegram
 ARG TARGETOS
 ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -buildvcs=false -trimpath -ldflags "-s -w" -o /out/flock-telegram ./cmd/flock-telegram
+RUN case "$FLOCK_COMMAND" in flock-telegram|flock-lo) ;; *) exit 1 ;; esac && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -buildvcs=false -trimpath -ldflags "-s -w" -o /out/flock-telegram "./cmd/${FLOCK_COMMAND}"
 
 # --- Runtime stage ------------------------------------------------------------
 # node:24 (current LTS) supplies Node (for the `claude` CLI). Add git/ripgrep/ffmpeg

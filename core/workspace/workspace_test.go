@@ -345,3 +345,24 @@ func TestAutoApproveScopeSubstitution(t *testing.T) {
 		t.Fatalf("AutoApproveScope must substitute, got: %s", data)
 	}
 }
+
+func TestWorkspaceWithoutFileDeliveryDoesNotPromiseAttachments(t *testing.T) {
+	r := newTestRenderer(t)
+	r.FileDeliveryDisabled = true
+	ws, err := r.Ensure("77")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(ws, "CLAUDE.md")) //nolint:gosec // Controlled test workspace.
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "cannot deliver attachments") || !strings.Contains(text, "shot <url>") {
+		t.Fatal("missing local artifact instructions")
+	}
+	if strings.Contains(text, "sent to the user as a Telegram document") ||
+		strings.Contains(text, "delivers it to the user in chat") {
+		t.Fatal("unsupported attachment delivery promised")
+	}
+}

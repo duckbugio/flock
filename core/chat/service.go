@@ -498,15 +498,28 @@ func (s *Service) run(
 	start := s.nowFunc()
 	prog := NewProgress(func() time.Duration { return s.nowFunc().Sub(start) }, 0, workdir)
 
-	// The anchor: a persistent message that carries the Stop button and is edited in
-	// place with the live progress frame, then with the final answer. An empty id
-	// means no anchor was created (Send failed) — we can still deliver.
-	progressMsgID, err := s.chat.Send(ctx, chatID, anchorText, runID, false)
-	if err != nil {
-		// Without an anchor we can still deliver the result; keep going.
-		s.log.Error("send anchor message", "error", err)
-		progressMsgID = ""
+	// Prefer an ephemeral draft when the transport opts in. Otherwise create a
+	// persistent anchor, edited with progress and then the final answer. Drafts
+	// have no message ID; their final answer must be sent as a new message.
+
+	draft, hasDraft := s.chat.(DraftTransport)
+	usingDraft := false
+	if s.caps.CanSendDraft && hasDraft {
+		if draftErr := draft.SendDraft(ctx, chatID, runID, anchorText); draftErr == nil {
+			usingDraft = true
+		} else {
+			s.log.Debug("draft unavailable; using editable progress", "error", draftErr)
+		}
 	}
+	var progressMsgID MessageID
+	if !usingDraft {
+		progressMsgID, err = s.chat.Send(ctx, chatID, anchorText, runID, false)
+		if err != nil {
+			s.log.Error("send anchor message", "error", err)
+			progressMsgID = ""
+		}
+	}
+
 	// Record the anchor id on the marker now that it is known, so a restart can
 	// best-effort edit the dangling "Working…" message into a resume notice. The
 	// prompt was already persisted at submit; this only enriches the same entry by
@@ -528,17 +541,16 @@ func (s *Service) run(
 		finalErr    error
 	)
 
-	// render edits the single anchor message in place with the current progress
-	// frame, rate-limit aware. The anchor IS the one live progress bubble (it also
-	// carries the Stop button), so a run is exactly ONE message on every platform.
+	// render updates the draft or persistent anchor with the current progress
+	// frame, rate-limit aware. Transports may attach a Stop button to the anchor.
 	// Telegram caps message edits, so real edits are throttled to one per
 	// minEditInterval; the 1s ticker only advances the in-memory counter, and most
 	// ticks early-return on frame==lastSent or the throttle.
 	render := func() {
-		if progressMsgID == "" {
+		if progressMsgID == "" && !usingDraft {
 			return
 		}
-		frame := prog.Frame()
+		frame := truncateRunes(prog.Frame(), s.maxRunes)
 		if frame == lastSent {
 			return
 		}
@@ -553,7 +565,13 @@ func (s *Service) run(
 		if !lastEditAt.IsZero() && s.nowFunc().Sub(lastEditAt) < minEditInterval {
 			return
 		}
-		if err := s.chat.Edit(ctx, chatID, progressMsgID, frame, runID, true); err != nil {
+		var editErr error
+		if usingDraft {
+			editErr = draft.SendDraft(ctx, chatID, runID, frame)
+		} else {
+			editErr = s.chat.Edit(ctx, chatID, progressMsgID, frame, runID, true)
+		}
+		if err := editErr; err != nil {
 			if d, ok := s.retryAfterErr(err); ok {
 				throttledUntil = s.nowFunc().Add(d)
 			}
@@ -863,7 +881,7 @@ func (s *Service) finish(
 			}
 		}
 	} else {
-		// No anchor existed (the initial progress Send failed): the first chunk is a
+		// No anchor existed (draft mode or initial Send failed): the first chunk is a
 		// fresh Send, so the notice replies to its returned id.
 		if sErr := s.deliverWithBackoff(deliverCtx, "send final", func() error {
 			id, e := s.chat.Send(deliverCtx, chatID, chunks[0], "", true)

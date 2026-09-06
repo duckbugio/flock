@@ -1,0 +1,23 @@
+# Build locally: no prebuilt flock-lo image is assumed or published by this change.
+services:
+  bot:
+    image: flock-lo:local
+    build:
+      context: ../..
+      dockerfile: adapters/telegram/Dockerfile
+      args:
+        FLOCK_COMMAND: flock-lo
+    restart: unless-stopped
+    env_file: .env
+    stop_grace_period: 15s
+    volumes:
+      - workspace:/workspace
+      - claude_home:/home/claude/.claude
+      - codex_home:/home/claude/.codex
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+volumes:
+  workspace:
+  claude_home:
+  codex_home:

@@ -64,6 +64,10 @@ type Transport interface {
 // defined fallback so a missing primitive never breaks delivery. Telegram and VK
 // set CanSendDocument true and MaxMessageRunes 4096.
 type Capabilities struct {
+	// CanSendDraft enables ephemeral progress when Transport also implements DraftTransport.
+	// A failed initial draft falls back to the ordinary editable anchor.
+	CanSendDraft bool
+
 	// CanSendDocument: platform supports file attachments. false → the outbox
 	// sweep is skipped. (Telegram/VK: true.)
 	CanSendDocument bool
@@ -78,4 +82,10 @@ type Capabilities struct {
 	// rich path always falls back to MarkdownToHTML/plain on any error, so the flag
 	// is a feature toggle, never a hard dependency.
 	CanSendRich bool
+}
+
+// DraftTransport is an optional ephemeral-progress channel. runID is stable for
+// a run, not a MessageID. The terminal answer is always persisted through Send.
+type DraftTransport interface {
+	SendDraft(ctx context.Context, chatID ChatID, runID, text string) error
 }
