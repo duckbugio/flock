@@ -143,8 +143,7 @@ jobs:
       - uses: docker/build-push-action@v7
         with:
           context: .
-          file: ./adapters/telegram/Dockerfile
-          build-args: FLOCK_COMMAND=flock-lo
+          file: ./adapters/lo/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: false
           cache-from: type=gha,scope=lo

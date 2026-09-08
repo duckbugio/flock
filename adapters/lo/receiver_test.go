@@ -63,6 +63,15 @@ func TestReceiverGatesCommandsAndPreservesProviderCommands(t *testing.T) {
 	group.Chat.ID = -42
 	group.Chat.Type = "group"
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: group})
+	group.Text = "/stop"
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: group})
+	group.Text = "/new"
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: group})
+	group.Text = "/stop@other"
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: group})
+	if svc.stopped != 2 || svc.newSessions != 2 {
+		t.Fatalf("group commands must bypass mention gating but reject other bots: %+v", svc)
+	}
 	group.Text = "@flock hello"
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: group})
 	if len(svc.prompts) != 2 || svc.prompts[1] != "hello" {
@@ -147,7 +156,7 @@ func TestPollingAcknowledgesInOrderAndStopsOnConflict(t *testing.T) {
 	receiver := lo.NewReceiver(lo.ReceiverConfig{
 		Service: svc, Client: api, Transport: lo.NewTransport(api, false), IsAllowed: func(int64) bool { return true },
 	})
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	err := receiver.Run(ctx)
 	var apiErr *lo.APIError
@@ -233,14 +242,29 @@ func TestIgnoredMessagesDoNotSpendGuardBudget(t *testing.T) {
 func TestStaleOnlyPollingBatchBacksOff(t *testing.T) {
 	t.Parallel()
 	var calls atomic.Int32
+	stale := make(chan struct{})
 	api := client(t, func(w http.ResponseWriter, _ *http.Request) {
-		calls.Add(1)
+		if calls.Add(1) == 2 {
+			close(stale)
+		}
 		reply(w, `{"ok":true,"result":[{"update_id":1}]}`)
 	})
 	receiver := lo.NewReceiver(lo.ReceiverConfig{Client: api})
-	ctx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	if err := receiver.Run(ctx); !errors.Is(err, context.DeadlineExceeded) {
+	done := make(chan error, 1)
+	go func() { done <- receiver.Run(ctx) }()
+	select {
+	case <-stale:
+	case <-ctx.Done():
+		t.Fatal("poller did not reach the stale batch")
+	}
+	// Start the observation window after the second request, not at process startup.
+	timer := time.NewTimer(150 * time.Millisecond)
+	defer timer.Stop()
+	<-timer.C
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	if got := calls.Load(); got != 2 {
@@ -287,5 +311,25 @@ func TestQuotedAttachmentIsExplicitInPrompt(t *testing.T) {
 			!strings.Contains(svc.prompts[0], "Quoted attachment is unavailable") || !strings.Contains(svc.prompts[0], caption) {
 			t.Fatalf("prompts=%v", svc.prompts)
 		}
+	}
+}
+
+func TestPollingRecoversFromTransientConflict(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	var calls atomic.Int32
+	api := client(t, func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusConflict)
+			reply(w, `{"ok":false,"error_code":409,"description":"previous poll still closing"}`)
+			return
+		}
+		cancel()
+		reply(w, `{"ok":true,"result":[]}`)
+	})
+	err := lo.NewReceiver(lo.ReceiverConfig{Client: api}).Run(ctx)
+	if !errors.Is(err, context.Canceled) || calls.Load() != 2 {
+		t.Fatalf("polls=%d err=%v", calls.Load(), err)
 	}
 }

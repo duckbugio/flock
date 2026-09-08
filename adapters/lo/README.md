@@ -17,10 +17,9 @@ docker compose up --build -d
 `LO_API_URL` is the deployed Bot API base, for example an operator-supplied HTTPS
 origin with an optional gateway path. Requests are posted to
 `<base>/bot<LO_BOT_TOKEN>/<method>`. Do not use the Mini App Connect endpoint.
-There is deliberately no guessed production URL or published LO image. The build
-reuses Flock's existing AI runtime Dockerfile, selecting `FLOCK_COMMAND=flock-lo`.
-The historical executable path inside that image remains `flock-telegram`; the
-compiled program is `cmd/flock-lo`.
+There is deliberately no guessed production URL or published LO image. The dedicated
+`adapters/lo/Dockerfile` builds and runs `/usr/local/bin/flock-lo`, with the same
+AI tooling as the other adapters. Compose caps memory with `BOT_MEM_LIMIT` (3g by default).
 
 For a host with Go and the selected AI CLI installed:
 
@@ -47,7 +46,7 @@ shared dispatcher's ten-second post-cancel delivery window.
 Run one polling replica per token. Startup checks `getMe` and `getWebhookInfo`;
 an existing webhook is an error, never automatically deleted. Explicit API
 404/501 from `getWebhookInfo` logs a warning and continues to polling; `getUpdates`
-still refuses a webhook/poller conflict with 409. Authentication failures and other
+retries transient 409 conflicts and stops after five consecutive conflicts. Authentication failures and other
 startup-check errors remain fatal. `getUpdates`
 retains queued messages, advances the offset after dispatch, and does not request
 callback/edited-message updates it cannot handle. As with ordinary long polling,
@@ -60,6 +59,8 @@ this adapter does not promise exactly-once agent execution or automatic resume.
   `/command@botname` when `REQUIRE_GROUP_MENTION=true`. This requires a bot
   username from LO. Startup warns if it is missing; use private chats or disable
   the mention requirement until the bot has a username.
+- Reserved commands bypass the group mention requirement; `/command@other_bot`
+  is still rejected and the user allow-list always applies.
 - `/start`, `/help`, `/new`, `/stop`, `/goal`, `/schedule`; other slash commands
   reach the selected AI provider unchanged. `/stop` works while another run is
   active because admission uses Flock's nonblocking dispatcher.

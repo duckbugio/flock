@@ -1,9 +1,9 @@
-# Self-contained image for the Flock AI dev-team Telegram bot (Go rewrite).
+# Self-contained image for the Flock AI dev-team LO bot (Go rewrite).
 # A multi-stage build: compile the static Go binary, then assemble a slim runtime
 # with Node + the `claude`/`codex` CLIs and the tools the team shells out to.
 # Behaviour is toggled at RUNTIME via env (see .env.example).
-# Built & published by .github/workflows/publish-telegram.yml -> ghcr.io/duckbugio/flock-telegram
-# Build context is the REPO ROOT (COPY paths are root-relative): docker build -f adapters/telegram/Dockerfile .
+# Built locally and validated by the LO image CI job.
+# Build context is the REPO ROOT (COPY paths are root-relative): docker build -f adapters/lo/Dockerfile .
 
 # --- Build stage: compile the Go binary ---------------------------------------
 # Build on the native BUILDPLATFORM and cross-compile to TARGETARCH (CGO off), so
@@ -25,7 +25,7 @@ COPY internal/ ./internal/
 ARG TARGETOS
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -buildvcs=false -trimpath -ldflags "-s -w" -o /out/flock-telegram ./cmd/flock-telegram
+    go build -buildvcs=false -trimpath -ldflags "-s -w" -o /out/flock-lo ./cmd/flock-lo
 
 # --- Runtime stage ------------------------------------------------------------
 # node:24 (current LTS) supplies Node (for the `claude` CLI). Add git/ripgrep/ffmpeg
@@ -178,7 +178,7 @@ RUN userdel -r node 2>/dev/null || true; \
  && chown -R claude:claude /workspace /app /home/claude/.claude /home/claude/.codex /opt/duck
 
 # The compiled bot.
-COPY --from=build /out/flock-telegram /usr/local/bin/flock-telegram
+COPY --from=build /out/flock-lo /usr/local/bin/flock-lo
 
 # Shared team config — rendered per chat into the workspace by core/workspace at runtime.
 COPY --chown=claude:claude core/agents/*.md /opt/duck/agents/
@@ -192,4 +192,4 @@ ENV HOME=/home/claude \
 
 WORKDIR /app
 # The Go binary wires git + renders the workspace itself (no shell entrypoint needed).
-ENTRYPOINT ["/usr/local/bin/flock-telegram"]
+ENTRYPOINT ["/usr/local/bin/flock-lo"]

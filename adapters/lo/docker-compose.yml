@@ -4,13 +4,12 @@ services:
     image: flock-lo:local
     build:
       context: ../..
-      dockerfile: adapters/telegram/Dockerfile
-      args:
-        FLOCK_COMMAND: flock-lo
+      dockerfile: adapters/lo/Dockerfile
     restart: unless-stopped
     env_file: .env
     # Default drain 45s, capped at 60s, plus 10s post-cancel delivery: at most 70s < 75s.
     stop_grace_period: 75s
+    mem_limit: ${BOT_MEM_LIMIT:-3g}
     volumes:
       - workspace:/workspace
       - claude_home:/home/claude/.claude

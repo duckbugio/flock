@@ -7,15 +7,15 @@ was available during implementation.
 ## Reproducible baseline
 
 - Flock: `3858d8c37f54bbf5c7a6f9880839009418bfef82`.
-- LO messenger `origin/main`, fetched on 2026-09-06:
-  `6df9fd6cdd53f5f72bfd02f84f207be4b2540f60`.
-- [LO method registry](https://git.lo.ink/LO/messenger/src/commit/6df9fd6cdd53f5f72bfd02f84f207be4b2540f60/bots/bot-api-service/internal/usecase/botmethod/getme.go).
-- [LO sendMessage parameter allow-list](https://git.lo.ink/LO/messenger/src/commit/6df9fd6cdd53f5f72bfd02f84f207be4b2540f60/bots/bot-api-service/internal/usecase/botmethod/sendmessage.go).
+- LO messenger `origin/main`, verified on 2026-09-09:
+  `5174d1405ec409dbc67edd99ac65c1aad3f7b2b0`.
+- [LO method registry](https://git.lo.ink/LO/messenger/src/commit/5174d1405ec409dbc67edd99ac65c1aad3f7b2b0/bots/bot-api-service/internal/usecase/botmethod/getme.go).
+- [LO sendMessage parameter allow-list](https://git.lo.ink/LO/messenger/src/commit/5174d1405ec409dbc67edd99ac65c1aad3f7b2b0/bots/bot-api-service/internal/usecase/botmethod/sendmessage.go).
 
-These references describe the fetched main branch, not what is deployed. Separate
-local LO changes implement more of the draft/command/formatting surface; they are
-not treated as released capabilities. Operators must supply `LO_API_URL` and verify
-their deployment before enabling optional flags.
+These references describe server code. They do not replace a live Flock acceptance
+run. Operators must supply `LO_API_URL` and verify their deployment before enabling
+optional flags. In this revision draft and command support are implemented server-side;
+Flock live delivery remains to be verified with a dedicated bot token.
 
 ## What this integration exposes
 
@@ -24,10 +24,10 @@ their deployment before enabling optional flags.
 | Webhook preflight | `getWebhookInfo` is registered on main | Refuses active webhooks; explicit 404/501 on older deployments falls back to polling conflict detection |
 | Incoming text | `getUpdates`, positive offset acknowledgement | Long polling; separate LO user allow-list; group mention gate |
 | Persistent answer / progress edits | `sendMessage`, `editMessageText`, `deleteMessage` | Implemented with numeric IDs and plain text |
-| Ephemeral progress | `sendMessageDraft` is a 501 stub | Opt-in `LO_ENABLE_DRAFTS`; stable draft ID per run; explicit empty-text cleanup before a real final `sendMessage`; initial failure falls back to an editable anchor |
-| HTML / entities | `sendMessage` accepts only `chat_id`, `text` | Formatting source is sent as plain text; unsupported fields are never transmitted |
+| Ephemeral progress | `sendMessageDraft` supports private chats and empty-text cleanup | Opt-in `LO_ENABLE_DRAFTS`; stable draft ID per run; explicit empty-text cleanup before a real final `sendMessage`; initial failure falls back to an editable anchor |
+| HTML / entities | `sendMessage` accepts parse modes and entities | Formatting source is sent as plain text; unsupported fields are never transmitted |
 | Stop button | Callback keyboard fields rejected; `answerCallbackQuery` and `editMessageReplyMarkup` are stubs | `/stop` remains available to allowed users even when request/cost guards reject new work |
-| Command menu | `setMyCommands` / `getMyCommands` / `deleteMyCommands` are stubs | Text commands work; registration is separately opt-in |
+| Command menu | `setMyCommands` / `getMyCommands` / `deleteMyCommands` are implemented | Text commands work; registration is separately opt-in |
 | Native quoted reply | `reply_parameters` and legacy reply fields rejected | Completion notice is a separate message; inbound quoted text is included in the prompt when supplied |
 | Files / generated artifacts | `sendDocument` is a stub; photo/audio/video support does not establish general document parity | Document outbox disabled; received attachments get an explicit unsupported notice |
 | Provider slash commands | No platform-specific requirement | Non-reserved commands such as `/loop` reach the configured agent backend |
@@ -50,8 +50,8 @@ LO draft support is private-chat-only; groups use the persistent anchor fallback
 3. **Documents and inbound media:** complete upload, reusable file IDs, download,
    metadata and limits. Flock needs repository artifacts and screenshots, not only
    photo sends. The adapter will need corresponding download/outbox wiring.
-4. **Formatting and reply parity:** deploy parse modes/entities and native reply
-   fields with visible client rendering. Test code blocks, escaping, emoji offsets,
+4. **Formatting and reply parity:** wire the adapter to implemented parse modes/entities
+   and complete native reply fields with visible client rendering. Test code blocks, escaping, emoji offsets,
    quote targets and edit behavior, not merely accepted JSON.
 5. **Drafts and command discovery:** deploy and verify temporary-event delivery,
    expiration, final-message replacement and command menus. The opt-in flags in
@@ -96,10 +96,24 @@ Validation passed on 2026-09-06 using the repository dev-tools image (Go 1.26.6)
 - LO Compose configuration validation without loading a credential file.
 
 The full AI runtime image and multi-architecture CI job were not executed locally;
-the runtime is shared with the existing Telegram Dockerfile.
+the LO adapter now has its own Dockerfile and executable, with equivalent AI tooling.
 
 Before enabling it for real users, run the [setup](../adapters/lo/README.md) with a
 LO test bot and verify: allowed/denied users, a long-running request and `/stop`,
 emoji-heavy multi-part answers, restart during polling, and both draft flag values.
 Confirm that no transient draft is stored as a final answer and that the final
 answer remains visible after reconnecting the chat client.
+
+## Review follow-up (2026-09-09)
+
+The LO runtime now has its own Dockerfile and binary name, with a configurable 3g
+memory cap. Reserved group commands do not require a mention, but the allow-list
+and rejection of commands addressed to another bot still apply. Polling retries
+up to four consecutive 409 conflicts before the fifth stops the process; a successful
+poll resets this counter. The stale-batch regression test waits for the second request
+before observing backoff, avoiding a race with a slow runner startup.
+
+Server draft IDs remain int64 in Go and are serialized as decimal strings in client
+streaming events (`handler_internal_bot_draft.go`), so a 63-bit Flock draft ID is not
+converted to a JavaScript number by that delivery path. Real streaming rendering and
+cleanup still require the live acceptance run.

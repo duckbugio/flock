@@ -54,16 +54,17 @@ func NewReceiver(cfg ReceiverConfig) *Receiver {
 }
 
 // Run uses normal positive-offset acknowledgement, retaining queued updates on startup.
-// Only one polling process should run for a bot token; 409 is returned to the operator.
+// Only one polling process should run for a bot token; persistent conflicts stop polling.
 func (r *Receiver) Run(ctx context.Context) error {
 	var offset int64
+	conflicts := 0
 	for ctx.Err() == nil {
 		updates, err := r.cfg.Client.GetUpdates(ctx, offset)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			if fatalAPIError(err) {
+			if r.stopPolling(err, &conflicts) {
 				return err
 			}
 			delay := pollingRetryDelay(err)
@@ -73,6 +74,7 @@ func (r *Receiver) Run(ctx context.Context) error {
 			}
 			continue
 		}
+		conflicts = 0
 		previousOffset := offset
 		sort.SliceStable(updates, func(i, j int) bool { return updates[i].ID < updates[j].ID })
 		for _, update := range updates {
@@ -96,6 +98,21 @@ func (r *Receiver) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
+const maxPollingConflicts = 5
+
+// stopPolling tolerates an old in-flight poll after restart, but bounds conflicts
+// so a second persistent poller does not silently contend forever.
+func (r *Receiver) stopPolling(err error, conflicts *int) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.Code == 409 {
+		*conflicts++
+		r.cfg.Logger.Error("lo: polling conflict", "attempt", *conflicts)
+		return *conflicts >= maxPollingConflicts
+	}
+	*conflicts = 0
+	return fatalAPIError(err)
+}
+
 // HandleUpdate gates every command and message before invoking the shared service.
 func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
 	msg := update.Message
@@ -114,12 +131,12 @@ func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
 	if !addressed {
 		return
 	}
-	if msg.Chat.Type != "private" && r.cfg.RequireMention && cleaned == text {
+	name, args := command(cleaned)
+	if msg.Chat.Type != "private" && r.cfg.RequireMention && cleaned == text && !chat.IsReservedCommand(name) {
 		return
 	}
 	text = cleaned
 	chatID := strconv.FormatInt(msg.Chat.ID, 10)
-	name, args := command(text)
 	if chat.IsReservedCommand(name) {
 		r.reserved(ctx, chatID, msg.From.ID, name, args)
 		return
