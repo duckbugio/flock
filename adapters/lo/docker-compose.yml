@@ -1,0 +1,23 @@
+# Build locally: no prebuilt flock-lo image is assumed or published by this change.
+services:
+  bot:
+    image: flock-lo:local
+    build:
+      context: ../..
+      dockerfile: adapters/lo/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    # Default drain 45s, capped at 60s, plus 10s post-cancel delivery: at most 70s < 75s.
+    stop_grace_period: 75s
+    mem_limit: ${BOT_MEM_LIMIT:-3g}
+    volumes:
+      - workspace:/workspace
+      - claude_home:/home/claude/.claude
+      - codex_home:/home/claude/.codex
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+volumes:
+  workspace:
+  claude_home:
+  codex_home:

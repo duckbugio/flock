@@ -95,3 +95,4 @@ tasks:
     cmds:
       - echo "- Build"
       - "{{.DEV_TOOLS}} go build -o bin/flock-telegram ./cmd/flock-telegram"
+      - "{{.DEV_TOOLS}} go build -o bin/flock-lo ./cmd/flock-lo"

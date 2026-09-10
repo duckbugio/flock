@@ -51,6 +51,9 @@ type Renderer struct {
 	// "confirm scope and wait" gate: off | trivial | standard | all. Normalized
 	// by config.AutoApproveScopeLevel (an unknown value renders as "off").
 	AutoApproveScope string
+
+	// FileDeliveryDisabled replaces outbox promises on transports without documents.
+	FileDeliveryDisabled bool
 }
 
 // Ensure creates (or refreshes) the workspace for chatID and returns its path.
@@ -123,6 +126,18 @@ in ` + "`outbox/`" + ` is sent to the user as a Telegram document and archived
 under ` + "`outbox/sent/`" + `. Do not put files you want delivered inside a repo.
 `
 
+// localFilesConvention avoids promises the transport cannot fulfill.
+const localFilesConvention = `
+
+## Files and screenshots
+
+This chat transport cannot deliver attachments or automatically send an outbox.
+Keep generated artifacts in the workspace or the task repository as appropriate,
+and report their paths. Do not claim that a local path is a downloadable chat
+attachment. Summarize important findings in the text answer.
+
+`
+
 // shotConvention is appended to every rendered CLAUDE.md so the dev-team agents
 // know the runtime image ships a screenshot tool. Like outboxConvention it lives
 // here (not in the protected template) so the template file on disk stays
@@ -137,8 +152,9 @@ page using the bundled system Chromium:
     shot <url> <out.png> [--full] [--width=N] [--height=N] [--wait=ms]
 
 Use ` + "`--full`" + ` for a full-page capture (it autoscrolls first to load lazy
-content). Writing the PNG into ` + "`outbox/`" + ` delivers it to the user in chat
-(see the outbox convention above). Known limit: pages that require authentication —
+content). Follow the file-delivery convention above: transports with an outbox can
+deliver the PNG from ` + "`outbox/`" + `; otherwise keep it local and report its path.
+Known limit: pages that require authentication —
 e.g. a Telegram Mini App that needs ` + "`initData`" + ` — will not render.
 `
 
@@ -182,7 +198,11 @@ func (r *Renderer) renderClaudeMD(ws string) error {
 	// Append the outbox + screenshot + follow-up conventions to the RENDERED
 	// output (after substitution), keeping the protected template file on disk
 	// byte-identical.
-	rendered += outboxConvention
+	if r.FileDeliveryDisabled {
+		rendered += localFilesConvention
+	} else {
+		rendered += outboxConvention
+	}
 	rendered += shotConvention
 	rendered += followupConvention
 

@@ -10,9 +10,11 @@ adapters/telegram/deploy
 
 # Local runtime env (the image is configured at runtime, not build time).
 adapters/telegram/.env
+adapters/lo/.env
 
 # Go build/test caches and any locally-built binaries — never part of the image
 # (the binary is compiled fresh in the build stage).
+bin
 .gocache
 .cache
 flock-telegram

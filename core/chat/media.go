@@ -30,6 +30,9 @@ const maxQuotedRunes = 2000
 // quotedEllipsis marks a quoted block that was truncated to maxQuotedRunes.
 const quotedEllipsis = "…"
 
+// AssistantAuthorLabel identifies a reply to this assistant across transports.
+const AssistantAuthorLabel = "the assistant"
+
 // QuotedPrompt folds a replied-to / quoted message into the prompt so the model
 // sees the original the user is referring to, not just their new text. The quoted
 // original is placed FIRST and framed explicitly as reference data — context the

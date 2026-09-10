@@ -739,7 +739,7 @@ func botID(b *bot.Bot) int64 {
 // assistantAuthorLabel names the bot's own earlier message when it is the quoted
 // original, so the folded context reads as coming from the assistant rather than a
 // human participant.
-const assistantAuthorLabel = "the assistant"
+const assistantAuthorLabel = chat.AssistantAuthorLabel
 
 // quotedContext extracts the quoted/replied-to original from a message so it can be
 // folded into the prompt (via chat.QuotedPrompt). It returns an empty text when the
