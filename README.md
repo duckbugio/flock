@@ -96,6 +96,7 @@ The platform-agnostic dev-team brain lives in [`core/`](core/); each platform is
 |---|---|---|
 | Telegram | [`adapters/telegram/`](adapters/telegram/) | `ghcr.io/duckbugio/flock-telegram` |
 | VK | [`adapters/vk/`](adapters/vk/) | `ghcr.io/duckbugio/flock-vk` |
+| LO | [`adapters/lo/`](adapters/lo/) | `ghcr.io/duckbugio/flock-lo` |
 
 Future platforms reuse the same core — see [`docs/multi-transport-plan.md`](docs/multi-transport-plan.md).
 

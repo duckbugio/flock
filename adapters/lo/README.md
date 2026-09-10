@@ -5,6 +5,15 @@ LO's Telegram-shaped **supported subset**, not the Telegram adapter with a new
 base URL. Telegram and VK behavior remain unchanged unless their transports
 explicitly opt into the new draft capability.
 
+## First publication (maintainers)
+
+Before announcing the image or enabling Roost deployments, wait for the first
+successful Publish LO workflow on main. In the organization package settings,
+link `flock-lo` to `duckbugio/flock` and set its visibility to Public. New GHCR
+packages are private by default; a successful workflow alone does not establish
+anonymous access. Verify `docker pull ghcr.io/duckbugio/flock-lo:latest` from an
+environment without registry credentials before marking publication complete.
+
 ## Start
 
 ```sh
