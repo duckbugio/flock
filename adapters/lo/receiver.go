@@ -17,6 +17,8 @@ import (
 	"github.com/duckbugio/flock/core/schedule"
 )
 
+const privateChatType = "private"
+
 // Service is the transport-neutral inbound seam; no Telegram handlers are reused.
 type Service interface {
 	Handle(ctx context.Context, chatID chat.ChatID, userID int64, messageID chat.MessageID, text string)
@@ -29,10 +31,13 @@ type Service interface {
 
 // ReceiverConfig owns the LO allow-list separately from Telegram/VK identities.
 type ReceiverConfig struct {
-	Service        Service
-	Client         *Client
-	Transport      *Transport
-	Username       string
+	Service   Service
+	Client    *Client
+	Transport *Transport
+	Username  string
+	BotID     int64
+	// ConflictDelay overrides retry timing; nonpositive values use the production default.
+	ConflictDelay  time.Duration
 	IsAllowed      func(int64) bool
 	Guards         func(int64) (bool, string)
 	RequireMention bool
@@ -45,6 +50,9 @@ type Receiver struct{ cfg ReceiverConfig }
 
 // NewReceiver defaults to denying users unless an allow-list is wired.
 func NewReceiver(cfg ReceiverConfig) *Receiver {
+	if cfg.ConflictDelay <= 0 {
+		cfg.ConflictDelay = pollingConflictDelay
+	}
 	if cfg.IsAllowed == nil {
 		cfg.IsAllowed = func(int64) bool { return false }
 	}
@@ -69,6 +77,10 @@ func (r *Receiver) Run(ctx context.Context) error {
 				return err
 			}
 			delay := pollingRetryDelay(err)
+			var apiErr *APIError
+			if errors.As(err, &apiErr) && apiErr.Code == http.StatusConflict {
+				delay = r.cfg.ConflictDelay
+			}
 			r.cfg.Logger.Warn("lo: polling failed; retrying", "error", err)
 			if !wait(ctx, delay) {
 				return ctx.Err()
@@ -124,19 +136,20 @@ func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
 		msg.Chat.ID == 0 || !r.cfg.IsAllowed(msg.From.ID) {
 		return
 	}
-	if msg.Chat.Type != "private" && msg.Chat.Type != "group" && msg.Chat.Type != "supergroup" {
+	if msg.Chat.Type != privateChatType && msg.Chat.Type != "group" && msg.Chat.Type != "supergroup" {
 		return
 	}
 	text := strings.TrimSpace(msg.Text)
 	if text == "" {
 		text = strings.TrimSpace(msg.Caption)
 	}
-	cleaned, addressed := addressedText(text, r.cfg.Username)
+	cleaned, addressed := addressedText(text, r.cfg.Username, msg.Chat.Type != privateChatType)
 	if !addressed {
 		return
 	}
 	name, args := command(cleaned)
-	if msg.Chat.Type != "private" && r.cfg.RequireMention && cleaned == text && !chat.IsReservedCommand(name) {
+	replyToBot := r.cfg.BotID > 0 && msg.Reply != nil && msg.Reply.From != nil && msg.Reply.From.ID == r.cfg.BotID
+	if msg.Chat.Type != privateChatType && r.cfg.RequireMention && cleaned == text && !replyToBot && !chat.IsReservedCommand(name) {
 		return
 	}
 	text = cleaned

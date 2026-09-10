@@ -16,6 +16,8 @@ import (
 	"github.com/duckbugio/flock/core/goal"
 )
 
+const groupChatType = "group"
+
 type serviceSpy struct {
 	prompts     []string
 	stopped     int
@@ -61,7 +63,7 @@ func TestReceiverGatesCommandsAndPreservesProviderCommands(t *testing.T) {
 	}
 	group := inbound("hello")
 	group.Chat.ID = -42
-	group.Chat.Type = "group"
+	group.Chat.Type = groupChatType
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: group})
 	group.Text = "/stop"
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: group})
@@ -74,7 +76,7 @@ func TestReceiverGatesCommandsAndPreservesProviderCommands(t *testing.T) {
 	}
 	group.Text = "@flock hello"
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: group})
-	if len(svc.prompts) != 2 || svc.prompts[1] != "hello" {
+	if len(svc.prompts) != 3 || svc.prompts[1] != "/stop@other" || svc.prompts[2] != "hello" {
 		t.Fatal(svc.prompts)
 	}
 }
@@ -154,15 +156,12 @@ func TestPollingAcknowledgesInOrderAndStopsOnConflict(t *testing.T) {
 	})
 	svc := &serviceSpy{}
 	receiver := lo.NewReceiver(lo.ReceiverConfig{
-		Service: svc, Client: api, Transport: lo.NewTransport(api, false), IsAllowed: func(int64) bool { return true },
+		ConflictDelay: 10 * time.Millisecond,
+		Service:       svc, Client: api, Transport: lo.NewTransport(api, false), IsAllowed: func(int64) bool { return true },
 	})
-	ctx, cancel := context.WithTimeout(t.Context(), 55*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	started := time.Now()
 	err := receiver.Run(ctx)
-	if elapsed := time.Since(started); elapsed < 40*time.Second {
-		t.Fatalf("conflicts stopped polling before long-poll expiry: %v", elapsed)
-	}
 	var apiErr *lo.APIError
 	if !errors.As(err, &apiErr) || apiErr.Code != http.StatusConflict {
 		t.Fatal(err)
@@ -231,7 +230,7 @@ func TestIgnoredMessagesDoNotSpendGuardBudget(t *testing.T) {
 	media.Photo = json.RawMessage(`[{}]`)
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: media})
 	empty := inbound("@flock")
-	empty.Chat.ID, empty.Chat.Type = -42, "group"
+	empty.Chat.ID, empty.Chat.Type = -42, groupChatType
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: empty})
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: inbound("")})
 	if calls != 0 {
@@ -320,7 +319,7 @@ func TestQuotedAttachmentIsExplicitInPrompt(t *testing.T) {
 
 func TestPollingRecoversFromTransientConflict(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	var calls atomic.Int32
 	api := client(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -332,7 +331,7 @@ func TestPollingRecoversFromTransientConflict(t *testing.T) {
 		cancel()
 		reply(w, `{"ok":true,"result":[]}`)
 	})
-	err := lo.NewReceiver(lo.ReceiverConfig{Client: api}).Run(ctx)
+	err := lo.NewReceiver(lo.ReceiverConfig{Client: api, ConflictDelay: 10 * time.Millisecond}).Run(ctx)
 	if !errors.Is(err, context.Canceled) || calls.Load() != 2 {
 		t.Fatalf("polls=%d err=%v", calls.Load(), err)
 	}
@@ -349,7 +348,9 @@ func TestPollingCancellationInterruptsConflictWait(t *testing.T) {
 		close(responded)
 	})
 	done := make(chan error, 1)
-	go func() { done <- lo.NewReceiver(lo.ReceiverConfig{Client: api}).Run(ctx) }()
+	go func() {
+		done <- lo.NewReceiver(lo.ReceiverConfig{Client: api}).Run(ctx)
+	}()
 	<-responded
 	cancel()
 	select {
@@ -359,5 +360,42 @@ func TestPollingCancellationInterruptsConflictWait(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("cancellation did not interrupt polling")
+	}
+}
+
+func TestReplyToBotPassesGroupMentionGate(t *testing.T) {
+	t.Parallel()
+	for _, replyID := range []int64{99, 100, 0} {
+		svc := &serviceSpy{}
+		r := lo.NewReceiver(lo.ReceiverConfig{
+			Service: svc, BotID: 99, Username: "flock",
+			RequireMention: true, IsAllowed: func(int64) bool { return true },
+		})
+		msg := inbound("continue")
+		msg.Chat.Type = groupChatType
+		msg.Chat.ID = -42
+		msg.Reply = &lo.Message{From: &lo.User{ID: replyID}, Text: "question"}
+		r.HandleUpdate(t.Context(), lo.Update{Message: msg})
+		if (len(svc.prompts) == 1) != (replyID == 99) {
+			t.Fatalf("reply author %d: %v", replyID, svc.prompts)
+		}
+	}
+}
+
+func TestProviderCommandTargetIsPreservedInPrivateChat(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"private", groupChatType} {
+		svc := &serviceSpy{}
+		r := lo.NewReceiver(lo.ReceiverConfig{Service: svc, Username: "flock", IsAllowed: func(int64) bool { return true }})
+		msg := inbound("/deploy@staging ship")
+		msg.Chat.Type = kind
+		r.HandleUpdate(t.Context(), lo.Update{Message: msg})
+		if kind == "private" {
+			if len(svc.prompts) != 1 || svc.prompts[0] != msg.Text {
+				t.Fatal(svc.prompts)
+			}
+		} else if len(svc.prompts) != 0 {
+			t.Fatal(svc.prompts)
+		}
 	}
 }

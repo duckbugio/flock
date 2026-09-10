@@ -78,19 +78,20 @@ func command(text string) (name, args string) {
 	return strings.ToLower(strings.TrimPrefix(fields[0], "/")), strings.TrimSpace(strings.TrimPrefix(text, fields[0]))
 }
 
-// addressedText rejects /command@other_bot and removes only exact mention tokens.
-func addressedText(text, username string) (string, bool) {
+// addressedText rejects commands for other bots only in groups, and removes exact mentions.
+func addressedText(text, username string, group bool) (string, bool) {
 	fields := strings.Fields(text)
 	if len(fields) == 0 {
 		return text, true
 	}
-	if strings.HasPrefix(fields[0], "/") {
-		if cmd, target, ok := strings.Cut(fields[0], "@"); ok {
-			if username == "" || !strings.EqualFold(target, username) {
-				return "", false
+	if cmd, target, ok := strings.Cut(fields[0], "@"); ok && strings.HasPrefix(cmd, "/") {
+		if username == "" || !strings.EqualFold(target, username) {
+			if !group {
+				return text, true
 			}
-			return cmd + strings.TrimPrefix(text, fields[0]), true
+			return "", false
 		}
+		return cmd + strings.TrimPrefix(text, fields[0]), true
 	}
 	if username != "" {
 		pos := 0

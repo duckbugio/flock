@@ -160,6 +160,7 @@ func run() int {
 		Client:         api,
 		Transport:      transport,
 		Username:       self.Username,
+		BotID:          self.ID,
 		IsAllowed:      cfg.IsLOAllowed,
 		RequireMention: cfg.RequireGroupMention,
 		Scheduler:      scheduler,
