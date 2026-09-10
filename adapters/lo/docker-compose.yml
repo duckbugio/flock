@@ -1,7 +1,7 @@
-# Build locally: no prebuilt flock-lo image is assumed or published by this change.
+# Use the published image, or build locally with docker compose build.
 services:
   bot:
-    image: flock-lo:local
+    image: ghcr.io/duckbugio/flock-lo:latest
     build:
       context: ../..
       dockerfile: adapters/lo/Dockerfile
