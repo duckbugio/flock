@@ -25,7 +25,7 @@ func TestPollingRetryDelayIsBounded(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := pollingRetryDelay(tc.err); got != tc.want {
+			if got := NewReceiver(ReceiverConfig{}).pollingRetryDelay(tc.err); got != tc.want {
 				t.Fatalf("delay=%v want=%v", got, tc.want)
 			}
 		})
@@ -45,8 +45,16 @@ func TestTransientPollingErrorsRemainRetryable(t *testing.T) {
 
 func TestConflictWindowCoversLongPoll(t *testing.T) {
 	t.Parallel()
-	delay := pollingRetryDelay(&APIError{Code: http.StatusConflict})
+	delay := NewReceiver(ReceiverConfig{}).cfg.ConflictDelay
 	if budget := time.Duration(maxPollingConflicts-1) * delay; budget <= time.Duration(pollTimeoutSeconds)*time.Second {
 		t.Fatalf("conflict budget %v does not cover long poll", budget)
+	}
+}
+
+func TestConflictDelayOverrideControlsRetry(t *testing.T) {
+	t.Parallel()
+	receiver := NewReceiver(ReceiverConfig{ConflictDelay: 2 * time.Second})
+	if delay := receiver.pollingRetryDelay(fmt.Errorf("poll: %w", &APIError{Code: http.StatusConflict})); delay != 2*time.Second {
+		t.Fatalf("delay=%v", delay)
 	}
 }

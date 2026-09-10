@@ -76,11 +76,7 @@ func (r *Receiver) Run(ctx context.Context) error {
 			if r.stopPolling(err, &conflicts) {
 				return err
 			}
-			delay := pollingRetryDelay(err)
-			var apiErr *APIError
-			if errors.As(err, &apiErr) && apiErr.Code == http.StatusConflict {
-				delay = r.cfg.ConflictDelay
-			}
+			delay := r.pollingRetryDelay(err)
 			r.cfg.Logger.Warn("lo: polling failed; retrying", "error", err)
 			if !wait(ctx, delay) {
 				return ctx.Err()
@@ -171,20 +167,7 @@ func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
 			return
 		}
 	}
-	if msg.Reply != nil {
-		quoted := msg.Reply.Text
-		if quoted == "" {
-			quoted = msg.Reply.Caption
-		}
-		if hasMedia(msg.Reply) {
-			quoted += "\n[Quoted attachment is unavailable to this bot; ask the user for its contents if needed.]"
-		}
-		author := ""
-		if msg.Reply.From != nil {
-			author = msg.Reply.From.Username
-		}
-		text = chat.QuotedPrompt(author, quoted, text)
-	}
+	text = replyPrompt(msg, replyToBot, text)
 	r.cfg.Service.Handle(ctx, chatID, msg.From.ID, strconv.FormatInt(msg.ID, 10), text)
 }
 
@@ -223,15 +206,39 @@ func wait(ctx context.Context, delay time.Duration) bool {
 
 // pollingRetryDelay keeps a faulty server hint from suspending reception for hours.
 // Match the delivery loop's maximum wait while retaining shorter server hints.
-func pollingRetryDelay(err error) time.Duration {
+func (r *Receiver) pollingRetryDelay(err error) time.Duration {
 	const maxWait = 30 * time.Second
 	var apiErr *APIError
 	if errors.As(err, &apiErr) && apiErr.Code == http.StatusConflict {
-		return pollingConflictDelay
+		return r.cfg.ConflictDelay
 	}
 	delay, ok := RetryAfter(err)
 	if !ok {
 		return time.Second
 	}
 	return min(delay, maxWait)
+}
+
+func replyPrompt(msg *Message, replyToBot bool, text string) string {
+	if msg.Reply == nil {
+		return text
+	}
+	quoted := msg.Reply.Text
+	if quoted == "" {
+		quoted = msg.Reply.Caption
+	}
+	if hasMedia(msg.Reply) {
+		quoted += "\n[Quoted attachment is unavailable to this bot; ask the user for its contents if needed.]"
+	}
+	if quoted == "" {
+		quoted = "[media]"
+	}
+	author := ""
+	if msg.Reply.From != nil {
+		author = msg.Reply.From.Username
+	}
+	if replyToBot {
+		author = chat.AssistantAuthorLabel
+	}
+	return chat.QuotedPrompt(author, quoted, text)
 }

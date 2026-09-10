@@ -399,3 +399,15 @@ func TestProviderCommandTargetIsPreservedInPrivateChat(t *testing.T) {
 		}
 	}
 }
+
+func TestReplyContextIdentifiesAssistantAndEmptyMessage(t *testing.T) {
+	t.Parallel()
+	svc := &serviceSpy{}
+	receiver := lo.NewReceiver(lo.ReceiverConfig{Service: svc, BotID: 99, IsAllowed: func(int64) bool { return true }})
+	msg := inbound("continue")
+	msg.Reply = &lo.Message{From: &lo.User{ID: 99, Username: "flock"}}
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
+	if len(svc.prompts) != 1 || !strings.Contains(svc.prompts[0], "the assistant") || !strings.Contains(svc.prompts[0], "[media]") {
+		t.Fatalf("prompts=%v", svc.prompts)
+	}
+}
