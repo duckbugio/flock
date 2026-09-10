@@ -156,9 +156,13 @@ func TestPollingAcknowledgesInOrderAndStopsOnConflict(t *testing.T) {
 	receiver := lo.NewReceiver(lo.ReceiverConfig{
 		Service: svc, Client: api, Transport: lo.NewTransport(api, false), IsAllowed: func(int64) bool { return true },
 	})
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 55*time.Second)
 	defer cancel()
+	started := time.Now()
 	err := receiver.Run(ctx)
+	if elapsed := time.Since(started); elapsed < 40*time.Second {
+		t.Fatalf("conflicts stopped polling before long-poll expiry: %v", elapsed)
+	}
 	var apiErr *lo.APIError
 	if !errors.As(err, &apiErr) || apiErr.Code != http.StatusConflict {
 		t.Fatal(err)
@@ -316,7 +320,7 @@ func TestQuotedAttachmentIsExplicitInPrompt(t *testing.T) {
 
 func TestPollingRecoversFromTransientConflict(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
 	var calls atomic.Int32
 	api := client(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -331,5 +335,29 @@ func TestPollingRecoversFromTransientConflict(t *testing.T) {
 	err := lo.NewReceiver(lo.ReceiverConfig{Client: api}).Run(ctx)
 	if !errors.Is(err, context.Canceled) || calls.Load() != 2 {
 		t.Fatalf("polls=%d err=%v", calls.Load(), err)
+	}
+}
+
+func TestPollingCancellationInterruptsConflictWait(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	responded := make(chan struct{})
+	api := client(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		reply(w, `{"ok":false,"error_code":409,"description":"previous poll still closing"}`)
+		close(responded)
+	})
+	done := make(chan error, 1)
+	go func() { done <- lo.NewReceiver(lo.ReceiverConfig{Client: api}).Run(ctx) }()
+	<-responded
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not interrupt polling")
 	}
 }

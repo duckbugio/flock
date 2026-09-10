@@ -3,6 +3,7 @@ package lo
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -15,6 +16,8 @@ func TestPollingRetryDelayIsBounded(t *testing.T) {
 		err  error
 		want time.Duration
 	}{
+		{"conflict", &APIError{Code: http.StatusConflict}, 10 * time.Second},
+		{"wrapped conflict", fmt.Errorf("poll: %w", &APIError{Code: http.StatusConflict}), 10 * time.Second},
 		{"network", errors.New("connection refused"), time.Second},
 		{"missing hint", &APIError{Code: http.StatusTooManyRequests}, time.Second},
 		{"short hint", &APIError{Code: http.StatusTooManyRequests, Delay: 3 * time.Second}, 3 * time.Second},
@@ -37,5 +40,13 @@ func TestTransientPollingErrorsRemainRetryable(t *testing.T) {
 		if fatalAPIError(&APIError{Code: code}) {
 			t.Fatalf("status %d classified as permanent", code)
 		}
+	}
+}
+
+func TestConflictWindowCoversLongPoll(t *testing.T) {
+	t.Parallel()
+	delay := pollingRetryDelay(&APIError{Code: http.StatusConflict})
+	if budget := time.Duration(maxPollingConflicts-1) * delay; budget <= time.Duration(pollTimeoutSeconds)*time.Second {
+		t.Fatalf("conflict budget %v does not cover long poll", budget)
 	}
 }

@@ -46,7 +46,9 @@ shared dispatcher's ten-second post-cancel delivery window.
 Run one polling replica per token. Startup checks `getMe` and `getWebhookInfo`;
 an existing webhook is an error, never automatically deleted. Explicit API
 404/501 from `getWebhookInfo` logs a warning and continues to polling; `getUpdates`
-retries transient 409 conflicts and stops after five consecutive conflicts. Authentication failures and other
+retries transient 409 conflicts with ten-second waits and stops on the fifth
+consecutive conflict (40 seconds of waiting, covering the 30-second long poll).
+Cancellation interrupts the wait immediately. Authentication failures and other
 startup-check errors remain fatal. `getUpdates`
 retains queued messages, advances the offset after dispatch, and does not request
 callback/edited-message updates it cannot handle. As with ordinary long polling,
@@ -80,8 +82,8 @@ this adapter does not promise exactly-once agent execution or automatic resume.
   database edits are needed. This streams **Flock's progress frame**, not every
   raw model token (the runner's final answer is delivered normally).
 - `LO_REGISTER_COMMANDS=true` opts into `setMyCommands`. Failure is logged and
-  does not disable text commands. It remains off by default for LO main versions
-  where the method is still a 501 stub.
+  does not disable text commands. The current server implements this method; registration remains
+  opt-in until live acceptance with the deployment's bot token is complete.
 - Files, voice, native callback buttons, rich messages, and the interactive star
   nudge are unavailable. Incoming attachments get a clear notice; they are not
   silently stripped from an AI prompt. Outbox delivery is disabled. Agent-created

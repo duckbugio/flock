@@ -109,8 +109,9 @@ answer remains visible after reconnecting the chat client.
 The LO runtime now has its own Dockerfile and binary name, with a configurable 3g
 memory cap. Reserved group commands do not require a mention, but the allow-list
 and rejection of commands addressed to another bot still apply. Polling retries
-up to four consecutive 409 conflicts before the fifth stops the process; a successful
-poll resets this counter. The stale-batch regression test waits for the second request
+up to four consecutive 409 conflicts with ten-second waits before the fifth stops
+the process: a 40-second wait budget covers the 30-second long poll. Cancellation
+interrupts these waits immediately; a successful poll resets the counter. The stale-batch regression test waits for the second request
 before observing backoff, avoiding a race with a slow runner startup.
 
 Server draft IDs remain int64 in Go and are serialized as decimal strings in client

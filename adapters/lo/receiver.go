@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -98,10 +99,13 @@ func (r *Receiver) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-const maxPollingConflicts = 5
+const (
+	maxPollingConflicts  = 5
+	pollingConflictDelay = 10 * time.Second
+)
 
 // stopPolling tolerates an old in-flight poll after restart, but bounds conflicts
-// so a second persistent poller does not silently contend forever.
+// with four ten-second waits (40s > our 30s long poll), while bounding contention.
 func (r *Receiver) stopPolling(err error, conflicts *int) bool {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) && apiErr.Code == 409 {
@@ -208,6 +212,10 @@ func wait(ctx context.Context, delay time.Duration) bool {
 // Match the delivery loop's maximum wait while retaining shorter server hints.
 func pollingRetryDelay(err error) time.Duration {
 	const maxWait = 30 * time.Second
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.Code == http.StatusConflict {
+		return pollingConflictDelay
+	}
 	delay, ok := RetryAfter(err)
 	if !ok {
 		return time.Second
