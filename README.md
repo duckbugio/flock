@@ -50,7 +50,7 @@ Everything else in [`.env.example`](adapters/telegram/.env.example) has sensible
 | `VK_GROUP_ID` | your community's numeric id (long-poll server + mention parse) |
 | `VK_ALLOWED_USERS` | comma-separated VK user IDs allowed to use the bot |
 
-**LO** has a text-first adapter with its own allow-list and workspace namespace. LO images are not published; build locally using [`adapters/lo/`](adapters/lo/README.md). The LO entry point does not wire PR-comment polling, CI watch or interrupted-run recovery. See the [LO / Telegram compatibility audit](docs/lo-telegram-compatibility.md) for supported commands, optional streaming, and platform gaps.
+**LO** has a text-first adapter with its own allow-list and workspace namespace. Its image is published as `ghcr.io/duckbugio/flock-lo`; start it using [`adapters/lo/`](adapters/lo/README.md). The LO entry point does not wire PR-comment polling, CI watch or interrupted-run recovery. See the [LO / Telegram compatibility audit](docs/lo-telegram-compatibility.md) for supported commands, optional streaming, and platform gaps.
 
 ## Highlights
 
@@ -96,6 +96,7 @@ The platform-agnostic dev-team brain lives in [`core/`](core/); each platform is
 |---|---|---|
 | Telegram | [`adapters/telegram/`](adapters/telegram/) | `ghcr.io/duckbugio/flock-telegram` |
 | VK | [`adapters/vk/`](adapters/vk/) | `ghcr.io/duckbugio/flock-vk` |
+| LO | [`adapters/lo/`](adapters/lo/) | `ghcr.io/duckbugio/flock-lo` |
 
 Future platforms reuse the same core — see [`docs/multi-transport-plan.md`](docs/multi-transport-plan.md).
 

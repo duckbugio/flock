@@ -5,19 +5,30 @@ LO's Telegram-shaped **supported subset**, not the Telegram adapter with a new
 base URL. Telegram and VK behavior remain unchanged unless their transports
 explicitly opt into the new draft capability.
 
+## First publication (maintainers)
+
+Before announcing the image or enabling Roost deployments, wait for the first
+successful Publish LO workflow on main. In the organization package settings,
+link `flock-lo` to `duckbugio/flock` and set its visibility to Public. New GHCR
+packages are private by default; a successful workflow alone does not establish
+anonymous access. Verify `docker pull ghcr.io/duckbugio/flock-lo:latest` from an
+environment without registry credentials before marking publication complete.
+
 ## Start
 
 ```sh
 cd adapters/lo
 cp .env.example .env
 # Set LO_API_URL, LO_BOT_TOKEN, LO_ALLOWED_USERS and AI provider authentication.
-docker compose up --build -d
+docker compose pull
+docker compose up -d
 ```
 
 `LO_API_URL` is the deployed Bot API base, for example an operator-supplied HTTPS
 origin with an optional gateway path. Requests are posted to
 `<base>/bot<LO_BOT_TOKEN>/<method>`. Do not use the Mini App Connect endpoint.
-There is deliberately no guessed production URL or published LO image. The dedicated
+The production API URL must be supplied by the operator. Compose uses the published
+`ghcr.io/duckbugio/flock-lo:latest` image. The dedicated
 `adapters/lo/Dockerfile` builds and runs `/usr/local/bin/flock-lo`, with the same
 AI tooling as the other adapters. Compose caps memory with `BOT_MEM_LIMIT` (3g by default).
 

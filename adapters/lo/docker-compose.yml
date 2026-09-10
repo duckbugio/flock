@@ -1,10 +1,7 @@
-# Build locally: no prebuilt flock-lo image is assumed or published by this change.
+# Run the published LO image.
 services:
   bot:
-    image: flock-lo:local
-    build:
-      context: ../..
-      dockerfile: adapters/lo/Dockerfile
+    image: ghcr.io/duckbugio/flock-lo:latest
     restart: unless-stopped
     env_file: .env
     # Default drain 45s, capped at 60s, plus 10s post-cancel delivery: at most 70s < 75s.
