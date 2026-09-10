@@ -1,10 +1,7 @@
-# Use the published image, or build locally with docker compose build.
+# Run the published LO image.
 services:
   bot:
     image: ghcr.io/duckbugio/flock-lo:latest
-    build:
-      context: ../..
-      dockerfile: adapters/lo/Dockerfile
     restart: unless-stopped
     env_file: .env
     # Default drain 45s, capped at 60s, plus 10s post-cancel delivery: at most 70s < 75s.

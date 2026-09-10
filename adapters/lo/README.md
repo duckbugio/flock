@@ -11,13 +11,15 @@ explicitly opt into the new draft capability.
 cd adapters/lo
 cp .env.example .env
 # Set LO_API_URL, LO_BOT_TOKEN, LO_ALLOWED_USERS and AI provider authentication.
-docker compose up --build -d
+docker compose pull
+docker compose up -d
 ```
 
 `LO_API_URL` is the deployed Bot API base, for example an operator-supplied HTTPS
 origin with an optional gateway path. Requests are posted to
 `<base>/bot<LO_BOT_TOKEN>/<method>`. Do not use the Mini App Connect endpoint.
-There is deliberately no guessed production URL or published LO image. The dedicated
+The production API URL must be supplied by the operator. Compose uses the published
+`ghcr.io/duckbugio/flock-lo:latest` image. The dedicated
 `adapters/lo/Dockerfile` builds and runs `/usr/local/bin/flock-lo`, with the same
 AI tooling as the other adapters. Compose caps memory with `BOT_MEM_LIMIT` (3g by default).
 
