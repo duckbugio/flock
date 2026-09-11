@@ -137,7 +137,7 @@ func run() int {
 			logger.Warn("dispatcher drain", "error", err)
 		}
 	}()
-	transport := lo.NewTransport(api, cfg.LOEnableDrafts)
+	transport := lo.NewTransport(api, cfg.LOEnableDrafts).WithDocuments(cfg.LOEnableDocuments)
 	postRun := autonomy.Build(cfg, logger)
 	svc := chat.New(chat.Config{
 		Runner:     runner,

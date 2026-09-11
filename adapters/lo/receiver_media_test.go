@@ -169,14 +169,12 @@ func TestUnreadableAttachmentsExplainThemselvesAndStopTheRun(t *testing.T) {
 	// The notice TEXT is asserted, not merely its count. Per-kind sentences are what this
 	// whole path is for — "I cannot read that" for everything would have been one line — so a
 	// test that counts notices would stay green through any mix-up in the table.
+	//
+	// Documents are absent: they are read now, and their own tests cover that.
 	for name, tc := range map[string]struct {
 		attach func(*lo.Message)
 		says   string
 	}{
-		"document": {
-			func(m *lo.Message) { m.Document = &lo.Attachment{FileID: "d", FileName: "spec.pdf"} },
-			"documents", // Names the kind; the sentence deliberately claims nothing about the platform.
-		},
 		"voice": {func(m *lo.Message) { m.Voice = lo.RawAttachment("v") }, "voice"},
 		"video": {func(m *lo.Message) { m.Video = lo.RawAttachment("m") }, "video"},
 		"audio": {func(m *lo.Message) { m.Audio = lo.RawAttachment("a") }, "audio"},
@@ -260,9 +258,12 @@ func savedPathFrom(t *testing.T, prompt string) string {
 	// The photo prompt is core/chat's, shared with Telegram and VK, and ends the path with
 	// ")". The document one is this adapter's and ends it with " —". Reading both keeps the
 	// helper usable from either side rather than duplicating it per kind.
+	// Both prompts come from core/chat and end the path differently: the photo one closes a
+	// parenthesis, the document one ends the line. Reading both keeps one helper usable from
+	// either side instead of a copy per kind.
 	for _, marker := range []struct{ start, end string }{
 		{"saved at ", ")"},
-		{"saved at ", " —"},
+		{"uploaded a file: ", "\n"},
 	} {
 		idx := strings.Index(prompt, marker.start)
 		if idx < 0 {
@@ -275,6 +276,76 @@ func savedPathFrom(t *testing.T, prompt string) string {
 	}
 	t.Fatalf("prompt names no saved file: %q", prompt)
 	return ""
+}
+
+// A document is downloaded exactly like a photo once the platform serves its bytes: the agent
+// gets a path to open, and the file keeps the name the user gave it.
+func TestDocumentReachesTheAgentAsAPath(t *testing.T) {
+	t.Parallel()
+	svc := &serviceSpy{}
+	api, notices := photoAPI(t, "%PDF-1.7")
+	receiver := lo.NewReceiver(lo.ReceiverConfig{
+		Service: svc, Client: api, Transport: lo.NewTransport(api, false),
+		IsAllowed: func(int64) bool { return true },
+		Uploads:   lo.NewUploader(api, fakeUploads{dir: t.TempDir()}, 0, nil),
+	})
+
+	msg := inbound("разбери этот файл")
+	msg.Document = &lo.Attachment{FileID: "ref", FileName: "spec.pdf", MimeType: "application/pdf"}
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
+
+	if len(svc.prompts) != 1 {
+		t.Fatalf("prompts=%v, want the document to start one run", svc.prompts)
+	}
+	if !strings.Contains(svc.prompts[0], "uploaded a file") {
+		t.Fatalf("prompt does not name the attachment: %q", svc.prompts[0])
+	}
+	saved := savedPathFrom(t, svc.prompts[0])
+	if !strings.HasSuffix(saved, "spec.pdf") {
+		t.Fatalf("saved as %q, want the name the user gave it", saved)
+	}
+	data, err := os.ReadFile(saved) //nolint:gosec // Path comes from the prompt the code built.
+	if err != nil || string(data) != "%PDF-1.7" {
+		t.Fatalf("content=%q err=%v", data, err)
+	}
+	if len(*notices) != 0 {
+		t.Fatalf("a working download still sent a notice: %v", *notices)
+	}
+}
+
+// A platform that answers the reference but withholds the bytes — every LO that predates
+// document downloads — must say so instead of failing silently or blaming the user's file.
+func TestDocumentWithoutBytesIsExplained(t *testing.T) {
+	t.Parallel()
+	svc := &serviceSpy{}
+	var notices []string
+	api := client(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/getFile") {
+			// A reference answered WITHOUT a file_path: real reference, no bytes.
+			reply(w, `{"ok":true,"result":{"file_id":"ref"}}`)
+			return
+		}
+		body := make([]byte, 4096)
+		n, _ := r.Body.Read(body)
+		notices = append(notices, string(body[:n]))
+		reply(w, `{"ok":true,"result":{"message_id":1}}`)
+	})
+	receiver := lo.NewReceiver(lo.ReceiverConfig{
+		Service: svc, Client: api, Transport: lo.NewTransport(api, false),
+		IsAllowed: func(int64) bool { return true },
+		Uploads:   lo.NewUploader(api, fakeUploads{dir: t.TempDir()}, 0, nil),
+	})
+
+	msg := inbound("посмотри")
+	msg.Document = &lo.Attachment{FileID: "ref", FileName: "spec.pdf"}
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
+
+	if len(svc.prompts) != 0 {
+		t.Fatalf("a run started without the file: %v", svc.prompts)
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], "does not hand bots the bytes") {
+		t.Fatalf("notices=%v", notices)
+	}
 }
 
 // A rate limit or a spent cost cap is paid with a refusal, not with a download: doing the

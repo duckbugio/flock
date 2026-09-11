@@ -89,11 +89,15 @@ var (
 // core config is parsed once and reused.
 type Config struct {
 	// LO uses its own credentials and user-ID namespace; no Telegram defaults apply.
-	LOBotToken         string  `env:"LO_BOT_TOKEN"`
-	LOAPIURL           string  `env:"LO_API_URL"`
-	LOAllowedUsers     []int64 `env:"LO_ALLOWED_USERS" envSeparator:","`
-	LOEnableDrafts     bool    `env:"LO_ENABLE_DRAFTS" envDefault:"false"`
-	LORegisterCommands bool    `env:"LO_REGISTER_COMMANDS" envDefault:"false"`
+	LOBotToken     string  `env:"LO_BOT_TOKEN"`
+	LOAPIURL       string  `env:"LO_API_URL"`
+	LOAllowedUsers []int64 `env:"LO_ALLOWED_USERS" envSeparator:","`
+	LOEnableDrafts bool    `env:"LO_ENABLE_DRAFTS" envDefault:"false"`
+	// LOEnableDocuments turns on file delivery to LO. Opt-in because sendDocument is a
+	// platform method a deployment may predate: with it off the agent's files stay in the
+	// workspace instead of being promised and then refused.
+	LOEnableDocuments  bool `env:"LO_ENABLE_DOCUMENTS" envDefault:"false"`
+	LORegisterCommands bool `env:"LO_REGISTER_COMMANDS" envDefault:"false"`
 
 	// Telegram (cmd/flock-telegram). Validated by ValidateTelegram, not env-required.
 	TelegramBotToken    string `env:"TELEGRAM_BOT_TOKEN"`

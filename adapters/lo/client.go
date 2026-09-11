@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -436,4 +438,79 @@ func (c *Client) Download(ctx context.Context, filePath string) (io.ReadCloser, 
 		return nil, &APIError{Code: resp.StatusCode, Description: "file download refused"}
 	}
 	return resp.Body, nil
+}
+
+// UploadDocument posts a local file to the chat as a document.
+//
+// Multipart, not JSON: LO's sendDocument takes either a reference this platform minted or an
+// uploaded part, and an agent's artifact has no reference — it was produced here, not shown to
+// the bot. The caption travels with it because Telegram's shape puts a document's words there.
+//
+// A deployment that has not implemented the method answers 501, which the caller reports as
+// "this platform cannot deliver files" rather than as a failed send: the difference decides
+// whether a user should retry.
+func (c *Client) UploadDocument(ctx context.Context, chatID int64, filename, caption string, data io.Reader) error {
+	body := &bytes.Buffer{}
+	form := multipart.NewWriter(body)
+	if err := form.WriteField("chat_id", strconv.FormatInt(chatID, 10)); err != nil {
+		return fmt.Errorf("encode LO upload: %w", err)
+	}
+	if caption != "" {
+		if err := form.WriteField("caption", caption); err != nil {
+			return fmt.Errorf("encode LO upload: %w", err)
+		}
+	}
+	// The name is what the user sees in the chat. Only its base travels: a path here would
+	// describe this machine's filesystem to everyone in the conversation.
+	part, err := form.CreateFormFile("document", filepath.Base(filename))
+	if err != nil {
+		return fmt.Errorf("encode LO upload: %w", err)
+	}
+	if _, err := io.Copy(part, data); err != nil {
+		return fmt.Errorf("read outbound document: %w", err)
+	}
+	if err := form.Close(); err != nil {
+		return fmt.Errorf("encode LO upload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.base+"/bot"+c.token+"/sendDocument", bytes.NewReader(body.Bytes()))
+	if err != nil {
+		return errors.New("cannot construct LO upload request")
+	}
+	req.Header.Set("Content-Type", form.FormDataContentType())
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err // The outer URL carries the bot credential.
+		}
+		return fmt.Errorf("LO upload failed: %s", strings.ReplaceAll(err.Error(), c.token, "[REDACTED]"))
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return errors.New("cannot read LO upload response")
+	}
+	var envelope struct {
+		OK          bool   `json:"ok"`
+		Code        int    `json:"error_code"` //nolint:tagliatelle // Bot API wire spelling.
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return &APIError{Code: resp.StatusCode, Description: "non-JSON upload response"}
+	}
+	if !envelope.OK || resp.StatusCode != http.StatusOK {
+		code := envelope.Code
+		if code == 0 {
+			code = resp.StatusCode
+		}
+		return &APIError{Code: code, Description: strings.ReplaceAll(envelope.Description, c.token, "[redacted]")}
+	}
+	return nil
 }

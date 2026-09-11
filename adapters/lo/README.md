@@ -113,21 +113,29 @@ this adapter does not promise exactly-once agent execution or automatic resume.
   the cap also holds on the stream, because LO omits `file_size` for files it has not
   measured. Client-supplied names are sanitised; a saved file cannot leave the uploads
   directory.
+- **Inbound documents are downloaded the same way**, keeping the name the user gave them, so
+  the agent opens `spec.pdf` rather than an opaque id. A LO that predates document downloads
+  answers the reference WITHOUT a `file_path`; that is reported as "this LO does not hand bots
+  the bytes" rather than as a failed download, because the two need different actions.
 - **Every other attachment gets its own sentence and stops the run.** Answering the caption
   without the file it refers to produces a confident answer about nothing, so the adapter
   refuses instead. The sentences differ by what is actually known. Audio and video answer
   `getFile` WITHOUT a `file_path` by design — an LO audio is a catalogue track, so no address
-  for the bytes exists — and can only be echoed by reference. Voice, video notes, animations
-  and documents say only that this adapter does not read them yet, and for the same reason in
-  every case: the `501` on the platform is about SENDING them, which is the OUTGOING direction,
-  and whether `getFile` serves their bytes is a separate question this change does not answer.
-  Stickers get their own sentence too, and a different one — the bytes exist, but a sticker
-  carries nothing an agent can act on, so the answer asks for the request as text.
-- **Outbound files stay disabled.** `sendDocument` is a platform stub, and `sendPhoto`'s
-  upload branch answers `500` on the deployments exercised so far, so the outbox is off and
-  agent-created files remain in the workspace/repository. LO workspace instructions
-  explicitly disable automatic file-delivery promises. Native callback buttons, rich
-  messages and the interactive star nudge are unavailable.
+  for the bytes exists — and can only be echoed by reference. Voice, video notes and animations
+  say only that this adapter does not read them yet: the `501` on the platform is about SENDING
+  them, which is the OUTGOING direction, and whether `getFile` serves their bytes is a separate
+  question this change does not answer. Stickers get their own sentence and a different one —
+  the bytes exist, but a sticker carries nothing an agent can act on, so the answer asks for
+  the request as text.
+- **Outbound files are opt-in via `LO_ENABLE_DOCUMENTS`.** With it off (the default) the
+  outbox sweep stays disabled and agent-created files remain in the workspace — the honest
+  behaviour on a LO that predates `sendDocument`, which answers `501`. With it on, artifacts
+  are uploaded with their base name only; a full path would describe the host's filesystem to
+  everyone in the chat. Turn it on after upgrading the platform, not before: a probe at
+  startup cannot tell "not implemented" from a transient failure.
+- `sendPhoto`'s upload branch answered `500` on the deployments exercised so far, so outbound
+  IMAGES are still unavailable. Native callback buttons, rich messages and the interactive
+  star nudge are unavailable too.
 - The LO command does not yet wire Telegram's interrupted-run recovery, CI watch
   or PR-comment polling. These are **Flock adapter gaps**, not missing LO API
   methods. The scheduler and goal evaluator are supported.

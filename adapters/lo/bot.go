@@ -27,15 +27,32 @@ const (
 type Transport struct {
 	api    *Client
 	drafts bool
+	// documents is the operator's answer to "can this LO deliver files". See WithDocuments.
+	documents bool
 }
 
 // NewTransport enables drafts only when the deployment explicitly advertises them.
 func NewTransport(api *Client, drafts bool) *Transport { return &Transport{api: api, drafts: drafts} }
 
-// Capabilities deliberately disables file outbox and rich messages. A half-size
-// rune budget guarantees the 4096 UTF-16 unit limit even for all-emoji answers.
+// WithDocuments turns on file delivery. It is OPT-IN rather than probed at startup because
+// the answer differs per deployment: sendDocument is implemented on the platform, and a LO
+// that predates it answers 501 for every artifact the agent produces. A flag the operator
+// sets after upgrading is one decision in one place; a probe would make every run's delivery
+// depend on a method call whose failure is indistinguishable from a transient one.
+func (t *Transport) WithDocuments(enabled bool) *Transport {
+	t.documents = enabled
+	return t
+}
+
+// Capabilities reports what this deployment can actually do. CanSendDocument gates the core's
+// outbox sweep: with it false the agent's files stay in the workspace and are never promised
+// to the user, which is the honest behaviour on a platform that cannot deliver them.
 func (t *Transport) Capabilities() chat.Capabilities {
-	return chat.Capabilities{MaxMessageRunes: maxTextUnits / maxUnitsPerRune, CanSendDraft: t.drafts}
+	return chat.Capabilities{
+		MaxMessageRunes: maxTextUnits / maxUnitsPerRune,
+		CanSendDraft:    t.drafts,
+		CanSendDocument: t.documents,
+	}
 }
 
 func numericID(value string) (int64, error) {
@@ -131,9 +148,20 @@ func (t *Transport) Delete(ctx context.Context, chatID, messageID string) error 
 	return nil
 }
 
-// SendDocument is unavailable; Capabilities prevents the core outbox from invoking it.
-func (*Transport) SendDocument(context.Context, chat.ChatID, string, io.Reader) error {
-	return ErrUnsupported
+// SendDocument uploads one of the agent's files to the chat.
+//
+// It refuses when documents are off rather than trying anyway: Capabilities already told the
+// core not to sweep the outbox, and a send that reached a 501 here would turn a configuration
+// choice into a per-file error the user cannot act on.
+func (t *Transport) SendDocument(ctx context.Context, chatID chat.ChatID, name string, data io.Reader) error {
+	if !t.documents {
+		return ErrUnsupported
+	}
+	id, err := numericID(chatID)
+	if err != nil {
+		return errors.New("invalid LO chat ID")
+	}
+	return t.api.UploadDocument(ctx, id, name, "", data)
 }
 
 // SendStarNudge is unavailable because its confirmation callback is not implemented in LO.

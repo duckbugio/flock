@@ -206,7 +206,7 @@ func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
 	// Attachments are answered BEFORE the empty-text check: a photo with no caption is a
 	// complete request ("look at this"), and dropping it silently is what made the bot
 	// look broken.
-	saved, confirmed, note := r.attachments(ctx, msg, chatID)
+	photo, document, confirmed, note := r.attachments(ctx, msg, chatID)
 	if note != "" {
 		// The file the request rests on never reached the agent, so the caption must not be
 		// answered on its own: "review this file" without the file invites a confident answer
@@ -214,12 +214,18 @@ func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
 		r.notify(ctx, chatID, note)
 		return
 	}
-	if text == "" && saved == "" {
+	if text == "" && photo == "" && document == "" {
 		return
 	}
-	if saved != "" {
-		r.handlePhoto(ctx, msg, chatID, replyToBot, text, saved, confirmed)
+	if photo != "" {
+		r.handlePhoto(ctx, msg, chatID, replyToBot, text, photo, confirmed)
 		return
+	}
+	if document != "" {
+		// core/chat's own wording, shared with the Telegram adapter: the caption belongs
+		// INSIDE the sentence that names the file, not appended after it, so the agent reads
+		// one request rather than a path followed by an unrelated line.
+		text = chat.DocumentPrompt(document, text)
 	}
 	r.cfg.Service.Handle(ctx, chatID, msg.From.ID, strconv.FormatInt(msg.ID, 10),
 		replyPrompt(msg, replyToBot, text))
@@ -301,22 +307,12 @@ var unservedKinds = []struct {
 			"Please send the request as text.",
 	},
 	{
+		// Before any arm that could also match it. Bot API fills `document` ALONGSIDE
+		// `animation` for a GIF, and this adapter READS documents — so without this order a
+		// GIF would be downloaded and handed to the agent as a file it cannot act on, instead
+		// of getting the sentence that says what is missing.
 		has:    func(m *Message) bool { return present(m.Animation) },
 		notice: "I cannot open animations on LO yet. A still screenshot sent as a photo works.",
-	},
-	{
-		// LAST of the refusals, and deliberately: Bot API fills `document` ALONGSIDE
-		// `animation` for a GIF and alongside `video_note` for a round video, so a document
-		// arm placed first would answer "I cannot read documents" to someone who sent an
-		// animation. Every kind with a name of its own is answered by that name first.
-		has: func(m *Message) bool { return m.Document != nil },
-		// Says what this ADAPTER does, not what the platform cannot do. The evidence for the
-		// platform claim would have been sendDocument's 501, and that is the OUTGOING method:
-		// whether getFile answers a document reference with a file_path is a separate
-		// question, unverified when this line was written, and answered by the change that
-		// follows it.
-		notice: "I cannot read documents yet. " +
-			"Paste the text, or point me at the file in a repository.",
 	},
 	{
 		has:    func(m *Message) bool { return present(m.Sticker) },
@@ -332,35 +328,42 @@ var unservedKinds = []struct {
 // arrive and deserves to know it did not reach the agent.
 func (r *Receiver) attachments(
 	ctx context.Context, msg *Message, chatID string,
-) (saved string, confirmed bool, notice string) {
+) (photo, document string, confirmed bool, notice string) {
 	// LargestPhoto is the ONLY reader of msg.Photo here, deliberately. hasServedMedia counts a
 	// non-empty array as work and spends guard budget on it, so a ladder whose every rung
 	// lacks a file_id must still end in a sentence — otherwise the message is dropped in
 	// silence, or worse, its caption reaches the agent without the picture it refers to. That
 	// is the "confident answer about nothing" every other arm here exists to prevent.
-	if len(msg.Photo) == 0 {
-		// No unserved-kind arm either: those are answered before the guards, without touching
-		// the network. See unservedNotice.
-		return "", false, ""
+	if len(msg.Photo) > 0 {
+		size, ok := LargestPhoto(msg.Photo)
+		if !ok {
+			return "", "", false, "I could not read that image. Please send it again."
+		}
+		saved, note := r.download(ctx, chatID, size.FileID, photoFileName(msg.ID), "image")
+		shown := false
+		if saved != "" {
+			var refusal string
+			if saved, shown, refusal = r.checkPhotoBytes(saved); refusal != "" {
+				note = refusal
+			}
+		}
+		return saved, "", shown, note
 	}
-	size, ok := LargestPhoto(msg.Photo)
-	if !ok {
-		return "", false, "I could not read that image. Please send it again."
+	if msg.Document != nil {
+		// The name comes from the chat and is sanitised on the way to disk; keeping it is what
+		// lets the agent see "spec.pdf" rather than an opaque id.
+		//
+		// A document is returned SEPARATELY from a photo even though both are just a saved
+		// path, because the caller does different things with them: a picture is shown to the
+		// model as a vision block, a document becomes words the agent opens with a tool. Its
+		// name is the sender's, so nothing sniffs it — that correction is for the name this
+		// adapter invented, not for one a person chose.
+		saved, note := r.download(ctx, chatID, msg.Document.FileID, msg.Document.FileName, "file")
+		return "", saved, false, note
 	}
-	if r.cfg.Uploads == nil {
-		return "", false, "I cannot read images in this deployment: no uploads directory is configured."
-	}
-	path, err := r.cfg.Uploads.Save(ctx, chatID, size.FileID, photoFileName(msg.ID))
-	switch {
-	case errors.Is(err, ErrUploadTooLarge):
-		return "", false, "That image is too large for me to open. Please send a smaller one."
-	case errors.Is(err, ErrNoBytes):
-		return "", false, "LO did not hand me the bytes of that image, so I cannot open it."
-	case err != nil:
-		r.cfg.Logger.Warn("lo: photo download failed", "error", err)
-		return "", false, "I could not download that image. Please try sending it again."
-	}
-	return r.checkPhotoBytes(path)
+	// No unserved-kind arm here any more: those are answered before the guards, without
+	// touching the network. See unservedNotice.
+	return "", "", false, ""
 }
 
 // checkPhotoBytes names a saved photo by what its bytes ARE, and decides whether the picture
@@ -438,6 +441,46 @@ func unservedNotice(msg *Message) string {
 // from spending guard budget.
 func hasServedMedia(msg *Message) bool {
 	return len(msg.Photo) > 0
+}
+
+// article picks "a" or "an" for the nouns this file uses. Small, but the prompt is read by a
+// model: "a image" is the kind of wrongness that makes the rest of the sentence less credible.
+func article(noun string) string {
+	if noun == "" {
+		return "a"
+	}
+	switch noun[0] {
+	case 'a', 'e', 'i', 'o', 'u':
+		return "an"
+	}
+	return "a"
+}
+
+// download saves one inbound attachment and phrases the outcome for both readers: the agent,
+// which needs a path it can open, and the user, who needs to know if their file did not arrive.
+//
+// kind is the word the user sees ("image", "file"). It is a parameter rather than a branch
+// because every outcome below reads the same for both — only the noun changes.
+func (r *Receiver) download(ctx context.Context, chatID, fileID, name, kind string) (saved, notice string) {
+	if r.cfg.Uploads == nil {
+		return "", "I cannot read attachments in this deployment: no uploads directory is configured."
+	}
+	path, err := r.cfg.Uploads.Save(ctx, chatID, fileID, name)
+	switch {
+	case errors.Is(err, ErrUploadTooLarge):
+		return "", "That " + kind + " is too large for me to open. Please send a smaller one."
+	case errors.Is(err, ErrNoBytes):
+		// The platform answered the reference and withheld the bytes — for a document that
+		// means this LO has not shipped document downloads yet.
+		return "", "This LO does not hand bots the bytes of that " + kind + ", so I cannot open it. " +
+			"Paste the contents, or point me at the file in a repository."
+	case err != nil:
+		r.cfg.Logger.Warn("lo: attachment download failed", "kind", kind, "error", err)
+		return "", "I could not download that " + kind + ". Please try sending it again."
+	}
+	// The SAVED PATH, not a sentence: a photo becomes a vision block and a document becomes
+	// words, and only the caller knows which. Phrasing here would have to guess.
+	return path, ""
 }
 
 func (r *Receiver) notify(ctx context.Context, chatID, text string) {
