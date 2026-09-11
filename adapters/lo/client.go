@@ -277,7 +277,10 @@ func (c *Client) GetMe(ctx context.Context) (User, error) {
 // Losing one message the adapter cannot read costs a message; the alternative costs the bot.
 //
 // The update_id is still read from the skipped update where possible, so the offset advances
-// past it — an id is one integer, and the shapes that break here are inside `message`.
+// past it — as a number or as a string holding one, since the shapes that break here are
+// inside `message`. An update whose ID is not readable EITHER way is skipped without advancing
+// the offset: there is nothing to acknowledge. If such an update is the last in a batch it will
+// be re-fetched until the platform sends another, which is the one stall this cannot remove.
 func (c *Client) GetUpdates(ctx context.Context, offset int64) ([]Update, error) {
 	var raw []json.RawMessage
 	body := map[string]any{
