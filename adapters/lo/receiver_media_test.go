@@ -180,3 +180,35 @@ func savedPathFrom(t *testing.T, prompt string) string {
 	}
 	return rest[:end]
 }
+
+// A rate limit or a spent cost cap is paid with a refusal, not with a download: doing the
+// network call and the disk write first means a capped user still costs bandwidth and storage
+// on every message they send.
+func TestGuardsRunBeforeTheDownload(t *testing.T) {
+	t.Parallel()
+	svc := &serviceSpy{}
+	var fetched int
+	api := client(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/file/bot") || strings.HasSuffix(r.URL.Path, "/getFile") {
+			fetched++
+		}
+		reply(w, `{"ok":true,"result":{"message_id":1}}`)
+	})
+	receiver := lo.NewReceiver(lo.ReceiverConfig{
+		Service: svc, Client: api, Transport: lo.NewTransport(api, false),
+		IsAllowed: func(int64) bool { return true },
+		Guards:    func(int64) (bool, string) { return false, "Daily cap reached." },
+		Uploads:   lo.NewUploader(api, fakeUploads{dir: t.TempDir()}, 0, nil),
+	})
+
+	msg := inbound("")
+	msg.Photo = []lo.PhotoSize{{FileID: "ref", Width: 800, Height: 600}}
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
+
+	if len(svc.prompts) != 0 {
+		t.Fatalf("a capped user still started a run: %v", svc.prompts)
+	}
+	if fetched != 0 {
+		t.Fatalf("the refusal still cost %d download calls", fetched)
+	}
+}

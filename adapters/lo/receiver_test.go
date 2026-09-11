@@ -226,9 +226,8 @@ func TestIgnoredMessagesDoNotSpendGuardBudget(t *testing.T) {
 		IsAllowed: func(int64) bool { return true }, RequireMention: true,
 		Guards: func(int64) (bool, string) { calls++; return true, "" },
 	})
-	media := inbound("photo")
-	media.Photo = []lo.PhotoSize{{FileID: "lo-photo", Width: 90, Height: 90}}
-	receiver.HandleUpdate(t.Context(), lo.Update{Message: media})
+	// A photo is no longer an ignored message — it is work, and work spends the budget.
+	// What must not spend it: an unaddressed group message and an empty one.
 	empty := inbound("@flock")
 	empty.Chat.ID, empty.Chat.Type = -42, groupChatType
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: empty})

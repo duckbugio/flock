@@ -109,6 +109,10 @@ func (u *Uploader) Save(ctx context.Context, chatID, fileID, fileName string) (s
 
 	saved, err := fsutil.WriteCapped(dest, body, u.maxBytes, filePerm)
 	if err != nil {
+		// Best-effort cleanup of the partial file, as the Telegram and VK uploaders do. A
+		// file left behind after a refused upload is worse than a missing one: it keeps the
+		// bytes of something the user was told did not arrive, and nothing ever deletes it.
+		_ = os.Remove(dest)
 		return "", err
 	}
 	return saved, nil

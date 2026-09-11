@@ -157,6 +157,17 @@ func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
 		r.reserved(ctx, chatID, msg.From.ID, name, args)
 		return
 	}
+	// Guards run BEFORE any attachment work. A rate limit or a spent cost cap must be paid
+	// with a refusal, not with a download: doing the network call and the disk write first
+	// means a capped user still costs bandwidth and storage on every message they send.
+	if hasMedia(msg) || text != "" {
+		if r.cfg.Guards != nil {
+			if allowed, reason := r.cfg.Guards(msg.From.ID); !allowed {
+				r.notify(ctx, chatID, reason)
+				return
+			}
+		}
+	}
 	// Attachments are answered BEFORE the empty-text check: a photo with no caption is a
 	// complete request ("look at this"), and dropping it silently is what made the bot
 	// look broken.
@@ -170,12 +181,6 @@ func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
 	}
 	if text == "" && attached == "" {
 		return
-	}
-	if r.cfg.Guards != nil {
-		if allowed, reason := r.cfg.Guards(msg.From.ID); !allowed {
-			r.notify(ctx, chatID, reason)
-			return
-		}
 	}
 	text = replyPrompt(msg, replyToBot, text)
 	if attached != "" {
