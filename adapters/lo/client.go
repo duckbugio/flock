@@ -467,9 +467,10 @@ func (c *Client) Download(ctx context.Context, filePath string) (io.ReadCloser, 
 // already gone out as the text answer. One is added when a caller has something to put in it,
 // not before — an unreachable branch cannot be tested and has to be explained forever.
 //
-// A deployment that has not implemented the method answers 501, which the caller reports as
-// "this platform cannot deliver files" rather than as a failed send: the difference decides
-// whether a user should retry.
+// A deployment that has not implemented the method answers 501, and that status reaches the
+// operator inside the outbox sweep's "send outbox document" log line, beside every other send
+// failure. There is no branch that turns it into a distinct diagnosis — the flag is what keeps
+// a deployment without the method from trying in the first place.
 func (c *Client) UploadDocument(ctx context.Context, chatID int64, filename string, data io.Reader) error {
 	// The file is STREAMED, never buffered. Only the multipart frame around it is built in
 	// memory: a copy of the file here would put a peak of twice its size on the host for every

@@ -136,9 +136,11 @@ this adapter does not promise exactly-once agent execution or automatic resume.
   are uploaded with their base name only; a full path would describe the host's filesystem to
   everyone in the chat. Turn it on after upgrading the platform, not before: a probe at
   startup cannot tell "not implemented" from a transient failure.
-- `sendPhoto`'s upload branch answered `500` on the deployments exercised so far, so outbound
-  IMAGES are still unavailable. Native callback buttons, rich messages and the interactive
-  star nudge are unavailable too.
+- `sendPhoto`'s upload branch answered `500` on the deployments exercised so far, so an image
+  is never sent AS A PHOTO. It still reaches the chat when documents are on: the outbox sweep
+  posts every regular file through `sendDocument`, a screenshot included, which is what the
+  workspace's screenshot convention already promises the agent. Native callback buttons, rich
+  messages and the interactive star nudge are unavailable.
 - The LO command does not yet wire Telegram's interrupted-run recovery, CI watch
   or PR-comment polling. These are **Flock adapter gaps**, not missing LO API
   methods. The scheduler and goal evaluator are supported.

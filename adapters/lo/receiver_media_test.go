@@ -716,3 +716,33 @@ func TestAnimationIsAnsweredAsAnAnimationNotAsADocument(t *testing.T) {
 		t.Fatalf("notices=%v, want the animation sentence, not the document one", *notices)
 	}
 }
+
+// The fallback must fire for every name the SANITISER reduces to nothing, not only for a blank
+// one. fsutil takes the base name and trims leading dots, so these all pass a TrimSpace test
+// and then leave the extensionless "upload" the fallback exists to prevent.
+func TestDocumentNamesThatSanitiseToNothingGetTheFallback(t *testing.T) {
+	t.Parallel()
+	for _, given := range []string{".", "..", "...", "/", "  ..  ", "/../"} {
+		t.Run(given, func(t *testing.T) {
+			t.Parallel()
+			svc := &serviceSpy{}
+			api, _ := photoAPI(t, "%PDF-1.7")
+			receiver := lo.NewReceiver(lo.ReceiverConfig{
+				Service: svc, Client: api, Transport: lo.NewTransport(api, false),
+				IsAllowed: func(int64) bool { return true },
+				Uploads:   lo.NewUploader(api, fakeUploads{dir: t.TempDir()}, 0, nil),
+			})
+
+			msg := inbound("разбери")
+			msg.Document = &lo.Attachment{FileID: "ref", FileName: given, MimeType: "application/pdf"}
+			receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
+
+			if len(svc.prompts) != 1 {
+				t.Fatalf("prompts=%v, want one run", svc.prompts)
+			}
+			if saved := savedPathFrom(t, svc.prompts[0]); !strings.HasSuffix(saved, ".pdf") {
+				t.Fatalf("name %q saved as %q, want the fallback's extension", given, saved)
+			}
+		})
+	}
+}

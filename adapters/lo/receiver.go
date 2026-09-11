@@ -17,6 +17,7 @@ import (
 	"github.com/duckbugio/flock/core/chat"
 	"github.com/duckbugio/flock/core/goal"
 	"github.com/duckbugio/flock/core/schedule"
+	"github.com/duckbugio/flock/internal/fsutil"
 )
 
 const privateChatType = "private"
@@ -360,8 +361,14 @@ func (r *Receiver) attachments(
 		// model as a vision block, a document becomes words the agent opens with a tool. Its
 		// name is the sender's, so nothing sniffs it — that correction is for the name this
 		// adapter invented, not for one a person chose.
+		// The guard asks the SANITISER what the name will become, rather than re-deriving its
+		// rule here. A TrimSpace test passes ".", "..", "..." and "/" — all of which fsutil
+		// reduces to its own placeholder or to a bare separator, leaving the agent the
+		// extensionless path this fallback exists to prevent — and a rule copied by hand would
+		// drift the first time fsutil's changes.
 		name := msg.Document.FileName
-		if strings.TrimSpace(name) == "" {
+		if sanitized := fsutil.SanitizeUploadName(name); sanitized == fsutil.DefaultUploadName ||
+			strings.Trim(sanitized, `./\ `) == "" {
 			name = documentFileName(msg.ID, msg.Document.MimeType)
 		}
 		saved, note := r.download(ctx, chatID, msg.Document.FileID, name, fileKind)
