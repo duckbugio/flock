@@ -22,10 +22,11 @@ import (
 
 const (
 	requestTimeout = 65 * time.Second
-	// fileTimeout covers a whole download, body included, and is deliberately not
-	// requestTimeout. That one is sized for a 30-second long poll; reusing it here caps an
-	// upload-sized file at what fits in 65 seconds — 20 MiB needs a sustained 320 KB/s — and
-	// the user is then told to "try sending it again", which on that link never works. The
+	// fileTimeout covers a whole file transfer, body included, in either direction, and is
+	// deliberately not requestTimeout. That one is sized for a 30-second long poll; reusing it
+	// caps a file at what fits in 65 seconds — 20 MiB needs a sustained 320 KB/s. Inbound, the
+	// user is then told to "try sending it again", which on that link never works; outbound,
+	// the sweep leaves the file in outbox/ and re-uploads it from zero on every later run. The
 	// Telegram and VK adapters carry the same separate client for the same reason.
 	fileTimeout        = 120 * time.Second
 	maxResponseBytes   = 2 << 20
@@ -38,8 +39,9 @@ const (
 type Client struct {
 	base, token string
 	http        *http.Client
-	// fileHTTP reads file BYTES. A second client rather than a second timeout, because
-	// http.Client.Timeout is per-client and covers reading the body — see fileTimeout.
+	// fileHTTP carries file BYTES in BOTH directions — a download's response body and an
+	// upload's request body. A second client rather than a second timeout, because
+	// http.Client.Timeout is per-client and covers the body either way — see fileTimeout.
 	fileHTTP *http.Client
 }
 
@@ -506,7 +508,11 @@ func (c *Client) UploadDocument(ctx context.Context, chatID int64, filename stri
 	}
 	req.Header.Set("Content-Type", form.FormDataContentType())
 
-	resp, err := c.http.Do(req)
+	// fileHTTP, not http: Timeout covers writing the request BODY as well, so an upload on the
+	// short client dies at the same 65 seconds a download did. Worse here than there, because a
+	// failed delivery leaves the file in outbox/ and the next run uploads it again from zero —
+	// a loop that never converges and burns the link on every run, silently.
+	resp, err := c.fileHTTP.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()

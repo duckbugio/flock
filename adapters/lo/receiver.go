@@ -449,19 +449,6 @@ func hasServedMedia(msg *Message) bool {
 	return len(msg.Photo) > 0 || msg.Document != nil
 }
 
-// article picks "a" or "an" for the nouns this file uses. Small, but the prompt is read by a
-// model: "a image" is the kind of wrongness that makes the rest of the sentence less credible.
-func article(noun string) string {
-	if noun == "" {
-		return "a"
-	}
-	switch noun[0] {
-	case 'a', 'e', 'i', 'o', 'u':
-		return "an"
-	}
-	return "a"
-}
-
 // attachmentKind is what a refusal needs to say about one kind of attachment: the noun the
 // user sees, and what they can do instead.
 //

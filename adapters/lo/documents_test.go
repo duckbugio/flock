@@ -6,6 +6,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -278,5 +279,37 @@ func TestUploadSanitisesTheNameItPutsInTheHeader(t *testing.T) {
 				t.Fatalf("the part carries %d headers, want the two multipart writes itself", headers)
 			}
 		})
+	}
+}
+
+// An outbound file rides the FILE client, not the polling one. http.Client.Timeout covers
+// writing the request BODY too, so a 20 MiB artifact on the short client dies mid-upload — and
+// the sweep then leaves it in outbox/ and uploads it again from zero on every later run,
+// forever, while the user sees only the agent's promise.
+//
+// The two clients are told apart by giving the caller's client a tiny timeout: NewClient keeps
+// it for the polling client and overrides it with the file budget for the other. A send that
+// outlives the tiny timeout therefore proves which one carried it.
+func TestUploadUsesTheFileClientNotThePollingOne(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(120 * time.Millisecond)
+		reply(w, `{"ok":true,"result":{"message_id":1}}`)
+	}))
+	t.Cleanup(server.Close)
+	impatient := server.Client()
+	impatient.Timeout = 40 * time.Millisecond
+	api, err := lo.NewClient(server.URL, testToken, impatient)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := lo.NewTransport(api, false).WithDocuments(true).
+		SendDocument(t.Context(), "77", "report.pdf", strings.NewReader("x")); err != nil {
+		t.Fatalf("the upload was cut by the polling client's timeout: %v", err)
+	}
+	// And the check has teeth: an ordinary message on the same client does time out.
+	if _, err := lo.NewTransport(api, false).Send(t.Context(), "77", "hi", "", false); err == nil {
+		t.Fatal("the impatient timeout applied to nothing; the test proves nothing")
 	}
 }

@@ -131,7 +131,8 @@ func (u *Uploader) Save(ctx context.Context, chatID, fileID, fileName string) (s
 // comes back as "txt text pot brf srt" and image/jpeg as "jpeg jpg jpe jfif". Picking the first
 // alphabetically — which an earlier version did, for stability — chose ".brf" for a text file
 // and ".jfif" for a photo, both worse than any of the obvious answers. These are the types a
-// chat actually carries; everything else is bytes nobody described, and ".bin" says so.
+// chat actually carries; anything NOT in this table gets ".bin" — including types that are
+// perfectly well known and simply absent here, which is the honest reading of "unknown to us".
 //
 //nolint:gochecknoglobals // A fixed table, read-only, kept beside the function that uses it.
 var documentExtensions = map[string]string{
@@ -142,10 +143,17 @@ var documentExtensions = map[string]string{
 	"text/markdown":    ".md",
 	"text/csv":         ".csv",
 	"text/html":        ".html",
-	"image/png":        ".png",
-	"image/jpeg":       ".jpg",
-	"image/gif":        ".gif",
-	"image/webp":       ".webp",
+	"text/xml":         ".xml",
+	"application/xml":  ".xml",
+	// The two a working chat actually carries when someone sends "the spec": without them a
+	// nameless .docx lands as .bin, which is the faceless path this whole fallback exists to
+	// avoid.
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":       ".xlsx",
+	"image/png":  ".png",
+	"image/jpeg": ".jpg",
+	"image/gif":  ".gif",
+	"image/webp": ".webp",
 }
 
 // documentFileName names a saved document when the platform sent no file name. LO fills

@@ -393,6 +393,9 @@ func TestNamelessDocumentIsNamedFromItsType(t *testing.T) {
 		// answer is worse than any of the obvious ones.
 		{"plain text", "text/plain", ".txt"},
 		{"a jpeg", "image/jpeg", ".jpg"},
+		// The two a working chat actually carries when someone sends "the spec".
+		{"a word document", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"},
+		{"a spreadsheet", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"},
 		{"parameters and case", "TEXT/PLAIN; charset=utf-8", ".txt"},
 		{"a type nothing knows", "application/x-nonsense-not-a-type", ".bin"},
 		{"no type at all", "", ".bin"},
