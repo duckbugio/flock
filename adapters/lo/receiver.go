@@ -2,7 +2,6 @@ package lo
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"math"
@@ -42,7 +41,11 @@ type ReceiverConfig struct {
 	Guards         func(int64) (bool, string)
 	RequireMention bool
 	Scheduler      *schedule.Manager
-	Logger         *slog.Logger
+	// Uploads saves inbound photos into the per-chat uploads directory so the agent can
+	// open them. Nil disables the download and every attachment gets the same explanatory
+	// notice it got before — the adapter must still run where no workspace is wired.
+	Uploads *Uploader
+	Logger  *slog.Logger
 }
 
 // Receiver serially admits updates while the shared dispatcher runs chats concurrently.
@@ -154,11 +157,18 @@ func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
 		r.reserved(ctx, chatID, msg.From.ID, name, args)
 		return
 	}
-	if hasMedia(msg) {
-		r.notify(ctx, chatID, "Attachments are not supported yet. Please send the relevant text or a repository path.")
+	// Attachments are answered BEFORE the empty-text check: a photo with no caption is a
+	// complete request ("look at this"), and dropping it silently is what made the bot
+	// look broken.
+	attached, note := r.attachments(ctx, msg, chatID)
+	if note != "" {
+		// The file the request rests on never reached the agent, so the caption must not be
+		// answered on its own: "review this file" without the file invites a confident answer
+		// about nothing. One notice, no run.
+		r.notify(ctx, chatID, note)
 		return
 	}
-	if text == "" {
+	if text == "" && attached == "" {
 		return
 	}
 	if r.cfg.Guards != nil {
@@ -168,20 +178,99 @@ func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
 		}
 	}
 	text = replyPrompt(msg, replyToBot, text)
+	if attached != "" {
+		text = strings.TrimSpace(text + "\n" + attached)
+	}
 	r.cfg.Service.Handle(ctx, chatID, msg.From.ID, strconv.FormatInt(msg.ID, 10), text)
 }
 
 func hasMedia(msg *Message) bool {
-	for _, raw := range []json.RawMessage{
-		msg.Photo, msg.Document, msg.Voice, msg.Audio, msg.Video,
+	if len(msg.Photo) > 0 {
+		return true
+	}
+	for _, att := range []*Attachment{
+		msg.Document, msg.Voice, msg.Audio, msg.Video,
 		msg.Animation, msg.Sticker, msg.VideoNote,
 	} {
-		value := strings.TrimSpace(string(raw))
-		if value != "" && value != "null" && value != "[]" {
+		if att != nil {
 			return true
 		}
 	}
 	return false
+}
+
+// unservedKinds names the attachments LO accepts from a user but will not hand to a bot,
+// in the order a message is inspected. Each carries its own sentence: "attachments are not
+// supported" taught users nothing about which of their files the bot could actually read,
+// and photos now CAN be read.
+//
+//nolint:gochecknoglobals // A fixed table, read-only, kept beside the function that uses it.
+var unservedKinds = []struct {
+	get    func(*Message) *Attachment
+	notice string
+}{
+	{
+		get: func(m *Message) *Attachment { return m.Document },
+		notice: "I cannot open documents: LO's bot API does not serve their bytes yet. " +
+			"Paste the text, or point me at the file in a repository.",
+	},
+	{
+		get:    func(m *Message) *Attachment { return m.Voice },
+		notice: "I cannot listen to voice messages on LO yet. Please send the request as text.",
+	},
+	{
+		get:    func(m *Message) *Attachment { return m.VideoNote },
+		notice: "I cannot open video notes on LO yet. Please send the request as text.",
+	},
+	{
+		get: func(m *Message) *Attachment { return m.Video },
+		notice: "I cannot download video on LO: the platform hands bots a reference, not the bytes. " +
+			"Describe what it shows, or send a screenshot as a photo.",
+	},
+	{
+		get: func(m *Message) *Attachment { return m.Audio },
+		notice: "I cannot download audio on LO: the platform hands bots a reference, not the bytes. " +
+			"Please send the request as text.",
+	},
+	{
+		get:    func(m *Message) *Attachment { return m.Animation },
+		notice: "I cannot open animations on LO yet. A still screenshot sent as a photo works.",
+	},
+	{
+		get:    func(m *Message) *Attachment { return m.Sticker },
+		notice: "Stickers carry nothing I can act on. Please send the request as text.",
+	},
+}
+
+// attachments turns a message's files into (prompt addition, user notice). Both may be
+// empty. A photo is downloaded into the chat's uploads directory and the agent is told the
+// path; everything else gets the sentence that says what this platform withholds.
+//
+// A download failure is a NOTICE, never a dropped message: the user watched their file
+// arrive and deserves to know it did not reach the agent.
+func (r *Receiver) attachments(ctx context.Context, msg *Message, chatID string) (prompt, notice string) {
+	if size, ok := LargestPhoto(msg.Photo); ok {
+		if r.cfg.Uploads == nil {
+			return "", "I cannot read images in this deployment: no uploads directory is configured."
+		}
+		path, err := r.cfg.Uploads.Save(ctx, chatID, size.FileID, photoFileName(msg.ID))
+		switch {
+		case errors.Is(err, ErrUploadTooLarge):
+			return "", "That image is too large for me to open. Please send a smaller one."
+		case errors.Is(err, ErrNoBytes):
+			return "", "LO did not hand me the bytes of that image, so I cannot open it."
+		case err != nil:
+			r.cfg.Logger.Warn("lo: photo download failed", "error", err)
+			return "", "I could not download that image. Please try sending it again."
+		}
+		return "[The user attached an image. It is saved at " + path + " — open it to see what they mean.]", ""
+	}
+	for _, kind := range unservedKinds {
+		if kind.get(msg) != nil {
+			return "", kind.notice
+		}
+	}
+	return "", ""
 }
 
 func (r *Receiver) notify(ctx context.Context, chatID, text string) {

@@ -93,7 +93,7 @@ func TestReceiverDoesNotDropAttachmentsOrQuoteContextSilently(t *testing.T) {
 		Service: svc, Transport: lo.NewTransport(api, false), IsAllowed: func(int64) bool { return true },
 	})
 	media := inbound("review this file")
-	media.Document = []byte(`{"file_id":"lo-file"}`)
+	media.Document = &lo.Attachment{FileID: "lo-file", FileName: "notes.txt"}
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: media})
 	if len(svc.prompts) != 0 || notices.Load() != 1 {
 		t.Fatal("attachment silently discarded")
@@ -227,7 +227,7 @@ func TestIgnoredMessagesDoNotSpendGuardBudget(t *testing.T) {
 		Guards: func(int64) (bool, string) { calls++; return true, "" },
 	})
 	media := inbound("photo")
-	media.Photo = json.RawMessage(`[{}]`)
+	media.Photo = []lo.PhotoSize{{FileID: "lo-photo", Width: 90, Height: 90}}
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: media})
 	empty := inbound("@flock")
 	empty.Chat.ID, empty.Chat.Type = -42, groupChatType
@@ -308,7 +308,7 @@ func TestQuotedAttachmentIsExplicitInPrompt(t *testing.T) {
 		msg := inbound("explain this")
 		msg.Reply = inbound("")
 		msg.Reply.Caption = caption
-		msg.Reply.Photo = json.RawMessage(`[{}]`)
+		msg.Reply.Photo = []lo.PhotoSize{{FileID: "lo-photo", Width: 90, Height: 90}}
 		receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
 		if len(svc.prompts) != 1 ||
 			!strings.Contains(svc.prompts[0], "Quoted attachment is unavailable") || !strings.Contains(svc.prompts[0], caption) {

@@ -95,11 +95,25 @@ this adapter does not promise exactly-once agent execution or automatic resume.
 - `LO_REGISTER_COMMANDS=true` opts into `setMyCommands`. Failure is logged and
   does not disable text commands. The current server implements this method; registration remains
   opt-in until live acceptance with the deployment's bot token is complete.
-- Files, voice, native callback buttons, rich messages, and the interactive star
-  nudge are unavailable. Incoming attachments get a clear notice; they are not
-  silently stripped from an AI prompt. Outbox delivery is disabled. Agent-created
-  files remain in the workspace/repository and must be retrieved there. LO
-  workspace instructions explicitly disable automatic file-delivery promises.
+- **Inbound photos are downloaded.** The largest size of an incoming photo is fetched
+  through `getFile` + `<base>/file/bot<TOKEN>/<file_path>` and written to the chat's
+  uploads directory (a sibling of the cloned repositories, so a user's image can never
+  enter a commit); the prompt then carries that absolute path and the agent opens it. A
+  photo with no caption starts a run on its own. `MAX_UPLOAD_BYTES` caps the download and
+  the cap also holds on the stream, because LO omits `file_size` for files it has not
+  measured. Client-supplied names are sanitised; a saved file cannot leave the uploads
+  directory.
+- **Every other attachment gets its own sentence and stops the run.** Documents, voice,
+  video notes and animations are `501` stubs on the platform; audio and video answer
+  `getFile` WITHOUT a `file_path` by design (an LO audio is a catalogue track, so there is
+  no address for the bytes) and can only be echoed by reference. Answering the caption
+  without the file it refers to produces a confident answer about nothing, so the adapter
+  refuses instead.
+- **Outbound files stay disabled.** `sendDocument` is a platform stub, and `sendPhoto`'s
+  upload branch answers `500` on the deployments exercised so far, so the outbox is off and
+  agent-created files remain in the workspace/repository. LO workspace instructions
+  explicitly disable automatic file-delivery promises. Native callback buttons, rich
+  messages and the interactive star nudge are unavailable.
 - The LO command does not yet wire Telegram's interrupted-run recovery, CI watch
   or PR-comment polling. These are **Flock adapter gaps**, not missing LO API
   methods. The scheduler and goal evaluator are supported.

@@ -164,17 +164,63 @@ type Message struct {
 		ID   int64  `json:"id"`
 		Type string `json:"type"`
 	} `json:"chat"`
-	Text      string          `json:"text"`
-	Caption   string          `json:"caption"`
-	Photo     json.RawMessage `json:"photo"`
-	Document  json.RawMessage `json:"document"`
-	Voice     json.RawMessage `json:"voice"`
-	Audio     json.RawMessage `json:"audio"`
-	Video     json.RawMessage `json:"video"`
-	Animation json.RawMessage `json:"animation"`
-	Sticker   json.RawMessage `json:"sticker"`
-	VideoNote json.RawMessage `json:"video_note"`       //nolint:tagliatelle // Bot API wire spelling.
-	Reply     *Message        `json:"reply_to_message"` //nolint:tagliatelle // Bot API wire spelling.
+	Text    string `json:"text"`
+	Caption string `json:"caption"`
+	// Photo is the size ladder Bot API sends for one image, ascending. LargestPhoto
+	// picks from it; the adapter never assumes a position.
+	Photo     []PhotoSize `json:"photo"`
+	Document  *Attachment `json:"document"`
+	Voice     *Attachment `json:"voice"`
+	Audio     *Attachment `json:"audio"`
+	Video     *Attachment `json:"video"`
+	Animation *Attachment `json:"animation"`
+	Sticker   *Attachment `json:"sticker"`
+	VideoNote *Attachment `json:"video_note"`       //nolint:tagliatelle // Bot API wire spelling.
+	Reply     *Message    `json:"reply_to_message"` //nolint:tagliatelle // Bot API wire spelling.
+}
+
+// PhotoSize is one rung of an inbound photo's size ladder.
+type PhotoSize struct {
+	FileID   string `json:"file_id"`   //nolint:tagliatelle // Bot API wire spelling.
+	FileSize int64  `json:"file_size"` //nolint:tagliatelle // Bot API wire spelling.
+	Width    int    `json:"width"`
+	Height   int    `json:"height"`
+}
+
+// Attachment is the shared shape of every non-photo inbound file. LO fills the id and
+// usually the name; file_size is optional on this platform (see File.FileSize).
+type Attachment struct {
+	FileID   string `json:"file_id"`   //nolint:tagliatelle // Bot API wire spelling.
+	FileName string `json:"file_name"` //nolint:tagliatelle // Bot API wire spelling.
+	MimeType string `json:"mime_type"` //nolint:tagliatelle // Bot API wire spelling.
+	FileSize int64  `json:"file_size"` //nolint:tagliatelle // Bot API wire spelling.
+}
+
+// File is the getFile result. FilePath is EMPTY for media whose bytes this platform does
+// not serve (LO answers audio and video references without a path on purpose: an LO audio
+// is a catalogue track, and there is no address for the bytes). A caller must check the
+// field before attempting a download — that empty path is the platform saying "reference
+// yes, bytes no", not a malformed response.
+type File struct {
+	FileID   string `json:"file_id"`   //nolint:tagliatelle // Bot API wire spelling.
+	FilePath string `json:"file_path"` //nolint:tagliatelle // Bot API wire spelling.
+	FileSize int64  `json:"file_size"` //nolint:tagliatelle // Bot API wire spelling.
+}
+
+// LargestPhoto returns the highest-resolution rung of a photo ladder. An agent reading a
+// screenshot needs the pixels, so the largest rung is the only useful one; ok is false for
+// a ladder with no usable id.
+func LargestPhoto(sizes []PhotoSize) (PhotoSize, bool) {
+	var best PhotoSize
+	for _, size := range sizes {
+		if size.FileID == "" {
+			continue
+		}
+		if best.FileID == "" || size.Width*size.Height > best.Width*best.Height {
+			best = size
+		}
+	}
+	return best, best.FileID != ""
 }
 
 // Update is an ordered getUpdates item. Unsupported event kinds are acknowledged and ignored.
@@ -223,4 +269,54 @@ func (c *Client) CheckPolling(ctx context.Context) error {
 		return errors.New("LO bot has an active webhook; use a dedicated polling bot or remove its webhook explicitly")
 	}
 	return nil
+}
+
+// GetFile resolves an inbound file reference to a downloadable path. A successful call with
+// an EMPTY FilePath is a valid answer, not a failure: the reference is real (sendPhoto and
+// friends take it back) while the bytes are not served. Callers must branch on that rather
+// than treat it as an error, because the two cases need different words to the user.
+func (c *Client) GetFile(ctx context.Context, fileID string) (File, error) {
+	if strings.TrimSpace(fileID) == "" {
+		return File{}, errors.New("LO getFile requires a file id")
+	}
+	var file File
+	if err := c.call(ctx, "getFile", map[string]any{"file_id": fileID}, &file); err != nil {
+		return File{}, err
+	}
+	return file, nil
+}
+
+// DownloadURL builds the byte address for a file_path from GetFile. The result embeds the
+// bot token: it must never be logged, returned in an error, or handed to anything that
+// records URLs. Keep it inside the request that uses it.
+func (c *Client) DownloadURL(filePath string) string {
+	return c.base + "/file/bot" + c.token + "/" + strings.TrimLeft(filePath, "/")
+}
+
+// Download streams a file_path's bytes. The caller closes the returned body. Errors are
+// scrubbed of the token, including the URL a transport error would otherwise carry.
+func (c *Client) Download(ctx context.Context, filePath string) (io.ReadCloser, error) {
+	if strings.TrimSpace(filePath) == "" {
+		return nil, errors.New("LO download requires a file path")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.DownloadURL(filePath), nil)
+	if err != nil {
+		return nil, errors.New("cannot construct LO download request")
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err // The outer URL carries the bot credential.
+		}
+		return nil, fmt.Errorf("LO download failed: %s", strings.ReplaceAll(err.Error(), c.token, "[REDACTED]"))
+	}
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		return nil, &APIError{Code: resp.StatusCode, Description: "file download refused"}
+	}
+	return resp.Body, nil
 }
