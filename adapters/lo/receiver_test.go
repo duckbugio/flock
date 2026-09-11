@@ -460,7 +460,7 @@ func (*pollSpy) DisarmGoal(string) bool                   { return false }
 // the same poisoned batch forever.
 func TestUndecodableUpdateDoesNotStopTheBatch(t *testing.T) {
 	t.Parallel()
-	svc := &pollSpy{prompts: make(chan string, 4)}
+	svc := &pollSpy{prompts: make(chan string, 8)}
 	offsets := make(chan int64, 8)
 	api := client(t, func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/getUpdates") {
@@ -500,10 +500,13 @@ func TestUndecodableUpdateDoesNotStopTheBatch(t *testing.T) {
 	go func() { done <- receiver.Run(ctx) }()
 	defer func() { cancel(); <-done }()
 
-	// Both readable messages must arrive. Before the fix neither did: the batch failed to
-	// decode as a whole, the offset never moved, and the poller re-asked for it forever.
+	// Every readable message must arrive — including the TAIL, whose only broken field is its
+	// own id: the body beside it is whole, so answering it costs nothing and losing it would
+	// mean an id spelling could silence the bot for every message in every batch. Before the
+	// fix none of them arrived: the batch failed to decode as a whole, the offset never moved,
+	// and the poller re-asked for it forever.
 	var got []string
-	for range 2 {
+	for range 3 {
 		select {
 		case prompt := <-svc.prompts:
 			got = append(got, prompt)
@@ -511,8 +514,15 @@ func TestUndecodableUpdateDoesNotStopTheBatch(t *testing.T) {
 			t.Fatalf("the batch stalled; prompts so far: %v", got)
 		}
 	}
-	if !strings.Contains(got[0], "first") || !strings.Contains(got[1], "third") {
-		t.Fatalf("prompts=%v, want the two readable messages in order", got)
+	if !strings.Contains(got[0], "first") || !strings.Contains(got[1], "third") ||
+		!strings.Contains(got[2], "tail") {
+		t.Fatalf("prompts=%v, want every readable message in order", got)
+	}
+	// The poisoned one must NOT arrive: its body is what failed to decode.
+	select {
+	case extra := <-svc.prompts:
+		t.Fatalf("prompt %q arrived, want the unreadable body dropped", extra)
+	case <-time.After(200 * time.Millisecond):
 	}
 	// The offset must have moved PAST the poisoned update, not stopped at it.
 	select {

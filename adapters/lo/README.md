@@ -98,19 +98,23 @@ this adapter does not promise exactly-once agent execution or automatic resume.
 - **Inbound photos are downloaded.** The largest size of an incoming photo is fetched
   through `getFile` + `<base>/file/bot<TOKEN>/<file_path>` and written to the chat's
   uploads directory (a sibling of the cloned repositories, so a user's image can never
-  enter a commit); the prompt then carries that absolute path and the agent opens it. A
+  enter a commit); the prompt then carries that absolute path AND the picture travels to the
+  model as a vision block, so it is seen rather than named. The saved name is corrected to what
+  the first bytes say the file is, because the vision block's media type is read back out of
+  that name — and bytes that are not an image at all (a storage error page served with 200, an
+  empty body) are thrown away with the download-failure sentence rather than declared a JPEG. A
   photo with no caption starts a run on its own. `MAX_UPLOAD_BYTES` caps the download and
   the cap also holds on the stream, because LO omits `file_size` for files it has not
   measured. Client-supplied names are sanitised; a saved file cannot leave the uploads
   directory.
 - **Every other attachment gets its own sentence and stops the run.** Answering the caption
   without the file it refers to produces a confident answer about nothing, so the adapter
-  refuses instead. The sentences differ by what is actually known. Voice, video notes and
-  animations are `501` stubs on the platform. Audio and video answer `getFile` WITHOUT a
-  `file_path` by design — an LO audio is a catalogue track, so no address for the bytes
-  exists — and can only be echoed by reference. Documents say only that this adapter does
-  not read them yet: the `501` is `sendDocument`'s, which is the OUTGOING direction, and
-  whether `getFile` serves a document is a separate question this change does not answer.
+  refuses instead. The sentences differ by what is actually known. Audio and video answer
+  `getFile` WITHOUT a `file_path` by design — an LO audio is a catalogue track, so no address
+  for the bytes exists — and can only be echoed by reference. Voice, video notes, animations
+  and documents say only that this adapter does not read them yet, and for the same reason in
+  every case: the `501` on the platform is about SENDING them, which is the OUTGOING direction,
+  and whether `getFile` serves their bytes is a separate question this change does not answer.
 - **Outbound files stay disabled.** `sendDocument` is a platform stub, and `sendPhoto`'s
   upload branch answers `500` on the deployments exercised so far, so the outbox is off and
   agent-created files remain in the workspace/repository. LO workspace instructions

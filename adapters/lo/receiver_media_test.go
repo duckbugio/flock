@@ -12,6 +12,11 @@ import (
 
 // photoAPI answers the two calls a photo download makes — getFile then the byte fetch —
 // and records the notices the bot sends back to the chat.
+// pngBytes is a real PNG signature. The adapter refuses a "photo" whose bytes are not an
+// image, so a fixture spelling its content "PNGDATA" would exercise that refusal instead of
+// the path it is written for.
+const pngBytes = "\x89PNG\r\n\x1a\n"
+
 func photoAPI(t *testing.T, bytes string) (*lo.Client, *[]string) {
 	t.Helper()
 	var notices []string
@@ -36,7 +41,7 @@ func photoAPI(t *testing.T, bytes string) (*lo.Client, *[]string) {
 func TestPhotoReachesTheAgentAsAPath(t *testing.T) {
 	t.Parallel()
 	svc := &serviceSpy{}
-	api, notices := photoAPI(t, "PNGDATA")
+	api, notices := photoAPI(t, pngBytes)
 	base := t.TempDir()
 	receiver := lo.NewReceiver(lo.ReceiverConfig{
 		Service: svc, Client: api, Transport: lo.NewTransport(api, false),
@@ -61,7 +66,7 @@ func TestPhotoReachesTheAgentAsAPath(t *testing.T) {
 	}
 	saved := savedPathFrom(t, prompt)
 	data, err := os.ReadFile(saved) //nolint:gosec // Path comes from the prompt the code built.
-	if err != nil || string(data) != "PNGDATA" {
+	if err != nil || string(data) != pngBytes {
 		t.Fatalf("saved file content=%q err=%v", data, err)
 	}
 	if len(*notices) != 0 {
@@ -74,7 +79,7 @@ func TestPhotoReachesTheAgentAsAPath(t *testing.T) {
 func TestCaptionlessPhotoStillStartsARun(t *testing.T) {
 	t.Parallel()
 	svc := &serviceSpy{}
-	api, _ := photoAPI(t, "PNG")
+	api, _ := photoAPI(t, pngBytes)
 	receiver := lo.NewReceiver(lo.ReceiverConfig{
 		Service: svc, Client: api, Transport: lo.NewTransport(api, false),
 		IsAllowed: func(int64) bool { return true },
@@ -96,7 +101,7 @@ func TestCaptionlessPhotoStillStartsARun(t *testing.T) {
 func TestPhotoReachesTheModelAsAnImage(t *testing.T) {
 	t.Parallel()
 	svc := &serviceSpy{}
-	api, _ := photoAPI(t, "PNGDATA")
+	api, _ := photoAPI(t, pngBytes)
 	receiver := lo.NewReceiver(lo.ReceiverConfig{
 		Service: svc, Client: api, Transport: lo.NewTransport(api, false),
 		IsAllowed: func(int64) bool { return true },
@@ -110,7 +115,7 @@ func TestPhotoReachesTheModelAsAnImage(t *testing.T) {
 	if len(svc.images) != 1 || len(svc.images[0]) != 1 {
 		t.Fatalf("images=%v, want the picture itself", svc.images)
 	}
-	if string(svc.images[0][0].Data) != "PNGDATA" {
+	if string(svc.images[0][0].Data) != pngBytes {
 		t.Fatalf("the model was shown %q", svc.images[0][0].Data)
 	}
 }
@@ -130,7 +135,7 @@ func TestPhotoWithNoUsableSizeIsExplained(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			svc := &serviceSpy{}
-			api, notices := photoAPI(t, "PNG")
+			api, notices := photoAPI(t, pngBytes)
 			receiver := lo.NewReceiver(lo.ReceiverConfig{
 				Service: svc, Client: api, Transport: lo.NewTransport(api, false),
 				IsAllowed: func(int64) bool { return true },
@@ -205,7 +210,7 @@ func TestUnreadableAttachmentsExplainThemselvesAndStopTheRun(t *testing.T) {
 func TestFailedPhotoDownloadNotifiesInsteadOfSilence(t *testing.T) {
 	t.Parallel()
 	svc := &serviceSpy{}
-	api, notices := photoAPI(t, "PNG")
+	api, notices := photoAPI(t, pngBytes)
 	src := &fakeSource{fileErr: errors.New("getFile exploded")}
 	receiver := lo.NewReceiver(lo.ReceiverConfig{
 		Service: svc, Client: api, Transport: lo.NewTransport(api, false),
@@ -227,7 +232,7 @@ func TestFailedPhotoDownloadNotifiesInsteadOfSilence(t *testing.T) {
 func TestPhotoWithoutUploaderIsRefusedExplicitly(t *testing.T) {
 	t.Parallel()
 	svc := &serviceSpy{}
-	api, notices := photoAPI(t, "PNG")
+	api, notices := photoAPI(t, pngBytes)
 	receiver := lo.NewReceiver(lo.ReceiverConfig{
 		Service: svc, Client: api, Transport: lo.NewTransport(api, false),
 		IsAllowed: func(int64) bool { return true },
@@ -347,9 +352,9 @@ func TestSavedPhotoIsNamedByItsActualBytes(t *testing.T) {
 	// The first bytes of a real PNG; http.DetectContentType reads exactly this prefix.
 	png := "\x89PNG\r\n\x1a\n" + strings.Repeat("\x00", 32)
 	for name, tc := range map[string]struct{ body, wantExt string }{
-		"a png":          {png, ".png"},
-		"a gif":          {"GIF89a" + strings.Repeat("\x00", 32), ".gif"},
-		"something else": {"plain bytes nobody can type", ".jpg"},
+		"a png":  {png, ".png"},
+		"a gif":  {"GIF89a" + strings.Repeat("\x00", 32), ".gif"},
+		"a jpeg": {"\xff\xd8\xff" + strings.Repeat("\x00", 32), ".jpg"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -374,6 +379,39 @@ func TestSavedPhotoIsNamedByItsActualBytes(t *testing.T) {
 			}
 			if _, err := os.Stat(saved); err != nil {
 				t.Fatalf("the renamed file is not where the prompt says: %v", err)
+			}
+		})
+	}
+}
+
+// Bytes that are NOT an image must not reach the model as one. The sniff already knows — a
+// storage error page served with 200, or an empty body — and keeping the guessed .jpg would
+// make the very claim the renaming above exists to prevent, one step further along.
+func TestPhotoBytesThatAreNotAnImageAreRefused(t *testing.T) {
+	t.Parallel()
+	for name, body := range map[string]string{
+		"an error page":  "<!DOCTYPE html><html><body>500</body></html>",
+		"nothing at all": "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			svc := &serviceSpy{}
+			api, notices := photoAPI(t, body)
+			receiver := lo.NewReceiver(lo.ReceiverConfig{
+				Service: svc, Client: api, Transport: lo.NewTransport(api, false),
+				IsAllowed: func(int64) bool { return true },
+				Uploads:   lo.NewUploader(api, fakeUploads{dir: t.TempDir()}, 0, nil),
+			})
+
+			msg := inbound("")
+			msg.Photo = []lo.PhotoSize{{FileID: "ref", Width: 800, Height: 600}}
+			receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
+
+			if len(svc.prompts) != 0 {
+				t.Fatalf("prompts=%v, want no run for bytes that are not an image", svc.prompts)
+			}
+			if len(*notices) != 1 {
+				t.Fatalf("notices=%v, want the user told their image did not arrive", *notices)
 			}
 		})
 	}

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -341,10 +342,28 @@ func (r *Receiver) attachments(ctx context.Context, msg *Message, chatID string)
 		r.cfg.Logger.Warn("lo: photo download failed", "error", err)
 		return "", "I could not download that image. Please try sending it again."
 	}
-	// The name was a GUESS until the bytes existed, and it is not decoration: core/chat reads
-	// the vision block's media type out of the saved path, so a PNG saved as .jpg would be
-	// declared to the model as a JPEG. Correcting it here is what stops that.
-	return nameByContent(path, r.cfg.Logger), ""
+	return r.checkPhotoBytes(path)
+}
+
+// checkPhotoBytes names a saved photo by what its bytes ARE, and refuses bytes that are not an
+// image at all.
+//
+// The name was a GUESS until the bytes existed, and it is not decoration: core/chat reads the
+// vision block's media type out of the saved path, so a PNG saved as .jpg would be declared to
+// the model as a JPEG. The refusal is that same false claim one step further along — a storage
+// error page served with 200, or an empty body, handed to the model as a picture — and the
+// user hears the sentence a failed download already has, because to them it is the same event.
+// An empty detected type means the sniff itself failed: unknown is not disproven, so the file
+// stays and keeps the name it had.
+func (r *Receiver) checkPhotoBytes(path string) (saved, notice string) {
+	path, detected := nameByContent(path, r.cfg.Logger)
+	if detected == "" || strings.HasPrefix(detected, "image/") {
+		return path, ""
+	}
+	if err := os.Remove(path); err != nil {
+		r.cfg.Logger.Warn("lo: could not remove a photo that is not an image", "error", err)
+	}
+	return "", "I could not download that image. Please try sending it again."
 }
 
 // unservedNotice is the whole of the attachment path that needs no I/O — the kinds this

@@ -274,13 +274,19 @@ func (c *Client) GetMe(ctx context.Context) (User, error) {
 // any one of them — a field this adapter models as an object arriving as something else —
 // would fail the whole json.Unmarshal; the receiver would then not advance its offset, ask for
 // the same batch again, and the bot would stop answering anyone until that update expired.
-// Losing one message the adapter cannot read costs a message; the alternative costs the bot.
+// Losing one message whose BODY the adapter cannot read costs a message; the alternative
+// costs the bot.
 //
-// The update_id is still read from the skipped update where possible, so the offset advances
-// past it — as a number or as a string holding one, since the shapes that break here are
-// inside `message`. An update whose ID is not readable EITHER way is skipped without advancing
-// the offset: there is nothing to acknowledge. If such an update is the last in a batch it will
-// be re-fetched until the platform sends another, which is the one stall this cannot remove.
+// The envelope and the body are therefore decoded separately, and the two failures are not
+// alike. The id is read as a json.Number, which accepts a number and a string holding one, and
+// the body travels as RawMessage, which is not type-checked — so an id that arrives in the
+// wrong shape breaks nothing but itself, and the message beside it is answered. Only a body
+// that will not decode costs the message: the id is kept so the offset moves past it, and
+// Message stays nil, which the receiver already treats as nothing to do.
+//
+// An update whose id is not readable EITHER way is skipped without advancing the offset: there
+// is nothing to acknowledge. If such an update is the last in a batch it will be re-fetched
+// until the platform sends another, which is the one stall this cannot remove.
 func (c *Client) GetUpdates(ctx context.Context, offset int64) ([]Update, error) {
 	var raw []json.RawMessage
 	body := map[string]any{
@@ -291,17 +297,13 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64) ([]Update, error)
 	}
 	updates := make([]Update, 0, len(raw))
 	for _, item := range raw {
-		var update Update
-		if err := json.Unmarshal(item, &update); err == nil {
-			updates = append(updates, update)
-			continue
-		}
 		// json.Number rather than int64: an id that arrives as a STRING would fail an int64
 		// decode, and this adapter would then skip the update without advancing past it — so
-		// a poisoned LAST update in a batch would be re-fetched forever. That is the same
-		// stall this whole loop removes, just narrower, and the fallback costs one conversion.
+		// a poisoned LAST update in a batch would be re-fetched forever. RawMessage for the
+		// body, so a shape this adapter does not model cannot take the id down with it.
 		var header struct {
-			ID json.Number `json:"update_id"` //nolint:tagliatelle // Bot API wire spelling.
+			ID      json.Number     `json:"update_id"` //nolint:tagliatelle // Bot API wire spelling.
+			Message json.RawMessage `json:"message"`
 		}
 		var (
 			id    int64
@@ -315,10 +317,20 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64) ([]Update, error)
 			slog.Warn("LO sent an update this adapter cannot read at all")
 			continue
 		}
-		// An id and a body that will not decode: keep the id so the offset moves past it,
-		// and leave Message nil, which the receiver already treats as nothing to do.
-		slog.Warn("LO sent an update this adapter cannot read", "update_id", id)
-		updates = append(updates, Update{ID: id})
+		if len(header.Message) == 0 {
+			// An event kind this adapter did not ask for, or an empty envelope. Acknowledged.
+			updates = append(updates, Update{ID: id})
+			continue
+		}
+		var message Message
+		if err := json.Unmarshal(header.Message, &message); err != nil {
+			// A body that will not decode: keep the id so the offset moves past it, and leave
+			// Message nil, which the receiver already treats as nothing to do.
+			slog.Warn("LO sent an update whose message this adapter cannot read", "update_id", id)
+			updates = append(updates, Update{ID: id})
+			continue
+		}
+		updates = append(updates, Update{ID: id, Message: &message})
 	}
 	return updates, nil
 }

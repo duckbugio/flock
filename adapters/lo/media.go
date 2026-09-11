@@ -155,13 +155,20 @@ var photoExtensions = map[string]string{
 // a file name this adapter invented. Sniffing costs one read of the first 512 bytes, which is
 // what http.DetectContentType looks at.
 //
-// Every failure here keeps the original path: the file is saved and openable either way, and
-// losing a correct media type is a degradation, while losing the file is not.
-func nameByContent(path string, logger *slog.Logger) string {
+// It answers the detected type as well, because the caller has a decision to make with it that
+// a name cannot carry: bytes that are NOT an image must not be handed to the model as one. A
+// storage error page served with 200, or an empty body, would otherwise reach the model
+// declared as a JPEG — the same lie about the bytes this function exists to stop, one step
+// later.
+//
+// A failure to sniff keeps the original path and answers an empty type, which the caller reads
+// as "unknown, not disproven": the file is saved and openable either way, and losing a correct
+// media type is a degradation while losing the file is not.
+func nameByContent(path string, logger *slog.Logger) (saved, detected string) {
 	file, err := os.Open(path) //nolint:gosec // Path is one this adapter just wrote.
 	if err != nil {
 		logger.Warn("lo: could not sniff a saved photo", "error", err)
-		return path
+		return path, ""
 	}
 	// sniffBytes is what http.DetectContentType reads, and reading more would be wasted.
 	const sniffBytes = 512
@@ -169,20 +176,26 @@ func nameByContent(path string, logger *slog.Logger) string {
 	n, err := file.Read(head)
 	_ = file.Close()
 	if err != nil && n == 0 {
+		// Includes the empty file: io.EOF with nothing read. An empty "photo" is not a photo,
+		// and the caller must hear that rather than a shrug.
+		if errors.Is(err, io.EOF) {
+			return path, "application/octet-stream"
+		}
 		logger.Warn("lo: could not read a saved photo", "error", err)
-		return path
+		return path, ""
 	}
 	// DetectContentType may append parameters ("text/plain; charset=utf-8"); only the type
 	// itself names a format.
-	detected, _, _ := strings.Cut(http.DetectContentType(head[:n]), ";")
-	ext, ok := photoExtensions[strings.TrimSpace(detected)]
+	mediaType, _, _ := strings.Cut(http.DetectContentType(head[:n]), ";")
+	mediaType = strings.TrimSpace(mediaType)
+	ext, ok := photoExtensions[mediaType]
 	if !ok || strings.HasSuffix(path, ext) {
-		return path
+		return path, mediaType
 	}
 	renamed := strings.TrimSuffix(path, filepath.Ext(path)) + ext
 	if err := os.Rename(path, renamed); err != nil {
 		logger.Warn("lo: could not rename a saved photo to its real type", "error", err)
-		return path
+		return path, mediaType
 	}
-	return renamed
+	return renamed, mediaType
 }
