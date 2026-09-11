@@ -416,3 +416,56 @@ func TestPhotoBytesThatAreNotAnImageAreRefused(t *testing.T) {
 		})
 	}
 }
+
+// A picture in a format the vision block cannot carry is refused BY NAME rather than renamed:
+// core/chat answers image/jpeg for every extension it does not know, so keeping a BMP would
+// declare it a JPEG to the model — the exact false claim the renaming exists to prevent.
+func TestPhotoInAFormatTheModelCannotSeeIsRefusedByName(t *testing.T) {
+	t.Parallel()
+	svc := &serviceSpy{}
+	// A BMP header: "BM" plus a size field. DetectContentType reads exactly this prefix.
+	api, notices := photoAPI(t, "BM"+strings.Repeat("\x00", 32))
+	receiver := lo.NewReceiver(lo.ReceiverConfig{
+		Service: svc, Client: api, Transport: lo.NewTransport(api, false),
+		IsAllowed: func(int64) bool { return true },
+		Uploads:   lo.NewUploader(api, fakeUploads{dir: t.TempDir()}, 0, nil),
+	})
+
+	msg := inbound("")
+	msg.Photo = []lo.PhotoSize{{FileID: "ref", Width: 800, Height: 600}}
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
+
+	if len(svc.prompts) != 0 {
+		t.Fatalf("prompts=%v, want no run for a format the model cannot be shown", svc.prompts)
+	}
+	if len(*notices) != 1 || !strings.Contains((*notices)[0], "image/bmp") {
+		t.Fatalf("notices=%v, want one naming the format", *notices)
+	}
+}
+
+// Bytes the sniffer does not RECOGNISE are unknown, not disproven. Deleting a picture because
+// this adapter could not identify it would lose a file that may be perfectly readable — the
+// opposite of the refusals above, which act on what the bytes are known to be.
+func TestUnrecognisedPhotoBytesAreKept(t *testing.T) {
+	t.Parallel()
+	svc := &serviceSpy{}
+	// DetectContentType answers application/octet-stream for a binary prefix it knows nothing
+	// about — here a HEIC-shaped header.
+	api, _ := photoAPI(t, "\x00\x00\x00\x18ftypheic"+strings.Repeat("\x00", 32))
+	receiver := lo.NewReceiver(lo.ReceiverConfig{
+		Service: svc, Client: api, Transport: lo.NewTransport(api, false),
+		IsAllowed: func(int64) bool { return true },
+		Uploads:   lo.NewUploader(api, fakeUploads{dir: t.TempDir()}, 0, nil),
+	})
+
+	msg := inbound("")
+	msg.Photo = []lo.PhotoSize{{FileID: "ref", Width: 800, Height: 600}}
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
+
+	if len(svc.prompts) != 1 {
+		t.Fatalf("prompts=%v, want the file kept and the run started", svc.prompts)
+	}
+	if _, err := os.Stat(savedPathFrom(t, svc.prompts[0])); err != nil {
+		t.Fatalf("the file the prompt names is gone: %v", err)
+	}
+}

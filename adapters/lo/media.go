@@ -136,8 +136,10 @@ func photoFileName(messageID int64) string {
 }
 
 // photoExtensions maps what http.DetectContentType reports to the extension core/chat reads a
-// media type back out of. Anything else keeps .jpg, which is both the platform's usual answer
-// and core/chat's own default for an unrecognised name.
+// media type back out of. The four entries are exactly the formats the vision block can carry
+// — core/chat's photoMediaType knows no others and answers image/jpeg for anything else — so a
+// picture in a format outside this table cannot be shown to the model under a true type, which
+// is why the caller refuses one rather than renaming it.
 //
 //nolint:gochecknoglobals // A fixed table, read-only, beside the function that uses it.
 var photoExtensions = map[string]string{
@@ -146,6 +148,12 @@ var photoExtensions = map[string]string{
 	"image/gif":  ".gif",
 	"image/jpeg": ".jpg",
 }
+
+// emptyFileType is what nameByContent answers for a file with no bytes at all. It is not a
+// media type the sniffer can produce — DetectContentType calls an empty body text/plain — and
+// it exists so the caller can tell "nothing arrived" from "something the sniffer did not
+// recognise", which are opposite decisions.
+const emptyFileType = "application/x-empty"
 
 // nameByContent renames a saved photo to the extension its BYTES say it has, and answers the
 // path it now lives at.
@@ -173,14 +181,16 @@ func nameByContent(path string, logger *slog.Logger) (saved, detected string) {
 	// sniffBytes is what http.DetectContentType reads, and reading more would be wasted.
 	const sniffBytes = 512
 	head := make([]byte, sniffBytes)
-	n, err := file.Read(head)
+	// ReadFull rather than Read: a short read is legal for an io.Reader, and the answer here is
+	// no longer only a file name — it decides whether the picture is shown at all.
+	n, err := io.ReadFull(file, head)
 	_ = file.Close()
-	if err != nil && n == 0 {
-		// Includes the empty file: io.EOF with nothing read. An empty "photo" is not a photo,
-		// and the caller must hear that rather than a shrug.
-		if errors.Is(err, io.EOF) {
-			return path, "application/octet-stream"
-		}
+	switch {
+	case n == 0 && (err == nil || errors.Is(err, io.EOF)):
+		// An empty file. Zero bytes are not a picture, and the caller must hear that rather
+		// than a shrug.
+		return path, emptyFileType
+	case n == 0:
 		logger.Warn("lo: could not read a saved photo", "error", err)
 		return path, ""
 	}

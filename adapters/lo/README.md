@@ -115,6 +115,8 @@ this adapter does not promise exactly-once agent execution or automatic resume.
   and documents say only that this adapter does not read them yet, and for the same reason in
   every case: the `501` on the platform is about SENDING them, which is the OUTGOING direction,
   and whether `getFile` serves their bytes is a separate question this change does not answer.
+  Stickers get their own sentence too, and a different one — the bytes exist, but a sticker
+  carries nothing an agent can act on, so the answer asks for the request as text.
 - **Outbound files stay disabled.** `sendDocument` is a platform stub, and `sendPhoto`'s
   upload branch answers `500` on the deployments exercised so far, so the outbox is off and
   agent-created files remain in the workspace/repository. LO workspace instructions

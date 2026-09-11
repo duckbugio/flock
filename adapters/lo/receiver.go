@@ -345,25 +345,49 @@ func (r *Receiver) attachments(ctx context.Context, msg *Message, chatID string)
 	return r.checkPhotoBytes(path)
 }
 
-// checkPhotoBytes names a saved photo by what its bytes ARE, and refuses bytes that are not an
-// image at all.
+// checkPhotoBytes names a saved photo by what its bytes ARE, and decides whether the picture
+// can be shown to the model at all.
 //
 // The name was a GUESS until the bytes existed, and it is not decoration: core/chat reads the
 // vision block's media type out of the saved path, so a PNG saved as .jpg would be declared to
-// the model as a JPEG. The refusal is that same false claim one step further along — a storage
-// error page served with 200, or an empty body, handed to the model as a picture — and the
-// user hears the sentence a failed download already has, because to them it is the same event.
-// An empty detected type means the sniff itself failed: unknown is not disproven, so the file
-// stays and keeps the name it had.
+// the model as a JPEG. The three outcomes below are that same rule carried through:
+//
+//   - A format the vision block CAN carry is renamed to it and shown.
+//   - A picture in a format it cannot carry (bmp, ico, tiff…) is refused BY NAME. Renaming is
+//     impossible — core/chat answers image/jpeg for every extension it does not know — so the
+//     choice is a false claim about the bytes or a sentence the user can act on.
+//   - Bytes that are not a picture at all (a storage error page served with 200, an empty
+//     body) get the sentence a failed download already has: to the person who sent it, the
+//     file arrived here and not at the agent, which is the same event.
+//
+// Anything else is UNKNOWN rather than disproven — the sniff failed, or the bytes are a format
+// DetectContentType does not recognise — and the file stays with the name it had. Deleting a
+// picture because this adapter could not identify it would lose a file that may be perfectly
+// readable.
 func (r *Receiver) checkPhotoBytes(path string) (saved, notice string) {
 	path, detected := nameByContent(path, r.cfg.Logger)
-	if detected == "" || strings.HasPrefix(detected, "image/") {
+	switch {
+	case detected == "" || detected == "application/octet-stream":
 		return path, ""
+	case photoExtensions[detected] != "":
+		return path, ""
+	case strings.HasPrefix(detected, "image/"):
+		r.removeUnreadable(path)
+		return "", "I cannot read " + detected + " images. Please send it as PNG or JPEG."
+	case detected == emptyFileType:
+		r.removeUnreadable(path)
+		return "", "That image arrived empty. Please try sending it again."
 	}
-	if err := os.Remove(path); err != nil {
-		r.cfg.Logger.Warn("lo: could not remove a photo that is not an image", "error", err)
-	}
+	r.removeUnreadable(path)
 	return "", "I could not download that image. Please try sending it again."
+}
+
+// removeUnreadable drops a saved file the agent will never be shown, so a refused picture does
+// not sit in the uploads directory forever.
+func (r *Receiver) removeUnreadable(path string) {
+	if err := os.Remove(path); err != nil {
+		r.cfg.Logger.Warn("lo: could not remove a photo the agent will not be shown", "error", err)
+	}
 }
 
 // unservedNotice is the whole of the attachment path that needs no I/O — the kinds this
