@@ -24,6 +24,9 @@ type fakeSource struct {
 	downloads int
 }
 
+// photoBytes is the body the fake platform serves, asserted on both sides of a save.
+const photoBytes = "PNGDATA"
+
 func (f *fakeSource) GetFile(_ context.Context, fileID string) (lo.File, error) {
 	f.gotID = fileID
 	return f.file, f.fileErr
@@ -48,7 +51,7 @@ func (f fakeUploads) UploadsDir(chatID string) (string, error) {
 func TestUploaderSavesPhotoBytes(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
-	src := &fakeSource{file: lo.File{FileID: "ref", FilePath: "ref"}, body: "PNGDATA"}
+	src := &fakeSource{file: lo.File{FileID: "ref", FilePath: "ref"}, body: photoBytes}
 	up := lo.NewUploader(src, fakeUploads{dir: base}, 0, nil)
 
 	saved, err := up.Save(t.Context(), "42", "ref", "photo_7.jpg")
@@ -62,7 +65,7 @@ func TestUploaderSavesPhotoBytes(t *testing.T) {
 		t.Fatalf("saved outside the chat uploads dir: %s", saved)
 	}
 	data, err := os.ReadFile(saved) //nolint:gosec // Path is produced by the code under test.
-	if err != nil || string(data) != "PNGDATA" {
+	if err != nil || string(data) != photoBytes {
 		t.Fatalf("content=%q err=%v", data, err)
 	}
 	info, err := os.Stat(saved)

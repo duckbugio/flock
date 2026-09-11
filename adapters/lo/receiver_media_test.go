@@ -85,8 +85,69 @@ func TestCaptionlessPhotoStillStartsARun(t *testing.T) {
 	msg.Photo = []lo.PhotoSize{{FileID: "ref", Width: 800, Height: 600}}
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
 
-	if len(svc.prompts) != 1 || !strings.Contains(svc.prompts[0], "attached an image") {
+	if len(svc.prompts) != 1 || !strings.Contains(svc.prompts[0], "sent an image") {
 		t.Fatalf("prompts=%v", svc.prompts)
+	}
+}
+
+// The model is SHOWN the picture, not told where it is. Both other adapters pass the bytes as
+// a vision block, and an agent handed only a path spends a tool call opening a file it was
+// already sent — or answers the caption without looking.
+func TestPhotoReachesTheModelAsAnImage(t *testing.T) {
+	t.Parallel()
+	svc := &serviceSpy{}
+	api, _ := photoAPI(t, "PNGDATA")
+	receiver := lo.NewReceiver(lo.ReceiverConfig{
+		Service: svc, Client: api, Transport: lo.NewTransport(api, false),
+		IsAllowed: func(int64) bool { return true },
+		Uploads:   lo.NewUploader(api, fakeUploads{dir: t.TempDir()}, 0, nil),
+	})
+
+	msg := inbound("")
+	msg.Photo = []lo.PhotoSize{{FileID: "ref", Width: 800, Height: 600}}
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
+
+	if len(svc.images) != 1 || len(svc.images[0]) != 1 {
+		t.Fatalf("images=%v, want the picture itself", svc.images)
+	}
+	if string(svc.images[0][0].Data) != "PNGDATA" {
+		t.Fatalf("the model was shown %q", svc.images[0][0].Data)
+	}
+}
+
+// A photo array whose every rung lacks a file_id is still WORK by the time it gets here: the
+// guard budget is already spent on it. It must end in a sentence — silence drops the message,
+// and passing the caption on alone asks the agent about a picture it never received.
+func TestPhotoWithNoUsableSizeIsExplained(t *testing.T) {
+	t.Parallel()
+	for name, photo := range map[string][]lo.PhotoSize{
+		"one empty rung": {{Width: 90, Height: 90}},
+		"every rung empty": {
+			{Width: 90, Height: 90},
+			{Width: 1280, Height: 720},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			svc := &serviceSpy{}
+			api, notices := photoAPI(t, "PNG")
+			receiver := lo.NewReceiver(lo.ReceiverConfig{
+				Service: svc, Client: api, Transport: lo.NewTransport(api, false),
+				IsAllowed: func(int64) bool { return true },
+				Uploads:   lo.NewUploader(api, fakeUploads{dir: t.TempDir()}, 0, nil),
+			})
+
+			msg := inbound("что тут не так?")
+			msg.Photo = photo
+			receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
+
+			if len(svc.prompts) != 0 {
+				t.Fatalf("the caption reached the agent without its picture: %v", svc.prompts)
+			}
+			if len(*notices) != 1 {
+				t.Fatalf("notices=%v, want exactly one sentence", *notices)
+			}
+		})
 	}
 }
 
@@ -183,17 +244,24 @@ func TestPhotoWithoutUploaderIsRefusedExplicitly(t *testing.T) {
 
 func savedPathFrom(t *testing.T, prompt string) string {
 	t.Helper()
-	const marker = "saved at "
-	idx := strings.Index(prompt, marker)
-	if idx < 0 {
-		t.Fatalf("prompt names no saved file: %q", prompt)
+	// The photo prompt is core/chat's, shared with Telegram and VK, and ends the path with
+	// ")". The document one is this adapter's and ends it with " —". Reading both keeps the
+	// helper usable from either side rather than duplicating it per kind.
+	for _, marker := range []struct{ start, end string }{
+		{"saved at ", ")"},
+		{"saved at ", " —"},
+	} {
+		idx := strings.Index(prompt, marker.start)
+		if idx < 0 {
+			continue
+		}
+		rest := prompt[idx+len(marker.start):]
+		if end := strings.Index(rest, marker.end); end >= 0 {
+			return rest[:end]
+		}
 	}
-	rest := prompt[idx+len(marker):]
-	end := strings.Index(rest, " —")
-	if end < 0 {
-		t.Fatalf("prompt path is unterminated: %q", prompt)
-	}
-	return rest[:end]
+	t.Fatalf("prompt names no saved file: %q", prompt)
+	return ""
 }
 
 // A rate limit or a spent cost cap is paid with a refusal, not with a download: doing the
@@ -225,5 +293,47 @@ func TestGuardsRunBeforeTheDownload(t *testing.T) {
 	}
 	if fetched != 0 {
 		t.Fatalf("the refusal still cost %d download calls", fetched)
+	}
+}
+
+// The rung with the most BYTES wins, not the one with the most pixels. A rung can be the
+// largest on paper and the most compressed in fact, so bytes describe "most detail" better —
+// the rule the Telegram adapter already follows. A rung LO has not measured carries no
+// file_size, and its pixel area stands in.
+func TestLargestPhotoPrefersBytesOverPixels(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		sizes []lo.PhotoSize
+		want  string
+	}{
+		"bytes beat pixels": {
+			[]lo.PhotoSize{
+				{FileID: "huge-but-crushed", Width: 4000, Height: 3000, FileSize: 20_000},
+				{FileID: "smaller-but-rich", Width: 1280, Height: 720, FileSize: 900_000},
+			},
+			"smaller-but-rich",
+		},
+		"unmeasured falls back to area": {
+			[]lo.PhotoSize{
+				{FileID: "thumb", Width: 90, Height: 90},
+				{FileID: "full", Width: 1280, Height: 720},
+			},
+			"full",
+		},
+		"a rung without an id is skipped": {
+			[]lo.PhotoSize{
+				{Width: 4000, Height: 3000, FileSize: 900_000},
+				{FileID: "usable", Width: 90, Height: 90},
+			},
+			"usable",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := lo.LargestPhoto(tc.sizes)
+			if !ok || got.FileID != tc.want {
+				t.Fatalf("chose %q (ok=%v), want %q", got.FileID, ok, tc.want)
+			}
+		})
 	}
 }

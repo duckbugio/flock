@@ -229,12 +229,21 @@ type File struct {
 // a ladder with no usable id.
 func LargestPhoto(sizes []PhotoSize) (PhotoSize, bool) {
 	var best PhotoSize
+	var bestScore int64
 	for _, size := range sizes {
 		if size.FileID == "" {
 			continue
 		}
-		if best.FileID == "" || size.Width*size.Height > best.Width*best.Height {
-			best = size
+		// FileSize first, pixel area as the fallback — the Telegram adapter's rule, and it
+		// matters for the same reason: a rung can be the biggest on paper and the most
+		// compressed in fact, so bytes describe "most detail" better than dimensions. LO
+		// omits file_size for rungs it has not measured, which is what the fallback is for.
+		score := size.FileSize
+		if score == 0 {
+			score = int64(size.Width) * int64(size.Height)
+		}
+		if best.FileID == "" || score > bestScore {
+			best, bestScore = size, score
 		}
 	}
 	return best, best.FileID != ""
@@ -284,18 +293,29 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64) ([]Update, error)
 			updates = append(updates, update)
 			continue
 		}
+		// json.Number rather than int64: an id that arrives as a STRING would fail an int64
+		// decode, and this adapter would then skip the update without advancing past it — so
+		// a poisoned LAST update in a batch would be re-fetched forever. That is the same
+		// stall this whole loop removes, just narrower, and the fallback costs one conversion.
 		var header struct {
-			ID int64 `json:"update_id"` //nolint:tagliatelle // Bot API wire spelling.
+			ID json.Number `json:"update_id"` //nolint:tagliatelle // Bot API wire spelling.
 		}
-		if err := json.Unmarshal(item, &header); err != nil || header.ID == 0 {
+		var (
+			id    int64
+			idErr = json.Unmarshal(item, &header)
+		)
+		if idErr == nil {
+			id, idErr = header.ID.Int64()
+		}
+		if idErr != nil || id <= 0 {
 			// Not even an id: nothing to acknowledge, and nothing to answer.
 			slog.Warn("LO sent an update this adapter cannot read at all")
 			continue
 		}
 		// An id and a body that will not decode: keep the id so the offset moves past it,
 		// and leave Message nil, which the receiver already treats as nothing to do.
-		slog.Warn("LO sent an update this adapter cannot read", "update_id", header.ID)
-		updates = append(updates, Update{ID: header.ID})
+		slog.Warn("LO sent an update this adapter cannot read", "update_id", id)
+		updates = append(updates, Update{ID: id})
 	}
 	return updates, nil
 }
@@ -335,10 +355,10 @@ func (c *Client) GetFile(ctx context.Context, fileID string) (File, error) {
 	return file, nil
 }
 
-// DownloadURL builds the byte address for a file_path from GetFile. The result embeds the
+// downloadURL builds the byte address for a file_path from GetFile. The result embeds the
 // bot token: it must never be logged, returned in an error, or handed to anything that
 // records URLs. Keep it inside the request that uses it.
-func (c *Client) DownloadURL(filePath string) string {
+func (c *Client) downloadURL(filePath string) string {
 	return c.base + "/file/bot" + c.token + "/" + strings.TrimLeft(filePath, "/")
 }
 
@@ -348,7 +368,7 @@ func (c *Client) Download(ctx context.Context, filePath string) (io.ReadCloser, 
 	if strings.TrimSpace(filePath) == "" {
 		return nil, errors.New("LO download requires a file path")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.DownloadURL(filePath), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.downloadURL(filePath), nil)
 	if err != nil {
 		return nil, errors.New("cannot construct LO download request")
 	}

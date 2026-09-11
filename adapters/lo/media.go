@@ -68,10 +68,6 @@ func NewUploader(source fileSource, uploads uploadsDirResolver, maxBytes int64, 
 	return &Uploader{source: source, uploads: uploads, maxBytes: maxBytes, logger: logger}
 }
 
-// MaxBytes is the configured cap, so a caller can refuse a known-oversize file before
-// any download happens.
-func (u *Uploader) MaxBytes() int64 { return u.maxBytes }
-
 // Save downloads fileID and writes it under chatID's uploads directory, returning the
 // saved absolute path.
 //
@@ -112,16 +108,28 @@ func (u *Uploader) Save(ctx context.Context, chatID, fileID, fileName string) (s
 		// Best-effort cleanup of the partial file, as the Telegram and VK uploaders do. A
 		// file left behind after a refused upload is worse than a missing one: it keeps the
 		// bytes of something the user was told did not arrive, and nothing ever deletes it.
-		_ = os.Remove(dest)
+		//
+		// A cleanup that ITSELF fails is logged rather than returned: the caller is already
+		// being told the upload failed, and a second error would replace the reason the user
+		// needs with one only an operator can act on. The operator still needs it, though —
+		// this is the one path that leaves bytes on disk nobody will collect.
+		if rmErr := os.Remove(dest); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			u.logger.Warn("lo: could not remove a partial upload", "error", rmErr)
+		}
 		return "", err
 	}
 	return saved, nil
 }
 
-// photoFileName names a saved photo. LO photos arrive without a file name, and the file
-// path is a reference rather than something with an extension, so the name is generated
-// from the message: predictable for the agent, unique per message, and always .jpg —
-// which is what the platform stores photos as.
+// photoFileName names a saved photo. LO photos arrive without a file name, and the file path
+// is a reference rather than something with an extension, so the name is generated from the
+// message: predictable for the agent and unique per message.
+//
+// The extension is ALWAYS .jpg, and that is a claim this adapter cannot verify. The Telegram
+// adapter may hardcode it because Telegram re-encodes every message photo to JPEG; LO's
+// behaviour with, say, a PNG screenshot has not been established. The name is a label for the
+// agent and nothing reads a media type out of it today — but the moment something does, this
+// is the line that will lie, so it says so here rather than being discovered then.
 func photoFileName(messageID int64) string {
 	return fmt.Sprintf("photo_%d.jpg", messageID)
 }

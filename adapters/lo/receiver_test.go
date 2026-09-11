@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/duckbugio/flock/adapters/lo"
+	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/goal"
 )
 
@@ -22,10 +23,22 @@ type serviceSpy struct {
 	prompts     []string
 	stopped     int
 	newSessions int
+	// images records what the model was SHOWN, per run. A separate field from prompts because
+	// the two can disagree: a photo whose bytes would not load still starts a run, with the
+	// path in the prompt and nothing to look at.
+	images [][]agent.ImageInput
 }
 
 func (s *serviceSpy) Handle(_ context.Context, _ string, _ int64, _, prompt string) {
 	s.prompts = append(s.prompts, prompt)
+	s.images = append(s.images, nil)
+}
+
+func (s *serviceSpy) HandleMedia(
+	_ context.Context, _ string, _ int64, _, prompt string, images []agent.ImageInput,
+) {
+	s.prompts = append(s.prompts, prompt)
+	s.images = append(s.images, images)
 }
 func (s *serviceSpy) StopChat(string) bool                   { s.stopped++; return true }
 func (s *serviceSpy) NewSession(string) error                { s.newSessions++; return nil }
@@ -429,6 +442,12 @@ type pollSpy struct {
 func (p *pollSpy) Handle(_ context.Context, _ string, _ int64, _, prompt string) {
 	p.prompts <- prompt
 }
+
+func (p *pollSpy) HandleMedia(
+	_ context.Context, _ string, _ int64, _, prompt string, _ []agent.ImageInput,
+) {
+	p.prompts <- prompt
+}
 func (*pollSpy) StopChat(string) bool                     { return false }
 func (*pollSpy) NewSession(string) error                  { return nil }
 func (*pollSpy) ArmGoal(string, string) (goal.Goal, bool) { return goal.Goal{}, false }
@@ -460,13 +479,15 @@ func TestUndecodableUpdateDoesNotStopTheBatch(t *testing.T) {
 			reply(w, `{"ok":true,"result":[]}`)
 			return
 		}
-		// The middle update models `document` as a string where this adapter expects an
-		// object — a shape the platform could grow at any time.
 		const chat = `"chat":{"id":7,"type":"private"},"from":{"id":7}`
+		// The middle update models `document` as a string where this adapter expects an
+		// object, and the LAST one spells its own update_id as a string — the case that used
+		// to be skipped WITHOUT advancing the offset, so a poisoned tail re-fetched forever.
 		reply(w, `{"ok":true,"result":[
 			{"update_id":10,"message":{"message_id":1,"text":"first",`+chat+`}},
 			{"update_id":11,"message":{"message_id":2,"text":"poison",`+chat+`,"document":"not-an-object"}},
-			{"update_id":12,"message":{"message_id":3,"text":"third",`+chat+`}}
+			{"update_id":12,"message":{"message_id":3,"text":"third",`+chat+`}},
+			{"update_id":"13","message":{"message_id":4,"text":"tail",`+chat+`}}
 		]}`)
 	})
 	receiver := lo.NewReceiver(lo.ReceiverConfig{
@@ -498,8 +519,8 @@ func TestUndecodableUpdateDoesNotStopTheBatch(t *testing.T) {
 	case <-offsets: // the first poll, from zero
 		select {
 		case next := <-offsets:
-			if next <= 12 {
-				t.Fatalf("second poll asked from offset %d, want past update 12", next)
+			if next <= 13 {
+				t.Fatalf("second poll asked from offset %d, want past the poisoned tail", next)
 			}
 		case <-time.After(4 * time.Second):
 			t.Fatal("no second poll: the offset never advanced")

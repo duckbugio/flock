@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/chat"
 	"github.com/duckbugio/flock/core/goal"
 	"github.com/duckbugio/flock/core/schedule"
@@ -21,6 +22,14 @@ const privateChatType = "private"
 // Service is the transport-neutral inbound seam; no Telegram handlers are reused.
 type Service interface {
 	Handle(ctx context.Context, chatID chat.ChatID, userID int64, messageID chat.MessageID, text string)
+	// HandleMedia starts a run whose prompt carries IMAGES as well as words. Separate from
+	// Handle because the model is shown the picture rather than told where to find it: a path
+	// alone makes the agent open a tool to look at what it was already sent, and the Telegram
+	// and VK adapters both take this seam for exactly this case.
+	HandleMedia(
+		ctx context.Context, chatID chat.ChatID, userID int64, messageID chat.MessageID,
+		prompt string, images []agent.ImageInput,
+	)
 	StopChat(chatID chat.ChatID) bool
 	NewSession(chatID chat.ChatID) error
 	ArmGoal(chatID chat.ChatID, criterion string) (goal.Goal, bool)
@@ -195,7 +204,7 @@ func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
 	// Attachments are answered BEFORE the empty-text check: a photo with no caption is a
 	// complete request ("look at this"), and dropping it silently is what made the bot
 	// look broken.
-	attached, note := r.attachments(ctx, msg, chatID)
+	saved, note := r.attachments(ctx, msg, chatID)
 	if note != "" {
 		// The file the request rests on never reached the agent, so the caption must not be
 		// answered on its own: "review this file" without the file invites a confident answer
@@ -203,14 +212,36 @@ func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
 		r.notify(ctx, chatID, note)
 		return
 	}
-	if text == "" && attached == "" {
+	if text == "" && saved == "" {
 		return
 	}
-	text = replyPrompt(msg, replyToBot, text)
-	if attached != "" {
-		text = strings.TrimSpace(text + "\n" + attached)
+	if saved != "" {
+		r.handlePhoto(ctx, msg, chatID, replyToBot, text, saved)
+		return
 	}
-	r.cfg.Service.Handle(ctx, chatID, msg.From.ID, strconv.FormatInt(msg.ID, 10), text)
+	r.cfg.Service.Handle(ctx, chatID, msg.From.ID, strconv.FormatInt(msg.ID, 10),
+		replyPrompt(msg, replyToBot, text))
+}
+
+// handlePhoto starts the run for a message whose picture reached disk.
+//
+// The image is SHOWN to the model, not described to it. Both other adapters do this — the seam
+// (chat.PhotoPrompt, chat.LoadPhotoImage, Service.HandleMedia) exists in core/chat for exactly
+// this case — and the difference is not cosmetic: handed a path alone, the agent has to spend a
+// tool call opening a file it was already sent, and a model that never looks answers about the
+// caption instead of the picture.
+//
+// A failed read falls back to the path alone rather than refusing: the file IS on disk and the
+// agent can still open it, so losing vision is a degradation, not a dead request. VK makes the
+// same fallback, in the same place.
+func (r *Receiver) handlePhoto(ctx context.Context, msg *Message, chatID string, replyToBot bool, text, saved string) {
+	prompt := replyPrompt(msg, replyToBot, chat.PhotoPrompt(saved, text))
+	images, err := chat.LoadPhotoImage(saved)
+	if err != nil {
+		r.cfg.Logger.Warn("lo: load photo for vision failed; sending the path only", "error", err)
+		images = nil
+	}
+	r.cfg.Service.HandleMedia(ctx, chatID, msg.From.ID, strconv.FormatInt(msg.ID, 10), prompt, images)
 }
 
 func hasMedia(msg *Message) bool {
@@ -282,26 +313,35 @@ var unservedKinds = []struct {
 //
 // A download failure is a NOTICE, never a dropped message: the user watched their file
 // arrive and deserves to know it did not reach the agent.
-func (r *Receiver) attachments(ctx context.Context, msg *Message, chatID string) (prompt, notice string) {
-	if size, ok := LargestPhoto(msg.Photo); ok {
-		if r.cfg.Uploads == nil {
-			return "", "I cannot read images in this deployment: no uploads directory is configured."
-		}
-		path, err := r.cfg.Uploads.Save(ctx, chatID, size.FileID, photoFileName(msg.ID))
-		switch {
-		case errors.Is(err, ErrUploadTooLarge):
-			return "", "That image is too large for me to open. Please send a smaller one."
-		case errors.Is(err, ErrNoBytes):
-			return "", "LO did not hand me the bytes of that image, so I cannot open it."
-		case err != nil:
-			r.cfg.Logger.Warn("lo: photo download failed", "error", err)
-			return "", "I could not download that image. Please try sending it again."
-		}
-		return "[The user attached an image. It is saved at " + path + " — open it to see what they mean.]", ""
+func (r *Receiver) attachments(ctx context.Context, msg *Message, chatID string) (saved, notice string) {
+	// LargestPhoto is the ONLY reader of msg.Photo here, deliberately. hasServedMedia counts a
+	// non-empty array as work and spends guard budget on it, so a ladder whose every rung
+	// lacks a file_id must still end in a sentence — otherwise the message is dropped in
+	// silence, or worse, its caption reaches the agent without the picture it refers to. That
+	// is the "confident answer about nothing" every other arm here exists to prevent.
+	if len(msg.Photo) == 0 {
+		// No unserved-kind arm either: those are answered before the guards, without touching
+		// the network. See unservedNotice.
+		return "", ""
 	}
-	// No unserved-kind arm here any more: those are answered before the guards, without
-	// touching the network. See unservedNotice.
-	return "", ""
+	size, ok := LargestPhoto(msg.Photo)
+	if !ok {
+		return "", "I could not read that image. Please send it again."
+	}
+	if r.cfg.Uploads == nil {
+		return "", "I cannot read images in this deployment: no uploads directory is configured."
+	}
+	path, err := r.cfg.Uploads.Save(ctx, chatID, size.FileID, photoFileName(msg.ID))
+	switch {
+	case errors.Is(err, ErrUploadTooLarge):
+		return "", "That image is too large for me to open. Please send a smaller one."
+	case errors.Is(err, ErrNoBytes):
+		return "", "LO did not hand me the bytes of that image, so I cannot open it."
+	case err != nil:
+		r.cfg.Logger.Warn("lo: photo download failed", "error", err)
+		return "", "I could not download that image. Please try sending it again."
+	}
+	return path, ""
 }
 
 // unservedNotice is the whole of the attachment path that needs no I/O — the kinds this
