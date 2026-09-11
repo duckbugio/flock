@@ -577,7 +577,10 @@ func partName(filename string) string {
 		}
 		return r
 	}, filepath.Base(filename))
-	if strings.Trim(name, ". ") == "" {
+	// The same character set the inbound path trims. filepath.Base("/") answers "/", which a
+	// trim of dots and spaces leaves intact — and a bare separator in the header is exactly the
+	// name this guard exists to keep out.
+	if strings.Trim(name, `./\ `) == "" {
 		return "file"
 	}
 	return name

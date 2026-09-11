@@ -466,7 +466,10 @@ type attachmentKind struct{ noun, advice string }
 
 //nolint:gochecknoglobals // Two fixed values, read-only, beside the function that uses them.
 var (
-	imageKind = attachmentKind{noun: "image", advice: "Describe what it shows, or send it as a file."}
+	// No "send it as a file" here: the sentence this advice joins is ErrNoBytes, and a document
+	// hits the same refusal on a platform that hands out no bytes. Advice that cannot work is
+	// worse than none.
+	imageKind = attachmentKind{noun: "image", advice: "Describe what it shows."}
 	fileKind  = attachmentKind{
 		noun:   "file",
 		advice: "Paste the contents, or point me at the file in a repository.",

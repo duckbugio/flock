@@ -80,6 +80,31 @@ func TestPhotoReachesTheAgentAsAPath(t *testing.T) {
 	}
 }
 
+// A document with no caption is a complete request too ("read this"), and it must survive the
+// same empty-text check. Its prompt takes DocumentPrompt's other form, which is why the helper
+// above knows both.
+func TestCaptionlessDocumentStillStartsARun(t *testing.T) {
+	t.Parallel()
+	svc := &serviceSpy{}
+	api, _ := photoAPI(t, "%PDF-1.7")
+	receiver := lo.NewReceiver(lo.ReceiverConfig{
+		Service: svc, Client: api, Transport: lo.NewTransport(api, false),
+		IsAllowed: func(int64) bool { return true },
+		Uploads:   lo.NewUploader(api, fakeUploads{dir: t.TempDir()}, 0, nil),
+	})
+
+	msg := inbound("")
+	msg.Document = &lo.Attachment{FileID: "ref", FileName: "spec.pdf", MimeType: "application/pdf"}
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
+
+	if len(svc.prompts) != 1 {
+		t.Fatalf("prompts=%v, want the document to start one run on its own", svc.prompts)
+	}
+	if saved := savedPathFrom(t, svc.prompts[0]); !strings.HasSuffix(saved, "spec.pdf") {
+		t.Fatalf("saved as %q, want the sender's own name at the end", saved)
+	}
+}
+
 // A photo with no caption is a complete request ("look at this"), so it must not be
 // swallowed by the empty-text check that drops chatter.
 func TestCaptionlessPhotoStillStartsARun(t *testing.T) {
@@ -256,11 +281,13 @@ func TestPhotoWithoutUploaderIsRefusedExplicitly(t *testing.T) {
 func savedPathFrom(t *testing.T, prompt string) string {
 	t.Helper()
 	// Both prompts come from core/chat and end the path differently: the photo one closes a
-	// parenthesis, the document one ends the line. Reading both keeps one helper usable from
-	// either side instead of a copy per kind.
+	// parenthesis, and DocumentPrompt has TWO forms — with a caption the path ends the line,
+	// without one it is followed by ". Please read". Reading all three keeps one helper usable
+	// from either side instead of a copy per kind.
 	for _, marker := range []struct{ start, end string }{
 		{"saved at ", ")"},
 		{"uploaded a file: ", "\n"},
+		{"uploaded a file: ", ". Please read"},
 	} {
 		idx := strings.Index(prompt, marker.start)
 		if idx < 0 {

@@ -243,6 +243,8 @@ func TestUploadSanitisesTheNameItPutsInTheHeader(t *testing.T) {
 		"control chars":    {"re\x00port\x7f.pdf", "report.pdf"},
 		"empty":            {"", "file"},
 		"only dots":        {"..", "file"},
+		// filepath.Base("/") answers "/", which a trim of dots and spaces leaves whole.
+		"bare separator": {"/", "file"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
