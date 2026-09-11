@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 
@@ -121,15 +123,66 @@ func (u *Uploader) Save(ctx context.Context, chatID, fileID, fileName string) (s
 	return saved, nil
 }
 
-// photoFileName names a saved photo. LO photos arrive without a file name, and the file path
-// is a reference rather than something with an extension, so the name is generated from the
-// message: predictable for the agent and unique per message.
+// photoFileName names a saved photo BEFORE its bytes have been seen. LO photos arrive without a
+// file name, and the file path is a reference rather than something with an extension, so the
+// name is generated from the message: predictable for the agent and unique per message.
 //
-// The extension is ALWAYS .jpg, and that is a claim this adapter cannot verify. The Telegram
-// adapter may hardcode it because Telegram re-encodes every message photo to JPEG; LO's
-// behaviour with, say, a PNG screenshot has not been established. The name is a label for the
-// agent and nothing reads a media type out of it today — but the moment something does, this
-// is the line that will lie, so it says so here rather than being discovered then.
+// The extension here is a guess. It is corrected the moment the bytes are on disk — see
+// photoExtension — because something DOES read a media type out of this name: core/chat derives
+// the vision block's type from the saved path, so a PNG named .jpg reaches the model declared as
+// a JPEG.
 func photoFileName(messageID int64) string {
 	return fmt.Sprintf("photo_%d.jpg", messageID)
+}
+
+// photoExtensions maps what http.DetectContentType reports to the extension core/chat reads a
+// media type back out of. Anything else keeps .jpg, which is both the platform's usual answer
+// and core/chat's own default for an unrecognised name.
+//
+//nolint:gochecknoglobals // A fixed table, read-only, beside the function that uses it.
+var photoExtensions = map[string]string{
+	"image/png":  ".png",
+	"image/webp": ".webp",
+	"image/gif":  ".gif",
+	"image/jpeg": ".jpg",
+}
+
+// nameByContent renames a saved photo to the extension its BYTES say it has, and answers the
+// path it now lives at.
+//
+// The name is not decoration. core/chat builds the model's vision block from the saved path,
+// so a PNG saved as .jpg is DECLARED to the model as a JPEG — a claim about the bytes made by
+// a file name this adapter invented. Sniffing costs one read of the first 512 bytes, which is
+// what http.DetectContentType looks at.
+//
+// Every failure here keeps the original path: the file is saved and openable either way, and
+// losing a correct media type is a degradation, while losing the file is not.
+func nameByContent(path string, logger *slog.Logger) string {
+	file, err := os.Open(path) //nolint:gosec // Path is one this adapter just wrote.
+	if err != nil {
+		logger.Warn("lo: could not sniff a saved photo", "error", err)
+		return path
+	}
+	// sniffBytes is what http.DetectContentType reads, and reading more would be wasted.
+	const sniffBytes = 512
+	head := make([]byte, sniffBytes)
+	n, err := file.Read(head)
+	_ = file.Close()
+	if err != nil && n == 0 {
+		logger.Warn("lo: could not read a saved photo", "error", err)
+		return path
+	}
+	// DetectContentType may append parameters ("text/plain; charset=utf-8"); only the type
+	// itself names a format.
+	detected, _, _ := strings.Cut(http.DetectContentType(head[:n]), ";")
+	ext, ok := photoExtensions[strings.TrimSpace(detected)]
+	if !ok || strings.HasSuffix(path, ext) {
+		return path
+	}
+	renamed := strings.TrimSuffix(path, filepath.Ext(path)) + ext
+	if err := os.Rename(path, renamed); err != nil {
+		logger.Warn("lo: could not rename a saved photo to its real type", "error", err)
+		return path
+	}
+	return renamed
 }

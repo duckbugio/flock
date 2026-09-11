@@ -341,7 +341,10 @@ func (r *Receiver) attachments(ctx context.Context, msg *Message, chatID string)
 		r.cfg.Logger.Warn("lo: photo download failed", "error", err)
 		return "", "I could not download that image. Please try sending it again."
 	}
-	return path, ""
+	// The name was a GUESS until the bytes existed, and it is not decoration: core/chat reads
+	// the vision block's media type out of the saved path, so a PNG saved as .jpg would be
+	// declared to the model as a JPEG. Correcting it here is what stops that.
+	return nameByContent(path, r.cfg.Logger), ""
 }
 
 // unservedNotice is the whole of the attachment path that needs no I/O — the kinds this

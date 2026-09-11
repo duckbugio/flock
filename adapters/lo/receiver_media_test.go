@@ -337,3 +337,44 @@ func TestLargestPhotoPrefersBytesOverPixels(t *testing.T) {
 		})
 	}
 }
+
+// The saved name is corrected to what the BYTES are. It is not decoration: core/chat derives
+// the vision block's media type from the saved path, so a PNG kept under the guessed .jpg would
+// be declared to the model as a JPEG — a claim about the bytes made by a name this adapter
+// invented.
+func TestSavedPhotoIsNamedByItsActualBytes(t *testing.T) {
+	t.Parallel()
+	// The first bytes of a real PNG; http.DetectContentType reads exactly this prefix.
+	png := "\x89PNG\r\n\x1a\n" + strings.Repeat("\x00", 32)
+	for name, tc := range map[string]struct{ body, wantExt string }{
+		"a png":          {png, ".png"},
+		"a gif":          {"GIF89a" + strings.Repeat("\x00", 32), ".gif"},
+		"something else": {"plain bytes nobody can type", ".jpg"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			svc := &serviceSpy{}
+			api, _ := photoAPI(t, tc.body)
+			receiver := lo.NewReceiver(lo.ReceiverConfig{
+				Service: svc, Client: api, Transport: lo.NewTransport(api, false),
+				IsAllowed: func(int64) bool { return true },
+				Uploads:   lo.NewUploader(api, fakeUploads{dir: t.TempDir()}, 0, nil),
+			})
+
+			msg := inbound("")
+			msg.Photo = []lo.PhotoSize{{FileID: "ref", Width: 800, Height: 600}}
+			receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
+
+			if len(svc.prompts) != 1 {
+				t.Fatalf("prompts=%v, want one run", svc.prompts)
+			}
+			saved := savedPathFrom(t, svc.prompts[0])
+			if !strings.HasSuffix(saved, tc.wantExt) {
+				t.Fatalf("saved as %q, want %q for %s", saved, tc.wantExt, name)
+			}
+			if _, err := os.Stat(saved); err != nil {
+				t.Fatalf("the renamed file is not where the prompt says: %v", err)
+			}
+		})
+	}
+}
