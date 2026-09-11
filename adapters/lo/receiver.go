@@ -339,7 +339,7 @@ func (r *Receiver) attachments(
 		if !ok {
 			return "", "", false, "I could not read that image. Please send it again."
 		}
-		saved, note := r.download(ctx, chatID, size.FileID, photoFileName(msg.ID), "image")
+		saved, note := r.download(ctx, chatID, size.FileID, photoFileName(msg.ID), imageKind)
 		shown := false
 		if saved != "" {
 			var refusal string
@@ -364,7 +364,7 @@ func (r *Receiver) attachments(
 		if strings.TrimSpace(name) == "" {
 			name = documentFileName(msg.ID, msg.Document.MimeType)
 		}
-		saved, note := r.download(ctx, chatID, msg.Document.FileID, name, "file")
+		saved, note := r.download(ctx, chatID, msg.Document.FileID, name, fileKind)
 		return "", saved, false, note
 	}
 	// No unserved-kind arm here any more: those are answered before the guards, without
@@ -446,7 +446,7 @@ func unservedNotice(msg *Message) string {
 // kinds that produce a sentence and nothing else, and that difference is what keeps a refusal
 // from spending guard budget.
 func hasServedMedia(msg *Message) bool {
-	return len(msg.Photo) > 0
+	return len(msg.Photo) > 0 || msg.Document != nil
 }
 
 // article picks "a" or "an" for the nouns this file uses. Small, but the prompt is read by a
@@ -462,27 +462,46 @@ func article(noun string) string {
 	return "a"
 }
 
+// attachmentKind is what a refusal needs to say about one kind of attachment: the noun the
+// user sees, and what they can do instead.
+//
+// The advice cannot be shared even though the sentence around it can. "Paste the contents" is
+// something the sender of a specification can do and the sender of a photograph cannot, and a
+// refusal that ends in impossible advice reads as a bot that did not look at what it got.
+type attachmentKind struct{ noun, advice string }
+
+//nolint:gochecknoglobals // Two fixed values, read-only, beside the function that uses them.
+var (
+	imageKind = attachmentKind{noun: "image", advice: "Describe what it shows, or send it as a file."}
+	fileKind  = attachmentKind{
+		noun:   "file",
+		advice: "Paste the contents, or point me at the file in a repository.",
+	}
+)
+
 // download saves one inbound attachment and phrases the outcome for both readers: the agent,
 // which needs a path it can open, and the user, who needs to know if their file did not arrive.
 //
-// kind is the word the user sees ("image", "file"). It is a parameter rather than a branch
-// because every outcome below reads the same for both — only the noun changes.
-func (r *Receiver) download(ctx context.Context, chatID, fileID, name, kind string) (saved, notice string) {
+// kind is a parameter rather than a branch because every outcome below reads the same for
+// both — only the noun changes, and in one case the advice after it.
+func (r *Receiver) download(
+	ctx context.Context, chatID, fileID, name string, kind attachmentKind,
+) (saved, notice string) {
 	if r.cfg.Uploads == nil {
 		return "", "I cannot read attachments in this deployment: no uploads directory is configured."
 	}
 	path, err := r.cfg.Uploads.Save(ctx, chatID, fileID, name)
 	switch {
 	case errors.Is(err, ErrUploadTooLarge):
-		return "", "That " + kind + " is too large for me to open. Please send a smaller one."
+		return "", "That " + kind.noun + " is too large for me to open. Please send a smaller one."
 	case errors.Is(err, ErrNoBytes):
 		// The platform answered the reference and withheld the bytes — for a document that
 		// means this LO has not shipped document downloads yet.
-		return "", "This LO does not hand bots the bytes of that " + kind + ", so I cannot open it. " +
-			"Paste the contents, or point me at the file in a repository."
+		return "", "This LO does not hand bots the bytes of that " + kind.noun + ", so I cannot open it. " +
+			kind.advice
 	case err != nil:
-		r.cfg.Logger.Warn("lo: attachment download failed", "kind", kind, "error", err)
-		return "", "I could not download that " + kind + ". Please try sending it again."
+		r.cfg.Logger.Warn("lo: attachment download failed", "kind", kind.noun, "error", err)
+		return "", "I could not download that " + kind.noun + ". Please try sending it again."
 	}
 	// The SAVED PATH, not a sentence: a photo becomes a vision block and a document becomes
 	// words, and only the caller knows which. Phrasing here would have to guess.

@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync/atomic"
 
@@ -125,19 +124,39 @@ func (u *Uploader) Save(ctx context.Context, chatID, fileID, fileName string) (s
 	return saved, nil
 }
 
+// documentExtensions maps a declared type to the extension a saved document gets.
+//
+// An explicit table rather than mime.ExtensionsByType, and not for determinism alone. Go mixes
+// the host's /etc/mime.types into that table, so the answer depends on the container: text/plain
+// comes back as "txt text pot brf srt" and image/jpeg as "jpeg jpg jpe jfif". Picking the first
+// alphabetically — which an earlier version did, for stability — chose ".brf" for a text file
+// and ".jfif" for a photo, both worse than any of the obvious answers. These are the types a
+// chat actually carries; everything else is bytes nobody described, and ".bin" says so.
+//
+//nolint:gochecknoglobals // A fixed table, read-only, kept beside the function that uses it.
+var documentExtensions = map[string]string{
+	"application/pdf":  ".pdf",
+	"application/json": ".json",
+	"application/zip":  ".zip",
+	"text/plain":       ".txt",
+	"text/markdown":    ".md",
+	"text/csv":         ".csv",
+	"text/html":        ".html",
+	"image/png":        ".png",
+	"image/jpeg":       ".jpg",
+	"image/gif":        ".gif",
+	"image/webp":       ".webp",
+}
+
 // documentFileName names a saved document when the platform sent no file name. LO fills
 // file_name only "usually", and the fallback in fsutil is the bare word "upload" — an agent
 // handed a path with no extension is looking at exactly the opaque id this adapter's inbound
-// path exists to avoid. The declared MIME type is the only other thing the message carries,
-// so the extension comes from there, and from ".bin" when even that is missing or unknown.
+// path exists to avoid. The declared MIME type is the only other thing the message carries.
 func documentFileName(messageID int64, mimeType string) string {
 	ext := ".bin"
 	if media, _, err := mime.ParseMediaType(mimeType); err == nil {
-		// ExtensionsByType is not ordered by preference, so the list is sorted for a stable
-		// name: the same message must not produce ".jpe" on one host and ".jpg" on another.
-		if exts, err := mime.ExtensionsByType(media); err == nil && len(exts) > 0 {
-			sort.Strings(exts)
-			ext = exts[0]
+		if known, ok := documentExtensions[strings.ToLower(media)]; ok {
+			ext = known
 		}
 	}
 	return fmt.Sprintf("document_%d%s", messageID, ext)

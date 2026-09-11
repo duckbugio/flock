@@ -364,7 +364,7 @@ func TestGuardsRunBeforeTheDownload(t *testing.T) {
 	receiver := lo.NewReceiver(lo.ReceiverConfig{
 		Service: svc, Client: api, Transport: lo.NewTransport(api, false),
 		IsAllowed: func(int64) bool { return true },
-		Guards:    func(int64) (bool, string) { return false, "Daily cap reached." },
+		Guards:    func(int64) (bool, string) { return false, capReached },
 		Uploads:   lo.NewUploader(api, fakeUploads{dir: t.TempDir()}, 0, nil),
 	})
 
@@ -388,6 +388,12 @@ func TestNamelessDocumentIsNamedFromItsType(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct{ name, mime, wantExt string }{
 		{"a declared type", "application/pdf", ".pdf"},
+		// The two the host's mime.types table used to get wrong: it offers "txt text pot brf
+		// srt" for one and "jpeg jpg jpe jfif" for the other, and the alphabetically first
+		// answer is worse than any of the obvious ones.
+		{"plain text", "text/plain", ".txt"},
+		{"a jpeg", "image/jpeg", ".jpg"},
+		{"parameters and case", "TEXT/PLAIN; charset=utf-8", ".txt"},
 		{"a type nothing knows", "application/x-nonsense-not-a-type", ".bin"},
 		{"no type at all", "", ".bin"},
 	} {
@@ -412,6 +418,97 @@ func TestNamelessDocumentIsNamedFromItsType(t *testing.T) {
 				t.Fatalf("saved as %q, want the %q the type implies", saved, tc.wantExt)
 			}
 		})
+	}
+}
+
+// A refusal ends in advice the sender can actually act on. The two kinds share the sentence
+// that explains what happened and cannot share what to do about it: "paste the contents" is
+// something the sender of a specification can do and the sender of a photograph cannot.
+func TestRefusalAdviceFitsTheKindItRefused(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		attach func(*lo.Message)
+		says   string
+		avoids string
+	}{
+		"image": {
+			func(m *lo.Message) { m.Photo = []lo.PhotoSize{{FileID: "ref", Width: 800, Height: 600}} },
+			"Describe what it shows",
+			"Paste the contents",
+		},
+		"document": {
+			func(m *lo.Message) { m.Document = &lo.Attachment{FileID: "ref", FileName: "spec.pdf"} },
+			"Paste the contents",
+			"Describe what it shows",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			svc := &serviceSpy{}
+			var notices []string
+			api := client(t, func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/getFile") {
+					// A reference answered WITHOUT a file_path: real reference, no bytes.
+					reply(w, `{"ok":true,"result":{"file_id":"ref"}}`)
+					return
+				}
+				body := make([]byte, 4096)
+				n, _ := r.Body.Read(body)
+				notices = append(notices, string(body[:n]))
+				reply(w, `{"ok":true,"result":{"message_id":1}}`)
+			})
+			receiver := lo.NewReceiver(lo.ReceiverConfig{
+				Service: svc, Client: api, Transport: lo.NewTransport(api, false),
+				IsAllowed: func(int64) bool { return true },
+				Uploads:   lo.NewUploader(api, fakeUploads{dir: t.TempDir()}, 0, nil),
+			})
+
+			msg := inbound("посмотри")
+			tc.attach(msg)
+			receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
+
+			if len(notices) != 1 {
+				t.Fatalf("notices=%v, want exactly one", notices)
+			}
+			if !strings.Contains(notices[0], tc.says) {
+				t.Fatalf("the %s refusal does not say what to do instead: %s", name, notices[0])
+			}
+			if strings.Contains(notices[0], tc.avoids) {
+				t.Fatalf("the %s refusal gives the other kind's advice: %s", name, notices[0])
+			}
+		})
+	}
+}
+
+// A document is work, so a refused guard must cost the download nothing — the same rule the
+// photo path follows. Without Document in hasServedMedia a captionless document would skip the
+// guards entirely and be downloaded for free.
+func TestGuardsCoverACaptionlessDocument(t *testing.T) {
+	t.Parallel()
+	svc := &serviceSpy{}
+	var fetched int
+	api := client(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/file/bot") || strings.HasSuffix(r.URL.Path, "/getFile") {
+			fetched++
+		}
+		reply(w, `{"ok":true,"result":{"message_id":1}}`)
+	})
+	receiver := lo.NewReceiver(lo.ReceiverConfig{
+		Service: svc, Client: api, Transport: lo.NewTransport(api, false),
+		IsAllowed: func(int64) bool { return true },
+		Guards:    func(int64) (bool, string) { return false, capReached },
+		Uploads:   lo.NewUploader(api, fakeUploads{dir: t.TempDir()}, 0, nil),
+	})
+
+	msg := inbound("")
+	msg.Document = &lo.Attachment{FileID: "ref", FileName: "spec.pdf"}
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
+
+	if len(svc.prompts) != 0 {
+		t.Fatalf("a capped user still started a run: %v", svc.prompts)
+	}
+	if fetched != 0 {
+		t.Fatalf("the refusal still cost %d download calls", fetched)
 	}
 }
 

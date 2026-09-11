@@ -31,8 +31,8 @@ Flock live delivery remains to be verified with a dedicated bot token.
 | Native quoted reply | `reply_parameters` and legacy reply fields rejected | Completion notice is a separate message; inbound quoted text is included in the prompt when supplied |
 | Inbound photos | `getFile` returns a `file_path` for photos; bytes at `<base>/file/bot<token>/<file_path>` | Largest size downloaded into the chat's uploads dir, capped by `MAX_UPLOAD_BYTES`; the prompt carries the saved path AND the picture itself travels as a vision block, so the model sees it rather than a file name. The saved name is corrected to what the bytes actually are, and bytes that are not an image at all are refused with the download-failure sentence |
 | Inbound audio / video | `getFile` answers the reference WITHOUT a `file_path` (no address for the bytes exists) | Per-kind notice; the run is refused rather than answered without the file |
-| Inbound documents | `getFile` returns a `file_path` for documents; bytes at `<base>/file/bot<token>/<file_path>` | Downloaded into the chat's uploads dir under the sender's own file name, capped by `MAX_UPLOAD_BYTES`; a nameless document is renamed from its declared MIME type; a reference served without bytes gets its own notice |
-| Outbound files / generated artifacts | `sendDocument` accepts a multipart upload where it is implemented and answers 501 where it is not | Opt-in `LO_ENABLE_DOCUMENTS`; off by default, and with it off the agent's workspace instructions say the chat cannot deliver attachments so nothing is promised. On, the outbox sweep uploads each artifact after the run |
+| Inbound documents (where implemented) | `getFile` returns a `file_path` for documents; bytes at `<base>/file/bot<token>/<file_path>`. NOT yet on any deployed LO: the server side is LO/messenger#343, still open | Downloaded into the chat's uploads dir under the sender's own file name, capped by `MAX_UPLOAD_BYTES`; a nameless document is renamed from its declared MIME type; a reference served without bytes gets its own notice |
+| Outbound files / generated artifacts (where implemented) | `sendDocument` accepts a multipart upload where it is implemented and answers 501 where it is not. The implementation is LO/messenger#342, still open | Opt-in `LO_ENABLE_DOCUMENTS`; off by default, and with it off the agent's workspace instructions say the chat cannot deliver attachments so nothing is promised. On, the outbox sweep uploads each artifact after the run |
 | Outbound photos | `sendPhoto`'s upload branch answered 500 on the deployments exercised | Not attempted; an image the agent produces is delivered as a document |
 | Provider slash commands | No platform-specific requirement | Non-reserved commands such as `/loop` reach the configured agent backend |
 | Goals and scheduled work | Uses normal bot messaging | Shared Flock goal and scheduler services wired |
@@ -92,6 +92,11 @@ and quoted context. Core tests cover native draft completion and cleanup (includ
 cleanup failure), progress size limits,
 fallback to the persistent anchor and workspace instructions whose file-delivery
 promises follow the documents flag.
+
+The two document rows above describe what the adapter does WHERE the platform serves it. No
+deployed LO does yet — both server changes are open pull requests, named in the rows — which is
+why `LO_ENABLE_DOCUMENTS` is off by default. The validation note below covers this repository's
+own gate, not a live document round trip.
 
 Validation passed on 2026-09-06 using the repository dev-tools image (Go 1.26.6):
 

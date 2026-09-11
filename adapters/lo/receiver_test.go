@@ -19,6 +19,10 @@ import (
 
 const groupChatType = "group"
 
+// capReached is the refusal a spent guard sends. A constant because several tests assert the
+// same sentence, and a drifting literal would make one of them silently stop asserting it.
+const capReached = "Daily cap reached."
+
 type serviceSpy struct {
 	prompts     []string
 	stopped     int
@@ -127,7 +131,7 @@ func TestReceiverStopBypassesNewWorkGuards(t *testing.T) {
 	})
 	receiver := lo.NewReceiver(lo.ReceiverConfig{
 		Service: svc, Transport: lo.NewTransport(api, false), IsAllowed: func(int64) bool { return true },
-		Guards: func(int64) (bool, string) { return false, "Daily cap reached." },
+		Guards: func(int64) (bool, string) { return false, capReached },
 	})
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: inbound("do work")})
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: inbound("/stop")})

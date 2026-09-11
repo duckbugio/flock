@@ -14,6 +14,10 @@ import (
 	"github.com/duckbugio/flock/adapters/lo"
 )
 
+// documentPart is the multipart field name sendDocument writes the file under. A constant
+// because three tests read it back, and three literals drift.
+const documentPart = "document"
+
 // Off by default, and the refusal is explicit: a platform that predates sendDocument answers
 // 501 for every artifact, so the flag is the operator's one place to say "mine has it".
 func TestSendDocumentIsRefusedUntilEnabled(t *testing.T) {
@@ -65,7 +69,7 @@ func TestSendDocumentUploadsTheFileWithItsBaseName(t *testing.T) {
 			switch part.FormName() {
 			case "chat_id":
 				gotChat = string(data)
-			case "document":
+			case documentPart:
 				gotName, gotBody = part.FileName(), string(data)
 			}
 		}
@@ -187,7 +191,7 @@ func TestUploadStreamsTheFileWithAKnownLength(t *testing.T) {
 			if err != nil {
 				break
 			}
-			if part.FormName() == "document" {
+			if part.FormName() == documentPart {
 				data, _ := io.ReadAll(part)
 				gotBody = string(data)
 			}
@@ -220,5 +224,59 @@ func TestUploadStreamsTheFileWithAKnownLength(t *testing.T) {
 	}
 	if gotLength <= int64(len(content)) {
 		t.Fatalf("content-length=%d, want the declared length of the whole multipart body", gotLength)
+	}
+}
+
+// The file name comes from an agent writing into the outbox directory, and on Linux a newline
+// is legal in one. multipart escapes only backslash and quote, so a name carrying CRLF would
+// append a header of its own to the part — and a doubled one would close the header block and
+// push the rest of the name into the file's bytes.
+func TestUploadSanitisesTheNameItPutsInTheHeader(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct{ given, want string }{
+		// The injected text carries a slash, so the base-name rule cuts at it first and the
+		// control strip finishes the job. What matters is not which letters survive but that
+		// nothing reaches the header able to open a second one.
+		"header injection": {"a\r\nContent-Type: text/html\r\n\r\nb.txt", "htmlb.txt"},
+		"path stripped":    {"/workspace/repo/report.pdf", "report.pdf"},
+		"control chars":    {"re\x00port\x7f.pdf", "report.pdf"},
+		"empty":            {"", "file"},
+		"only dots":        {"..", "file"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var headers int
+			var gotName string
+			api := client(t, func(w http.ResponseWriter, r *http.Request) {
+				_, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+				if err != nil {
+					t.Errorf("content type: %v", err)
+				}
+				reader := multipart.NewReader(r.Body, params["boundary"])
+				for {
+					part, perr := reader.NextPart()
+					if perr != nil {
+						break
+					}
+					if part.FormName() == documentPart {
+						gotName, headers = part.FileName(), len(part.Header)
+					}
+				}
+				reply(w, `{"ok":true,"result":{"message_id":1}}`)
+			})
+
+			if err := lo.NewTransport(api, false).WithDocuments(true).
+				SendDocument(t.Context(), "77", tc.given, strings.NewReader("x")); err != nil {
+				t.Fatalf("SendDocument: %v", err)
+			}
+			if gotName != tc.want {
+				t.Fatalf("name %q became %q, want %q", tc.given, gotName, tc.want)
+			}
+			// Two headers and no more: Content-Disposition and Content-Type. A third means
+			// the name opened one of its own.
+			if headers != 2 {
+				t.Fatalf("the part carries %d headers, want the two multipart writes itself", headers)
+			}
+		})
 	}
 }

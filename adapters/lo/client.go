@@ -480,7 +480,7 @@ func (c *Client) UploadDocument(ctx context.Context, chatID int64, filename stri
 	}
 	// The name is what the user sees in the chat. Only its base travels: a path here would
 	// describe this machine's filesystem to everyone in the conversation.
-	if _, err := form.CreateFormFile("document", filepath.Base(filename)); err != nil {
+	if _, err := form.CreateFormFile("document", partName(filename)); err != nil {
 		return fmt.Errorf("encode LO upload: %w", err)
 	}
 	// Everything written so far precedes the file bytes; whatever Close appends follows them.
@@ -549,4 +549,28 @@ func readerLength(data io.Reader) (int64, bool) {
 		return int64(v.Len()), true
 	}
 	return 0, false
+}
+
+// partName reduces an outbound file name to something safe to put in a multipart header.
+//
+// filepath.Base strips the path and nothing else, and mime/multipart escapes only backslash and
+// quote — it does not check header values for CRLF. A name carrying "\r\n" would therefore
+// append a header of its own to the part, and "\r\n\r\n" would close the header block and
+// push the rest of the name into the file's bytes. Nobody can redirect the message that way
+// (the boundary is random and the chat_id is already written), but the request and the file
+// arrive corrupted, and these names come from an agent writing into the outbox directory,
+// where a newline is a legal character on Linux.
+//
+// The empty result also covers filepath.Base("") == ".", which names a directory.
+func partName(filename string) string {
+	name := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, filepath.Base(filename))
+	if strings.Trim(name, ". ") == "" {
+		return "file"
+	}
+	return name
 }
