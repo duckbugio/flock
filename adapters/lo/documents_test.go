@@ -6,8 +6,10 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/duckbugio/flock/adapters/lo"
 )
@@ -124,5 +126,99 @@ func TestSendDocumentErrorsCarryNoToken(t *testing.T) {
 	}
 	if strings.Contains(sendErr.Error(), "secret-token-value") {
 		t.Fatalf("the token leaked into an error: %v", sendErr)
+	}
+}
+
+// The upload path shares the response envelope with every other method, so a 429 that names a
+// delay must survive it. It did not before: the upload built its own APIError with a zero
+// Delay, and RetryAfter then told the delivery loop to retry in one second a send the platform
+// had asked it to hold for a minute.
+func TestUploadRetryDelaySurvivesTheEnvelope(t *testing.T) {
+	t.Parallel()
+	api := client(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":60}}`))
+	})
+
+	err := lo.NewTransport(api, false).WithDocuments(true).
+		SendDocument(t.Context(), "77", "report.pdf", strings.NewReader("x"))
+	delay, ok := lo.RetryAfter(err)
+	if !ok {
+		t.Fatalf("err=%v, want a classified 429", err)
+	}
+	if delay != 60*time.Second {
+		t.Fatalf("delay=%v, want the 60s the platform asked for", delay)
+	}
+}
+
+// An oversize response is refused rather than truncated. A cut-off body parses as garbage and
+// used to surface as "non-JSON upload response" — a wrong diagnosis of a size problem.
+func TestUploadRefusesAnOversizeResponse(t *testing.T) {
+	t.Parallel()
+	api := client(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"padding":"` + strings.Repeat("x", 2<<20) + `"}`))
+	})
+
+	err := lo.NewTransport(api, false).WithDocuments(true).
+		SendDocument(t.Context(), "77", "report.pdf", strings.NewReader("x"))
+	if err == nil || !strings.Contains(err.Error(), "exceeds size limit") {
+		t.Fatalf("err=%v, want the size limit to be named", err)
+	}
+}
+
+// The document is streamed, not copied into memory first, and the request still declares its
+// length so the platform receives an ordinary identity-encoded upload rather than a chunked
+// one. Both halves are asserted here because either alone is the wrong trade: a buffered body
+// has a known length too, and a streamed body without a length changes the wire shape.
+func TestUploadStreamsTheFileWithAKnownLength(t *testing.T) {
+	t.Parallel()
+	var gotLength int64
+	var gotEncoding []string
+	var gotBody string
+	api := client(t, func(w http.ResponseWriter, r *http.Request) {
+		gotLength, gotEncoding = r.ContentLength, r.TransferEncoding
+		_, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil {
+			t.Errorf("content type: %v", err)
+		}
+		reader := multipart.NewReader(r.Body, params["boundary"])
+		for {
+			part, err := reader.NextPart()
+			if err != nil {
+				break
+			}
+			if part.FormName() == "document" {
+				data, _ := io.ReadAll(part)
+				gotBody = string(data)
+			}
+		}
+		reply(w, `{"ok":true,"result":{"message_id":1}}`)
+	})
+
+	file, err := os.CreateTemp(t.TempDir(), "artifact-*.txt")
+	if err != nil {
+		t.Fatalf("temp file: %v", err)
+	}
+	const content = "an artifact the agent produced"
+	if _, err := file.WriteString(content); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("seek: %v", err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+
+	if err := lo.NewTransport(api, false).WithDocuments(true).
+		SendDocument(t.Context(), "77", "artifact.txt", file); err != nil {
+		t.Fatalf("SendDocument: %v", err)
+	}
+	if gotBody != content {
+		t.Fatalf("body=%q, want the file's contents", gotBody)
+	}
+	if len(gotEncoding) != 0 {
+		t.Fatalf("transfer-encoding=%v, want an identity-encoded request", gotEncoding)
+	}
+	if gotLength <= int64(len(content)) {
+		t.Fatalf("content-length=%d, want the declared length of the whole multipart body", gotLength)
 	}
 }

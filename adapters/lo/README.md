@@ -116,7 +116,10 @@ this adapter does not promise exactly-once agent execution or automatic resume.
 - **Inbound documents are downloaded the same way**, keeping the name the user gave them, so
   the agent opens `spec.pdf` rather than an opaque id. A LO that predates document downloads
   answers the reference WITHOUT a `file_path`; that is reported as "this LO does not hand bots
-  the bytes" rather than as a failed download, because the two need different actions.
+  the bytes" rather than as a failed download, because the two need different actions. LO fills
+  `file_name` only usually, and a document that arrives without one is named from its declared
+  MIME type (`document_<id>.pdf`, `.bin` when the type is unknown) — an extensionless path is
+  the same opaque id this whole paragraph exists to avoid.
 - **Every other attachment gets its own sentence and stops the run.** Answering the caption
   without the file it refers to produces a confident answer about nothing, so the adapter
   refuses instead. The sentences differ by what is actually known. Audio and video answer

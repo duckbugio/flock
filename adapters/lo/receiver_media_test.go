@@ -380,6 +380,41 @@ func TestGuardsRunBeforeTheDownload(t *testing.T) {
 	}
 }
 
+// LO fills file_name only "usually". Without a fallback the sanitiser turns an empty name into
+// the bare word "upload", and the agent is handed an extensionless path — the opaque id the
+// whole download path exists to avoid. The declared type is all the message carries, so the
+// extension comes from there, and ".bin" is the honest name for bytes nobody described.
+func TestNamelessDocumentIsNamedFromItsType(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, mime, wantExt string }{
+		{"a declared type", "application/pdf", ".pdf"},
+		{"a type nothing knows", "application/x-nonsense-not-a-type", ".bin"},
+		{"no type at all", "", ".bin"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			svc := &serviceSpy{}
+			api, _ := photoAPI(t, "bytes")
+			receiver := lo.NewReceiver(lo.ReceiverConfig{
+				Service: svc, Client: api, Transport: lo.NewTransport(api, false),
+				IsAllowed: func(int64) bool { return true },
+				Uploads:   lo.NewUploader(api, fakeUploads{dir: t.TempDir()}, 0, nil),
+			})
+
+			msg := inbound("что тут")
+			msg.Document = &lo.Attachment{FileID: "ref", MimeType: tc.mime}
+			receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
+
+			if len(svc.prompts) != 1 {
+				t.Fatalf("prompts=%v, want one run", svc.prompts)
+			}
+			if saved := savedPathFrom(t, svc.prompts[0]); !strings.HasSuffix(saved, tc.wantExt) {
+				t.Fatalf("saved as %q, want the %q the type implies", saved, tc.wantExt)
+			}
+		})
+	}
+}
+
 // The rung with the most BYTES wins, not the one with the most pixels. A rung can be the
 // largest on paper and the most compressed in fact, so bytes describe "most detail" better —
 // the rule the Telegram adapter already follows. A rung LO has not measured carries no

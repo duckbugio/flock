@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -119,12 +120,32 @@ func (c *Client) call(ctx context.Context, method string, body, out any) error {
 		return fmt.Errorf("LO request failed before receiving a response: %s", reason)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	result, err := c.envelope(resp)
+	if err != nil {
+		return err
+	}
+	if len(result) == 0 || string(result) == "null" {
+		return errors.New("LO response contains no result")
+	}
+	if err := json.Unmarshal(result, out); err != nil {
+		return errors.New("LO response contains an invalid result")
+	}
+	return nil
+}
+
+// envelope reads and classifies a Bot API response, returning the raw `result` for a caller
+// that needs one. Every request path goes through it — a JSON call and a multipart upload
+// alike — because the two must agree on three things a second copy always gets wrong: the
+// response size limit, the fact that an `error_code` of zero means "read the HTTP status",
+// and retry_after. That last one is not cosmetic: an APIError built without a Delay makes
+// RetryAfter fall back to one second, so a 429 that asked for a minute is retried in a second.
+func (c *Client) envelope(resp *http.Response) (json.RawMessage, error) {
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
-		return errors.New("cannot read LO response")
+		return nil, errors.New("cannot read LO response")
 	}
 	if len(data) > maxResponseBytes {
-		return errors.New("LO response exceeds size limit")
+		return nil, errors.New("LO response exceeds size limit")
 	}
 	var envelope struct {
 		OK          bool            `json:"ok"`
@@ -137,9 +158,9 @@ func (c *Client) call(ctx context.Context, method string, body, out any) error {
 	}
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		if resp.StatusCode >= http.StatusMultipleChoices {
-			return &APIError{Code: resp.StatusCode, Description: "non-JSON HTTP error response"}
+			return nil, &APIError{Code: resp.StatusCode, Description: "non-JSON HTTP error response"}
 		}
-		return fmt.Errorf("LO returned an invalid API envelope (HTTP %d)", resp.StatusCode)
+		return nil, fmt.Errorf("LO returned an invalid API envelope (HTTP %d)", resp.StatusCode)
 	}
 	if !envelope.OK || resp.StatusCode != http.StatusOK {
 		code := envelope.Code
@@ -155,18 +176,12 @@ func (c *Client) call(ctx context.Context, method string, body, out any) error {
 		if delay > maxBackoffSeconds {
 			delay = maxBackoffSeconds
 		}
-		return &APIError{
+		return nil, &APIError{
 			Code: code, Description: strings.ReplaceAll(envelope.Description, c.token, "[redacted]"),
 			Delay: time.Duration(max(delay, 0)) * time.Second,
 		}
 	}
-	if len(envelope.Result) == 0 || string(envelope.Result) == "null" {
-		return errors.New("LO response contains no result")
-	}
-	if err := json.Unmarshal(envelope.Result, out); err != nil {
-		return errors.New("LO response contains an invalid result")
-	}
-	return nil
+	return envelope.Result, nil
 }
 
 // User is the Bot API actor; LO and Telegram IDs are independent.
@@ -444,39 +459,50 @@ func (c *Client) Download(ctx context.Context, filePath string) (io.ReadCloser, 
 //
 // Multipart, not JSON: LO's sendDocument takes either a reference this platform minted or an
 // uploaded part, and an agent's artifact has no reference — it was produced here, not shown to
-// the bot. The caption travels with it because Telegram's shape puts a document's words there.
+// the bot.
+//
+// No caption parameter: the outbox delivers files on their own, the agent's words having
+// already gone out as the text answer. One is added when a caller has something to put in it,
+// not before — an unreachable branch cannot be tested and has to be explained forever.
 //
 // A deployment that has not implemented the method answers 501, which the caller reports as
 // "this platform cannot deliver files" rather than as a failed send: the difference decides
 // whether a user should retry.
-func (c *Client) UploadDocument(ctx context.Context, chatID int64, filename, caption string, data io.Reader) error {
-	body := &bytes.Buffer{}
-	form := multipart.NewWriter(body)
+func (c *Client) UploadDocument(ctx context.Context, chatID int64, filename string, data io.Reader) error {
+	// The file is STREAMED, never buffered. Only the multipart frame around it is built in
+	// memory: a copy of the file here would put a peak of twice its size on the host for every
+	// concurrent delivery, and the size is an operator's setting (MAX_OUTBOX_BYTES), so the
+	// worst case is whatever number they picked — on the VPS these bots run on, that matters.
+	var frame bytes.Buffer
+	form := multipart.NewWriter(&frame)
 	if err := form.WriteField("chat_id", strconv.FormatInt(chatID, 10)); err != nil {
 		return fmt.Errorf("encode LO upload: %w", err)
 	}
-	if caption != "" {
-		if err := form.WriteField("caption", caption); err != nil {
-			return fmt.Errorf("encode LO upload: %w", err)
-		}
-	}
 	// The name is what the user sees in the chat. Only its base travels: a path here would
 	// describe this machine's filesystem to everyone in the conversation.
-	part, err := form.CreateFormFile("document", filepath.Base(filename))
-	if err != nil {
+	if _, err := form.CreateFormFile("document", filepath.Base(filename)); err != nil {
 		return fmt.Errorf("encode LO upload: %w", err)
 	}
-	if _, err := io.Copy(part, data); err != nil {
-		return fmt.Errorf("read outbound document: %w", err)
-	}
+	// Everything written so far precedes the file bytes; whatever Close appends follows them.
+	// Splitting the frame at this point is what lets the body be three readers in a row
+	// instead of one buffer holding the whole document.
+	prologue := bytes.Clone(frame.Bytes())
+	frame.Reset()
 	if err := form.Close(); err != nil {
 		return fmt.Errorf("encode LO upload: %w", err)
 	}
+	epilogue := frame.Bytes()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.base+"/bot"+c.token+"/sendDocument", bytes.NewReader(body.Bytes()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/bot"+c.token+"/sendDocument",
+		io.MultiReader(bytes.NewReader(prologue), data, bytes.NewReader(epilogue)))
 	if err != nil {
 		return errors.New("cannot construct LO upload request")
+	}
+	// A known length keeps the request on identity transfer-encoding. Streaming a body of
+	// unknown size makes Go chunk it, and a chunked multipart upload is the kind of thing a
+	// proxy in front of the platform may refuse — not something to discover in production.
+	if size, ok := readerLength(data); ok {
+		req.ContentLength = int64(len(prologue)) + size + int64(len(epilogue))
 	}
 	req.Header.Set("Content-Type", form.FormDataContentType())
 
@@ -493,24 +519,34 @@ func (c *Client) UploadDocument(ctx context.Context, chatID int64, filename, cap
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
-	if err != nil {
-		return errors.New("cannot read LO upload response")
-	}
-	var envelope struct {
-		OK          bool   `json:"ok"`
-		Code        int    `json:"error_code"` //nolint:tagliatelle // Bot API wire spelling.
-		Description string `json:"description"`
-	}
-	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return &APIError{Code: resp.StatusCode, Description: "non-JSON upload response"}
-	}
-	if !envelope.OK || resp.StatusCode != http.StatusOK {
-		code := envelope.Code
-		if code == 0 {
-			code = resp.StatusCode
+	// The sent Message is discarded on purpose: the outbox has nothing to do with a delivered
+	// file beyond knowing it arrived, and an absent result is not a failure here.
+	_, err = c.envelope(resp)
+	return err
+}
+
+// readerLength reports how many bytes a reader still holds, for the readers that can say. An
+// outbox delivery is always an *os.File the sweeper has just stat-ed and opened; the rest are
+// here so a test exercises the same request shape production does.
+func readerLength(data io.Reader) (int64, bool) {
+	switch v := data.(type) {
+	case *os.File:
+		info, err := v.Stat()
+		if err != nil || !info.Mode().IsRegular() {
+			return 0, false
 		}
-		return &APIError{Code: code, Description: strings.ReplaceAll(envelope.Description, c.token, "[redacted]")}
+		// A file that has already been partly read has fewer bytes left than it has in total.
+		pos, err := v.Seek(0, io.SeekCurrent)
+		if err != nil || pos > info.Size() {
+			return 0, false
+		}
+		return info.Size() - pos, true
+	case *bytes.Reader:
+		return int64(v.Len()), true
+	case *bytes.Buffer:
+		return int64(v.Len()), true
+	case *strings.Reader:
+		return int64(v.Len()), true
 	}
-	return nil
+	return 0, false
 }

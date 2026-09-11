@@ -351,14 +351,20 @@ func (r *Receiver) attachments(
 	}
 	if msg.Document != nil {
 		// The name comes from the chat and is sanitised on the way to disk; keeping it is what
-		// lets the agent see "spec.pdf" rather than an opaque id.
+		// lets the agent see "spec.pdf" rather than an opaque id. LO fills it only "usually",
+		// and a nameless document would land as an extensionless "upload" — so an absent name
+		// is rebuilt from the declared type instead.
 		//
 		// A document is returned SEPARATELY from a photo even though both are just a saved
 		// path, because the caller does different things with them: a picture is shown to the
 		// model as a vision block, a document becomes words the agent opens with a tool. Its
 		// name is the sender's, so nothing sniffs it — that correction is for the name this
 		// adapter invented, not for one a person chose.
-		saved, note := r.download(ctx, chatID, msg.Document.FileID, msg.Document.FileName, "file")
+		name := msg.Document.FileName
+		if strings.TrimSpace(name) == "" {
+			name = documentFileName(msg.ID, msg.Document.MimeType)
+		}
+		saved, note := r.download(ctx, chatID, msg.Document.FileID, name, "file")
 		return "", saved, false, note
 	}
 	// No unserved-kind arm here any more: those are answered before the guards, without

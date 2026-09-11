@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 
@@ -123,10 +125,31 @@ func (u *Uploader) Save(ctx context.Context, chatID, fileID, fileName string) (s
 	return saved, nil
 }
 
+// documentFileName names a saved document when the platform sent no file name. LO fills
+// file_name only "usually", and the fallback in fsutil is the bare word "upload" — an agent
+// handed a path with no extension is looking at exactly the opaque id this adapter's inbound
+// path exists to avoid. The declared MIME type is the only other thing the message carries,
+// so the extension comes from there, and from ".bin" when even that is missing or unknown.
+func documentFileName(messageID int64, mimeType string) string {
+	ext := ".bin"
+	if media, _, err := mime.ParseMediaType(mimeType); err == nil {
+		// ExtensionsByType is not ordered by preference, so the list is sorted for a stable
+		// name: the same message must not produce ".jpe" on one host and ".jpg" on another.
+		if exts, err := mime.ExtensionsByType(media); err == nil && len(exts) > 0 {
+			sort.Strings(exts)
+			ext = exts[0]
+		}
+	}
+	return fmt.Sprintf("document_%d%s", messageID, ext)
+}
+
+// photoFileName names a saved photo. LO photos arrive without a file name, and the file path
+// is a reference rather than something with an extension, so the name is generated from the
+// message: predictable for the agent and unique per message.
+
 // photoFileName names a saved photo BEFORE its bytes have been seen. LO photos arrive without a
 // file name, and the file path is a reference rather than something with an extension, so the
-// name is generated from the message: predictable for the agent and unique per message.
-//
+// name is generated from the message: predictable for the agent and unique per message.//
 // The extension here is a guess. It is corrected the moment the bytes are on disk — see
 // photoExtension — because something DOES read a media type out of this name: core/chat derives
 // the vision block's type from the saved path, so a PNG named .jpg reaches the model declared as

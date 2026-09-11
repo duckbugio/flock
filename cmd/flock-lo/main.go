@@ -103,7 +103,9 @@ func run() int {
 		}
 	}
 	ws := &workspace.Renderer{
-		FileDeliveryDisabled: true,
+		// Promises about files follow the flag: with documents off the workspace instructions
+		// tell the agent not to offer them, because the transport cannot deliver.
+		FileDeliveryDisabled: !cfg.LOEnableDocuments,
 		AutoApproveScope:     cfg.AutoApproveScopeLevel(),
 		BaseDir:              cfg.ApprovedDirectory,
 		TemplatePath:         cfg.TeamTemplatePath,
@@ -139,12 +141,17 @@ func run() int {
 	}()
 	transport := lo.NewTransport(api, cfg.LOEnableDrafts).WithDocuments(cfg.LOEnableDocuments)
 	postRun := autonomy.Build(cfg, logger)
+	// The outbox sweep is what turns an agent's file into a delivery. Always constructed, as
+	// in the Telegram and VK binaries: the core already skips the sweep when the transport
+	// reports it cannot send documents, so the flag is read in exactly one place.
+	outbox := chat.NewSweeper(ws, cfg.MaxOutboxBytes, cfg.MaxOutboxFiles, logger)
 	svc := chat.New(chat.Config{
 		Runner:     runner,
 		Transport:  transport,
 		Dispatcher: dispatcher,
 		Workspace:  ws,
 		Sessions:   sessions,
+		Outbox:     outbox,
 		Costs:      costs,
 		CostCapUSD: cfg.EffectiveCostCapUSD(),
 		PostRun:    postRun,
@@ -176,7 +183,8 @@ func run() int {
 		},
 	})
 	logger.Info("starting LO adapter", "bot_id", self.ID, "drafts", cfg.LOEnableDrafts, "workspace", cfg.ApprovedDirectory)
-	logger.Info("LO compatibility: text only; /stop replaces buttons; document outbox and native replies disabled")
+	logger.Info("LO compatibility: /stop replaces buttons; native replies disabled",
+		"documents", cfg.LOEnableDocuments)
 	if err := receiver.Run(ctx); err != nil && ctx.Err() == nil {
 		logger.Error("LO adapter stopped", "error", err)
 		return 1

@@ -161,7 +161,7 @@ func (t *Transport) SendDocument(ctx context.Context, chatID chat.ChatID, name s
 	if err != nil {
 		return errors.New("invalid LO chat ID")
 	}
-	return t.api.UploadDocument(ctx, id, name, "", data)
+	return t.api.UploadDocument(ctx, id, name, data)
 }
 
 // SendStarNudge is unavailable because its confirmation callback is not implemented in LO.
