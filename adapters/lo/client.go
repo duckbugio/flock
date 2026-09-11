@@ -139,8 +139,9 @@ func (c *Client) call(ctx context.Context, method string, body, out any) error {
 // that needs one. Every request path goes through it — a JSON call and a multipart upload
 // alike — because the two must agree on three things a second copy always gets wrong: the
 // response size limit, the fact that an `error_code` of zero means "read the HTTP status",
-// and retry_after. That last one is not cosmetic: an APIError built without a Delay makes
-// RetryAfter fall back to one second, so a 429 that asked for a minute is retried in a second.
+// and retry_after. The last one carries no consequence TODAY — nothing re-sends a document by
+// Delay; the outbox sweep logs a failure and leaves the file for the next run — so the field is
+// filled for the same reason the other two are: one parse for every method, or two that drift.
 func (c *Client) envelope(resp *http.Response) (json.RawMessage, error) {
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {

@@ -135,9 +135,9 @@ func TestSendDocumentErrorsCarryNoToken(t *testing.T) {
 }
 
 // The upload path shares the response envelope with every other method, so a 429 that names a
-// delay must survive it. It did not before: the upload built its own APIError with a zero
-// Delay, and RetryAfter then told the delivery loop to retry in one second a send the platform
-// had asked it to hold for a minute.
+// delay must survive it. Nothing re-sends a document by that delay yet — the outbox sweep just
+// leaves the file for the next run — so what this pins is the parsing: one envelope for every
+// method, rather than a second copy that answers a zero Delay where the first answers sixty.
 func TestUploadRetryDelaySurvivesTheEnvelope(t *testing.T) {
 	t.Parallel()
 	api := client(t, func(w http.ResponseWriter, _ *http.Request) {

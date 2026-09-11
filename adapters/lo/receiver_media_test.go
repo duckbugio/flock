@@ -255,9 +255,6 @@ func TestPhotoWithoutUploaderIsRefusedExplicitly(t *testing.T) {
 
 func savedPathFrom(t *testing.T, prompt string) string {
 	t.Helper()
-	// The photo prompt is core/chat's, shared with Telegram and VK, and ends the path with
-	// ")". The document one is this adapter's and ends it with " —". Reading both keeps the
-	// helper usable from either side rather than duplicating it per kind.
 	// Both prompts come from core/chat and end the path differently: the photo one closes a
 	// parenthesis, the document one ends the line. Reading both keeps one helper usable from
 	// either side instead of a copy per kind.

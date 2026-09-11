@@ -170,15 +170,12 @@ func documentFileName(messageID int64, mimeType string) string {
 	return fmt.Sprintf("document_%d%s", messageID, ext)
 }
 
-// photoFileName names a saved photo. LO photos arrive without a file name, and the file path
-// is a reference rather than something with an extension, so the name is generated from the
-// message: predictable for the agent and unique per message.
-
 // photoFileName names a saved photo BEFORE its bytes have been seen. LO photos arrive without a
 // file name, and the file path is a reference rather than something with an extension, so the
-// name is generated from the message: predictable for the agent and unique per message.//
+// name is generated from the message: predictable for the agent and unique per message.
+//
 // The extension here is a guess. It is corrected the moment the bytes are on disk — see
-// photoExtension — because something DOES read a media type out of this name: core/chat derives
+// nameByContent — because something DOES read a media type out of this name: core/chat derives
 // the vision block's type from the saved path, so a PNG named .jpg reaches the model declared as
 // a JPEG.
 func photoFileName(messageID int64) string {
