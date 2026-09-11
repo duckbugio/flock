@@ -17,7 +17,13 @@ import (
 )
 
 const (
-	requestTimeout     = 65 * time.Second
+	requestTimeout = 65 * time.Second
+	// fileTimeout covers a whole download, body included, and is deliberately not
+	// requestTimeout. That one is sized for a 30-second long poll; reusing it here caps an
+	// upload-sized file at what fits in 65 seconds — 20 MiB needs a sustained 320 KB/s — and
+	// the user is then told to "try sending it again", which on that link never works. The
+	// Telegram and VK adapters carry the same separate client for the same reason.
+	fileTimeout        = 120 * time.Second
 	maxResponseBytes   = 2 << 20
 	pollTimeoutSeconds = 30
 	// Leave room for full-size Unicode text plus quoted messages under the response cap.
@@ -28,6 +34,9 @@ const (
 type Client struct {
 	base, token string
 	http        *http.Client
+	// fileHTTP reads file BYTES. A second client rather than a second timeout, because
+	// http.Client.Timeout is per-client and covers reading the body — see fileTimeout.
+	fileHTTP *http.Client
 }
 
 // NewClient accepts HTTPS endpoints or loopback HTTP for local integration tests.
@@ -52,7 +61,15 @@ func NewClient(base, token string, hc *http.Client) (*Client, error) {
 		client.Timeout = requestTimeout
 	}
 	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
-	return &Client{base: strings.TrimRight(base, "/"), token: token, http: &client}, nil
+	// The download client copies everything but the timeout — the redirect refusal above most
+	// of all. Following one would let Go put the previous URL, which carries the bot token,
+	// into the Referer of a request to wherever the redirect points.
+	files := client
+	files.Timeout = fileTimeout
+	return &Client{
+		base: strings.TrimRight(base, "/"), token: token,
+		http: &client, fileHTTP: &files,
+	}, nil
 }
 
 // APIError preserves the numeric status and retry delay without exposing credentials.
@@ -242,13 +259,45 @@ func (c *Client) GetMe(ctx context.Context) (User, error) {
 }
 
 // GetUpdates requests only new messages; it never drops queued updates or disables webhooks.
+//
+// The batch is decoded one update at a time, and an update that will not decode is SKIPPED
+// rather than failing the batch. Since the media fields became typed, an unexpected shape in
+// any one of them — a field this adapter models as an object arriving as something else —
+// would fail the whole json.Unmarshal; the receiver would then not advance its offset, ask for
+// the same batch again, and the bot would stop answering anyone until that update expired.
+// Losing one message the adapter cannot read costs a message; the alternative costs the bot.
+//
+// The update_id is still read from the skipped update where possible, so the offset advances
+// past it — an id is one integer, and the shapes that break here are inside `message`.
 func (c *Client) GetUpdates(ctx context.Context, offset int64) ([]Update, error) {
-	var updates []Update
+	var raw []json.RawMessage
 	body := map[string]any{
 		"offset": offset, "timeout": pollTimeoutSeconds, "limit": pollBatchSize, "allowed_updates": []string{"message"},
 	}
-	err := c.call(ctx, "getUpdates", body, &updates)
-	return updates, err
+	if err := c.call(ctx, "getUpdates", body, &raw); err != nil {
+		return nil, err
+	}
+	updates := make([]Update, 0, len(raw))
+	for _, item := range raw {
+		var update Update
+		if err := json.Unmarshal(item, &update); err == nil {
+			updates = append(updates, update)
+			continue
+		}
+		var header struct {
+			ID int64 `json:"update_id"` //nolint:tagliatelle // Bot API wire spelling.
+		}
+		if err := json.Unmarshal(item, &header); err != nil || header.ID == 0 {
+			// Not even an id: nothing to acknowledge, and nothing to answer.
+			slog.Warn("LO sent an update this adapter cannot read at all")
+			continue
+		}
+		// An id and a body that will not decode: keep the id so the offset moves past it,
+		// and leave Message nil, which the receiver already treats as nothing to do.
+		slog.Warn("LO sent an update this adapter cannot read", "update_id", header.ID)
+		updates = append(updates, Update{ID: header.ID})
+	}
+	return updates, nil
 }
 
 // CheckPolling refuses an active webhook without mutating it. Older deployments
@@ -303,7 +352,7 @@ func (c *Client) Download(ctx context.Context, filePath string) (io.ReadCloser, 
 	if err != nil {
 		return nil, errors.New("cannot construct LO download request")
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.fileHTTP.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()

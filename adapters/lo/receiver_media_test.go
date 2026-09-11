@@ -94,12 +94,24 @@ func TestCaptionlessPhotoStillStartsARun(t *testing.T) {
 // caption alone would be answering a question whose subject never arrived.
 func TestUnreadableAttachmentsExplainThemselvesAndStopTheRun(t *testing.T) {
 	t.Parallel()
-	for name, attach := range map[string]func(*lo.Message){
-		"document": func(m *lo.Message) { m.Document = &lo.Attachment{FileID: "d", FileName: "spec.pdf"} },
-		"voice":    func(m *lo.Message) { m.Voice = &lo.Attachment{FileID: "v"} },
-		"video":    func(m *lo.Message) { m.Video = &lo.Attachment{FileID: "m"} },
-		"audio":    func(m *lo.Message) { m.Audio = &lo.Attachment{FileID: "a"} },
-		"sticker":  func(m *lo.Message) { m.Sticker = &lo.Attachment{FileID: "s"} },
+	// The notice TEXT is asserted, not merely its count. Per-kind sentences are what this
+	// whole path is for — "I cannot read that" for everything would have been one line — so a
+	// test that counts notices would stay green through any mix-up in the table.
+	for name, tc := range map[string]struct {
+		attach func(*lo.Message)
+		says   string
+	}{
+		"document": {
+			func(m *lo.Message) { m.Document = &lo.Attachment{FileID: "d", FileName: "spec.pdf"} },
+			"documents", // Names the kind; the sentence deliberately claims nothing about the platform.
+		},
+		"voice": {func(m *lo.Message) { m.Voice = &lo.Attachment{FileID: "v"} }, "voice"},
+		"video": {func(m *lo.Message) { m.Video = &lo.Attachment{FileID: "m"} }, "video"},
+		"audio": {func(m *lo.Message) { m.Audio = &lo.Attachment{FileID: "a"} }, "audio"},
+		"sticker": {
+			func(m *lo.Message) { m.Sticker = &lo.Attachment{FileID: "s"} },
+			"Stickers",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -111,7 +123,7 @@ func TestUnreadableAttachmentsExplainThemselvesAndStopTheRun(t *testing.T) {
 				Uploads:   lo.NewUploader(api, fakeUploads{dir: t.TempDir()}, 0, nil),
 			})
 			msg := inbound("review this")
-			attach(msg)
+			tc.attach(msg)
 			receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
 
 			if len(svc.prompts) != 0 {
@@ -119,6 +131,9 @@ func TestUnreadableAttachmentsExplainThemselvesAndStopTheRun(t *testing.T) {
 			}
 			if len(*notices) != 1 {
 				t.Fatalf("%s produced %d notices, want exactly one", name, len(*notices))
+			}
+			if !strings.Contains((*notices)[0], tc.says) {
+				t.Fatalf("the %s notice does not name the kind it refused: %s", name, (*notices)[0])
 			}
 		})
 	}

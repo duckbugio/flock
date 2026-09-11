@@ -128,39 +128,63 @@ func (r *Receiver) stopPolling(err error, conflicts *int) bool {
 	return fatalAPIError(err)
 }
 
-// HandleUpdate gates every command and message before invoking the shared service.
-func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
-	msg := update.Message
+// admits answers whether this message is for this bot at all, and hands back the three values
+// the rest of HandleUpdate needs.
+//
+// Split out of HandleUpdate rather than inlined, because the two halves answer different
+// questions: everything here is "is this addressed to me", and everything after is "what do I
+// do about it". Keeping them together also put the whole routine past the repository's
+// complexity gate.
+func (r *Receiver) admits(msg *Message) (text string, replyToBot, ok bool) {
 	if msg == nil || msg.From == nil || msg.From.IsBot || msg.From.ID <= 0 || msg.ID <= 0 ||
 		msg.Chat.ID == 0 || !r.cfg.IsAllowed(msg.From.ID) {
-		return
+		return "", false, false
 	}
 	if msg.Chat.Type != privateChatType && msg.Chat.Type != "group" && msg.Chat.Type != "supergroup" {
-		return
+		return "", false, false
 	}
-	text := strings.TrimSpace(msg.Text)
+	text = strings.TrimSpace(msg.Text)
 	if text == "" {
 		text = strings.TrimSpace(msg.Caption)
 	}
 	cleaned, addressed := addressedText(text, r.cfg.Username, msg.Chat.Type != privateChatType)
 	if !addressed {
+		return "", false, false
+	}
+	name, _ := command(cleaned)
+	replyToBot = r.cfg.BotID > 0 && msg.Reply != nil && msg.Reply.From != nil && msg.Reply.From.ID == r.cfg.BotID
+	if msg.Chat.Type != privateChatType && r.cfg.RequireMention &&
+		cleaned == text && !replyToBot && !chat.IsReservedCommand(name) {
+		return "", false, false
+	}
+	return cleaned, replyToBot, true
+}
+
+// HandleUpdate gates every command and message before invoking the shared service.
+func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
+	msg := update.Message
+	text, replyToBot, ok := r.admits(msg)
+	if !ok {
 		return
 	}
-	name, args := command(cleaned)
-	replyToBot := r.cfg.BotID > 0 && msg.Reply != nil && msg.Reply.From != nil && msg.Reply.From.ID == r.cfg.BotID
-	if msg.Chat.Type != privateChatType && r.cfg.RequireMention && cleaned == text && !replyToBot && !chat.IsReservedCommand(name) {
-		return
-	}
-	text = cleaned
+	name, args := command(text)
 	chatID := strconv.FormatInt(msg.Chat.ID, 10)
 	if chat.IsReservedCommand(name) {
 		r.reserved(ctx, chatID, msg.From.ID, name, args)
 		return
 	}
-	// Guards run BEFORE any attachment work. A rate limit or a spent cost cap must be paid
-	// with a refusal, not with a download: doing the network call and the disk write first
-	// means a capped user still costs bandwidth and storage on every message they send.
-	if hasMedia(msg) || text != "" {
+	// An attachment this platform will not hand over is answered FIRST, before the guards.
+	// It costs no network call, no disk write and no agent run, and core/chat's contract is
+	// that a message which produces no work spends no limiter budget. Charging for it would
+	// not even save a message: the guard refusal sends one too.
+	if note := unservedNotice(msg); note != "" {
+		r.notify(ctx, chatID, note)
+		return
+	}
+	// Guards run BEFORE any attachment work that remains. A rate limit or a spent cost cap
+	// must be paid with a refusal, not with a download: doing the network call and the disk
+	// write first means a capped user still costs bandwidth and storage on every message.
+	if hasServedMedia(msg) || text != "" {
 		if r.cfg.Guards != nil {
 			if allowed, reason := r.cfg.Guards(msg.From.ID); !allowed {
 				r.notify(ctx, chatID, reason)
@@ -216,7 +240,12 @@ var unservedKinds = []struct {
 }{
 	{
 		get: func(m *Message) *Attachment { return m.Document },
-		notice: "I cannot open documents: LO's bot API does not serve their bytes yet. " +
+		// Says what this ADAPTER does, not what the platform cannot do. The evidence for the
+		// platform claim would have been sendDocument's 501, and that is the OUTGOING method:
+		// whether getFile answers a document reference with a file_path is a separate
+		// question, unverified when this line was written, and answered by the change that
+		// follows it.
+		notice: "I cannot read documents yet. " +
 			"Paste the text, or point me at the file in a repository.",
 	},
 	{
@@ -270,12 +299,35 @@ func (r *Receiver) attachments(ctx context.Context, msg *Message, chatID string)
 		}
 		return "[The user attached an image. It is saved at " + path + " — open it to see what they mean.]", ""
 	}
+	// No unserved-kind arm here any more: those are answered before the guards, without
+	// touching the network. See unservedNotice.
+	return "", ""
+}
+
+// unservedNotice is the whole of the attachment path that needs no I/O — the kinds this
+// platform will not hand over, each with its own sentence.
+//
+// It answers "" when the message carries something that CAN be read, so a photo that arrives
+// alongside a sticker is still work rather than a refusal. That is the precedence attachments
+// applies, kept here rather than restated.
+func unservedNotice(msg *Message) string {
+	if hasServedMedia(msg) {
+		return ""
+	}
 	for _, kind := range unservedKinds {
 		if kind.get(msg) != nil {
-			return "", kind.notice
+			return kind.notice
 		}
 	}
-	return "", ""
+	return ""
+}
+
+// hasServedMedia reports an attachment this adapter can actually turn into work. Distinct from
+// hasMedia, which answers "carries an attachment of any kind": the two differ exactly on the
+// kinds that produce a sentence and nothing else, and that difference is what keeps a refusal
+// from spending guard budget.
+func hasServedMedia(msg *Message) bool {
+	return len(msg.Photo) > 0
 }
 
 func (r *Receiver) notify(ctx context.Context, chatID, text string) {

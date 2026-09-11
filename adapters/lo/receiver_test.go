@@ -226,12 +226,20 @@ func TestIgnoredMessagesDoNotSpendGuardBudget(t *testing.T) {
 		IsAllowed: func(int64) bool { return true }, RequireMention: true,
 		Guards: func(int64) (bool, string) { calls++; return true, "" },
 	})
-	// A photo is no longer an ignored message — it is work, and work spends the budget.
-	// What must not spend it: an unaddressed group message and an empty one.
+	// A photo IS work and spends the budget; it has its own test. What must not spend it: an
+	// unaddressed group message, an empty one, and an attachment this platform will not hand
+	// over — the last because it produces one sentence and no work at all, and charging for it
+	// would not even save a message, since a guard refusal sends one too.
 	empty := inbound("@flock")
 	empty.Chat.ID, empty.Chat.Type = -42, groupChatType
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: empty})
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: inbound("")})
+	sticker := inbound("")
+	sticker.Sticker = &lo.Attachment{FileID: "s"}
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: sticker})
+	voice := inbound("послушай")
+	voice.Voice = &lo.Attachment{FileID: "v"}
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: voice})
 	if calls != 0 {
 		t.Fatalf("ignored messages spent %d guard calls", calls)
 	}
@@ -408,5 +416,95 @@ func TestReplyContextIdentifiesAssistantAndEmptyMessage(t *testing.T) {
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
 	if len(svc.prompts) != 1 || !strings.Contains(svc.prompts[0], "the assistant") || !strings.Contains(svc.prompts[0], "[media]") {
 		t.Fatalf("prompts=%v", svc.prompts)
+	}
+}
+
+// pollSpy is serviceSpy's synchronised twin, for the one test that drives Receiver.Run on its
+// own goroutine. The shared spy is deliberately lock-free — every other test calls HandleUpdate
+// directly — and adding a mutex there would make the simple tests pay for this one.
+type pollSpy struct {
+	prompts chan string
+}
+
+func (p *pollSpy) Handle(_ context.Context, _ string, _ int64, _, prompt string) {
+	p.prompts <- prompt
+}
+func (*pollSpy) StopChat(string) bool                     { return false }
+func (*pollSpy) NewSession(string) error                  { return nil }
+func (*pollSpy) ArmGoal(string, string) (goal.Goal, bool) { return goal.Goal{}, false }
+func (*pollSpy) GoalStatus(string) (goal.Goal, bool)      { return goal.Goal{}, false }
+func (*pollSpy) DisarmGoal(string) bool                   { return false }
+
+// One update this adapter cannot decode must not stop it answering everyone else. Since the
+// media fields became typed, an unexpected shape in any of them fails that update's Unmarshal;
+// if that failed the whole batch, the offset would never advance and the poller would ask for
+// the same poisoned batch forever.
+func TestUndecodableUpdateDoesNotStopTheBatch(t *testing.T) {
+	t.Parallel()
+	svc := &pollSpy{prompts: make(chan string, 4)}
+	offsets := make(chan int64, 8)
+	api := client(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/getUpdates") {
+			reply(w, `{"ok":true,"result":{"message_id":1}}`)
+			return
+		}
+		var body struct {
+			Offset int64 `json:"offset"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		select {
+		case offsets <- body.Offset:
+		default:
+		}
+		if body.Offset > 0 {
+			reply(w, `{"ok":true,"result":[]}`)
+			return
+		}
+		// The middle update models `document` as a string where this adapter expects an
+		// object — a shape the platform could grow at any time.
+		const chat = `"chat":{"id":7,"type":"private"},"from":{"id":7}`
+		reply(w, `{"ok":true,"result":[
+			{"update_id":10,"message":{"message_id":1,"text":"first",`+chat+`}},
+			{"update_id":11,"message":{"message_id":2,"text":"poison",`+chat+`,"document":"not-an-object"}},
+			{"update_id":12,"message":{"message_id":3,"text":"third",`+chat+`}}
+		]}`)
+	})
+	receiver := lo.NewReceiver(lo.ReceiverConfig{
+		Service: svc, Client: api, Transport: lo.NewTransport(api, false),
+		IsAllowed: func(int64) bool { return true },
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- receiver.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	// Both readable messages must arrive. Before the fix neither did: the batch failed to
+	// decode as a whole, the offset never moved, and the poller re-asked for it forever.
+	var got []string
+	for range 2 {
+		select {
+		case prompt := <-svc.prompts:
+			got = append(got, prompt)
+		case <-time.After(4 * time.Second):
+			t.Fatalf("the batch stalled; prompts so far: %v", got)
+		}
+	}
+	if !strings.Contains(got[0], "first") || !strings.Contains(got[1], "third") {
+		t.Fatalf("prompts=%v, want the two readable messages in order", got)
+	}
+	// The offset must have moved PAST the poisoned update, not stopped at it.
+	select {
+	case <-offsets: // the first poll, from zero
+		select {
+		case next := <-offsets:
+			if next <= 12 {
+				t.Fatalf("second poll asked from offset %d, want past update 12", next)
+			}
+		case <-time.After(4 * time.Second):
+			t.Fatal("no second poll: the offset never advanced")
+		}
+	default:
+		t.Fatal("the poller never asked for updates")
 	}
 }
