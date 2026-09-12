@@ -350,7 +350,7 @@ func (r *Receiver) attachments(
 		}
 		return saved, "", shown, note
 	}
-	if msg.Document != nil {
+	if servedDocument(msg) {
 		// The name comes from the chat and is sanitised on the way to disk; keeping it is what
 		// lets the agent see "spec.pdf" rather than an opaque id. LO fills it only "usually",
 		// and a nameless document would land as an extensionless "upload" — so an absent name
@@ -453,7 +453,18 @@ func unservedNotice(msg *Message) string {
 // kinds that produce a sentence and nothing else, and that difference is what keeps a refusal
 // from spending guard budget.
 func hasServedMedia(msg *Message) bool {
-	return len(msg.Photo) > 0 || msg.Document != nil
+	return len(msg.Photo) > 0 || servedDocument(msg)
+}
+
+// servedDocument reports a document this adapter should READ, as opposed to one the platform
+// attached to something else.
+//
+// Bot API fills `document` ALONGSIDE `animation` for a GIF and alongside `video_note` for a
+// round video: the file is there, but the message is not a document — and downloading it would
+// hand the agent a video it cannot act on instead of the sentence that says so. The kind with
+// a name of its own wins, which is the same rule the refusal table follows.
+func servedDocument(msg *Message) bool {
+	return msg.Document != nil && !present(msg.Animation) && !present(msg.VideoNote)
 }
 
 // attachmentKind is what a refusal needs to say about one kind of attachment: the noun the
