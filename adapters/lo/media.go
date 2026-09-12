@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -123,12 +124,58 @@ func (u *Uploader) Save(ctx context.Context, chatID, fileID, fileName string) (s
 	return saved, nil
 }
 
+// documentExtensions maps a declared type to the extension a saved document gets.
+//
+// An explicit table rather than mime.ExtensionsByType, and not for determinism alone. Go mixes
+// the host's /etc/mime.types into that table, so the answer depends on the container: text/plain
+// comes back as "txt text pot brf srt" and image/jpeg as "jpeg jpg jpe jfif". Picking the first
+// alphabetically — which an earlier version did, for stability — chose ".brf" for a text file
+// and ".jfif" for a photo, both worse than any of the obvious answers. These are the types a
+// chat actually carries; anything NOT in this table gets ".bin" — including types that are
+// perfectly well known and simply absent here, which is the honest reading of "unknown to us".
+//
+//nolint:gochecknoglobals // A fixed table, read-only, kept beside the function that uses it.
+var documentExtensions = map[string]string{
+	"application/pdf":  ".pdf",
+	"application/json": ".json",
+	"application/zip":  ".zip",
+	"text/plain":       ".txt",
+	"text/markdown":    ".md",
+	"text/csv":         ".csv",
+	"text/html":        ".html",
+	"text/xml":         ".xml",
+	"application/xml":  ".xml",
+	// The two a working chat actually carries when someone sends "the spec": without them a
+	// nameless .docx lands as .bin, which is the faceless path this whole fallback exists to
+	// avoid.
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":       ".xlsx",
+	"image/png":  ".png",
+	"image/jpeg": ".jpg",
+	"image/gif":  ".gif",
+	"image/webp": ".webp",
+}
+
+// documentFileName names a saved document when the platform sent no file name. LO fills
+// file_name only "usually", and the fallback in fsutil is the bare word "upload" — an agent
+// handed a path with no extension is looking at exactly the opaque id this adapter's inbound
+// path exists to avoid. The declared MIME type is the only other thing the message carries.
+func documentFileName(messageID int64, mimeType string) string {
+	ext := ".bin"
+	if media, _, err := mime.ParseMediaType(mimeType); err == nil {
+		if known, ok := documentExtensions[strings.ToLower(media)]; ok {
+			ext = known
+		}
+	}
+	return fmt.Sprintf("document_%d%s", messageID, ext)
+}
+
 // photoFileName names a saved photo BEFORE its bytes have been seen. LO photos arrive without a
 // file name, and the file path is a reference rather than something with an extension, so the
 // name is generated from the message: predictable for the agent and unique per message.
 //
 // The extension here is a guess. It is corrected the moment the bytes are on disk — see
-// photoExtension — because something DOES read a media type out of this name: core/chat derives
+// nameByContent — because something DOES read a media type out of this name: core/chat derives
 // the vision block's type from the saved path, so a PNG named .jpg reaches the model declared as
 // a JPEG.
 func photoFileName(messageID int64) string {

@@ -26,11 +26,16 @@ import (
 // the caller can turn it into one friendly notice.
 var ErrUploadTooLarge = errors.New("uploaded file exceeds the size limit")
 
+// DefaultUploadName is what a name that sanitises to nothing becomes. Exported so a caller can
+// recognise it and substitute something better — an adapter that knows the file's declared type
+// can build a name with an extension, where this package can only avoid an empty one.
+const DefaultUploadName = "upload"
+
 // SanitizeUploadName reduces a client-supplied file name to a safe basename that
 // can never escape the uploads dir: it normalizes Windows-style "\" separators
 // (filepath.Base only handles the OS separator), takes path.Base, drops leading
 // dots so "..", "..." and dotfiles can't traverse or hide, trims whitespace, and
-// falls back to a default when nothing safe remains.
+// falls back to DefaultUploadName when nothing safe remains.
 func SanitizeUploadName(name string) string {
 	// Normalize Windows separators so "..\..\x" collapses too, then take the base.
 	// path.Base operates on slash-separated paths regardless of host OS, so it
@@ -42,7 +47,7 @@ func SanitizeUploadName(name string) string {
 	name = strings.TrimLeft(name, ".")
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return "upload"
+		return DefaultUploadName
 	}
 	return name
 }

@@ -9,8 +9,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -19,10 +22,11 @@ import (
 
 const (
 	requestTimeout = 65 * time.Second
-	// fileTimeout covers a whole download, body included, and is deliberately not
-	// requestTimeout. That one is sized for a 30-second long poll; reusing it here caps an
-	// upload-sized file at what fits in 65 seconds — 20 MiB needs a sustained 320 KB/s — and
-	// the user is then told to "try sending it again", which on that link never works. The
+	// fileTimeout covers a whole file transfer, body included, in either direction, and is
+	// deliberately not requestTimeout. That one is sized for a 30-second long poll; reusing it
+	// caps a file at what fits in 65 seconds — 20 MiB needs a sustained 320 KB/s. Inbound, the
+	// user is then told to "try sending it again", which on that link never works; outbound,
+	// the sweep leaves the file in outbox/ and re-uploads it from zero on every later run. The
 	// Telegram and VK adapters carry the same separate client for the same reason.
 	fileTimeout        = 120 * time.Second
 	maxResponseBytes   = 2 << 20
@@ -35,8 +39,9 @@ const (
 type Client struct {
 	base, token string
 	http        *http.Client
-	// fileHTTP reads file BYTES. A second client rather than a second timeout, because
-	// http.Client.Timeout is per-client and covers reading the body — see fileTimeout.
+	// fileHTTP carries file BYTES in BOTH directions — a download's response body and an
+	// upload's request body. A second client rather than a second timeout, because
+	// http.Client.Timeout is per-client and covers the body either way — see fileTimeout.
 	fileHTTP *http.Client
 }
 
@@ -117,12 +122,36 @@ func (c *Client) call(ctx context.Context, method string, body, out any) error {
 		return fmt.Errorf("LO request failed before receiving a response: %s", reason)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	result, err := c.envelope(resp)
+	if err != nil {
+		return err
+	}
+	if len(result) == 0 || string(result) == "null" {
+		return errors.New("LO response contains no result")
+	}
+	if err := json.Unmarshal(result, out); err != nil {
+		return errors.New("LO response contains an invalid result")
+	}
+	return nil
+}
+
+// envelope reads and classifies a Bot API response, returning the raw `result` for a caller
+// that needs one. Every request path goes through it — a JSON call and a multipart upload
+// alike — because the two must agree on three things a second copy always gets wrong: the
+// response size limit, the fact that an `error_code` of zero means "read the HTTP status",
+// and retry_after. That last one is not cosmetic where it is READ: RetryAfter feeds
+// deliverWithBackoff, which sleeps on APIError.Delay when a text send is rate-limited, so an
+// envelope that lost it would retry in a second a send the platform asked to hold for a minute.
+// On the UPLOAD path nothing reads it yet — the outbox sweep logs a failure and leaves the file
+// for the next run — and it is parsed there anyway for the reason the other two are: one parse
+// for every method, or two that drift.
+func (c *Client) envelope(resp *http.Response) (json.RawMessage, error) {
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
-		return errors.New("cannot read LO response")
+		return nil, errors.New("cannot read LO response")
 	}
 	if len(data) > maxResponseBytes {
-		return errors.New("LO response exceeds size limit")
+		return nil, errors.New("LO response exceeds size limit")
 	}
 	var envelope struct {
 		OK          bool            `json:"ok"`
@@ -135,9 +164,9 @@ func (c *Client) call(ctx context.Context, method string, body, out any) error {
 	}
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		if resp.StatusCode >= http.StatusMultipleChoices {
-			return &APIError{Code: resp.StatusCode, Description: "non-JSON HTTP error response"}
+			return nil, &APIError{Code: resp.StatusCode, Description: "non-JSON HTTP error response"}
 		}
-		return fmt.Errorf("LO returned an invalid API envelope (HTTP %d)", resp.StatusCode)
+		return nil, fmt.Errorf("LO returned an invalid API envelope (HTTP %d)", resp.StatusCode)
 	}
 	if !envelope.OK || resp.StatusCode != http.StatusOK {
 		code := envelope.Code
@@ -153,18 +182,12 @@ func (c *Client) call(ctx context.Context, method string, body, out any) error {
 		if delay > maxBackoffSeconds {
 			delay = maxBackoffSeconds
 		}
-		return &APIError{
+		return nil, &APIError{
 			Code: code, Description: strings.ReplaceAll(envelope.Description, c.token, "[redacted]"),
 			Delay: time.Duration(max(delay, 0)) * time.Second,
 		}
 	}
-	if len(envelope.Result) == 0 || string(envelope.Result) == "null" {
-		return errors.New("LO response contains no result")
-	}
-	if err := json.Unmarshal(envelope.Result, out); err != nil {
-		return errors.New("LO response contains an invalid result")
-	}
-	return nil
+	return envelope.Result, nil
 }
 
 // User is the Bot API actor; LO and Telegram IDs are independent.
@@ -436,4 +459,137 @@ func (c *Client) Download(ctx context.Context, filePath string) (io.ReadCloser, 
 		return nil, &APIError{Code: resp.StatusCode, Description: "file download refused"}
 	}
 	return resp.Body, nil
+}
+
+// UploadDocument posts a local file to the chat as a document.
+//
+// Multipart, not JSON: LO's sendDocument takes either a reference this platform minted or an
+// uploaded part, and an agent's artifact has no reference — it was produced here, not shown to
+// the bot.
+//
+// No caption parameter: the outbox delivers files on their own, the agent's words having
+// already gone out as the text answer. One is added when a caller has something to put in it,
+// not before — an unreachable branch cannot be tested and has to be explained forever.
+//
+// A deployment that has not implemented the method answers 501, and that status reaches the
+// operator inside the outbox sweep's "send outbox document" log line, beside every other send
+// failure. There is no branch that turns it into a distinct diagnosis — the flag is what keeps
+// a deployment without the method from trying in the first place.
+func (c *Client) UploadDocument(ctx context.Context, chatID int64, filename string, data io.Reader) error {
+	// The file is STREAMED, never buffered. Only the multipart frame around it is built in
+	// memory: a copy of the file here would put a peak of twice its size on the host for every
+	// concurrent delivery, and the size is an operator's setting (MAX_OUTBOX_BYTES), so the
+	// worst case is whatever number they picked — on the VPS these bots run on, that matters.
+	var frame bytes.Buffer
+	form := multipart.NewWriter(&frame)
+	if err := form.WriteField("chat_id", strconv.FormatInt(chatID, 10)); err != nil {
+		return fmt.Errorf("encode LO upload: %w", err)
+	}
+	// The name is what the user sees in the chat. Only its base travels: a path here would
+	// describe this machine's filesystem to everyone in the conversation.
+	if _, err := form.CreateFormFile("document", partName(filename)); err != nil {
+		return fmt.Errorf("encode LO upload: %w", err)
+	}
+	// Everything written so far precedes the file bytes; whatever Close appends follows them.
+	// Splitting the frame at this point is what lets the body be three readers in a row
+	// instead of one buffer holding the whole document.
+	prologue := bytes.Clone(frame.Bytes())
+	frame.Reset()
+	if err := form.Close(); err != nil {
+		return fmt.Errorf("encode LO upload: %w", err)
+	}
+	epilogue := frame.Bytes()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/bot"+c.token+"/sendDocument",
+		io.MultiReader(bytes.NewReader(prologue), data, bytes.NewReader(epilogue)))
+	if err != nil {
+		return errors.New("cannot construct LO upload request")
+	}
+	// A known length keeps the request on identity transfer-encoding. Streaming a body of
+	// unknown size makes Go chunk it, and a chunked multipart upload is the kind of thing a
+	// proxy in front of the platform may refuse — not something to discover in production.
+	if size, ok := readerLength(data); ok {
+		req.ContentLength = int64(len(prologue)) + size + int64(len(epilogue))
+	}
+	req.Header.Set("Content-Type", form.FormDataContentType())
+
+	// fileHTTP, not http: Timeout covers writing the request BODY as well, so an upload on the
+	// short client dies at the same 65 seconds a download did. Worse here than there, because a
+	// failed delivery leaves the file in outbox/ and the next run uploads it again from zero —
+	// a loop that never converges and burns the link on every run, silently.
+	resp, err := c.fileHTTP.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err // The outer URL carries the bot credential.
+		}
+		return fmt.Errorf("LO upload failed: %s", strings.ReplaceAll(err.Error(), c.token, "[REDACTED]"))
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// The sent Message is discarded on purpose: the outbox has nothing to do with a delivered
+	// file beyond knowing it arrived, and an absent result is not a failure here.
+	_, err = c.envelope(resp)
+	return err
+}
+
+// readerLength reports how many bytes a reader still holds, for the readers that can say. An
+// outbox delivery is always an *os.File the sweeper has just stat-ed and opened; the rest are
+// here so a test exercises the same request shape production does.
+func readerLength(data io.Reader) (int64, bool) {
+	switch v := data.(type) {
+	case *os.File:
+		info, err := v.Stat()
+		if err != nil || !info.Mode().IsRegular() {
+			return 0, false
+		}
+		// A file that has already been partly read has fewer bytes left than it has in total.
+		pos, err := v.Seek(0, io.SeekCurrent)
+		if err != nil || pos > info.Size() {
+			return 0, false
+		}
+		return info.Size() - pos, true
+	case *bytes.Reader:
+		return int64(v.Len()), true
+	case *bytes.Buffer:
+		return int64(v.Len()), true
+	case *strings.Reader:
+		return int64(v.Len()), true
+	}
+	return 0, false
+}
+
+// partName reduces an outbound file name to something safe to put in a multipart header.
+//
+// filepath.Base strips the path and nothing else, and mime/multipart escapes only backslash and
+// quote — it does not check header values for CRLF. A name carrying "\r\n" would therefore
+// append a header of its own to the part, and "\r\n\r\n" would close the header block and
+// push the rest of the name into the file's bytes. Nobody can redirect the message that way
+// (the boundary is random and the chat_id is already written), but the request and the file
+// arrive corrupted, and these names come from an agent writing into the outbox directory,
+// where a newline is a legal character on Linux.
+//
+// The empty result also covers filepath.Base("") == ".", which names a directory.
+func partName(filename string) string {
+	name := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, filepath.Base(strings.ReplaceAll(filename, `\`, "/")))
+	// Backslashes are folded to "/" FIRST, because filepath.Base only knows this OS's separator
+	// and `..\..\etc\passwd` is a legal file name on Linux — the agent writes these names, so
+	// the header would carry the whole path. fsutil does exactly this for the inbound
+	// direction, with the same one-line reason; the two must not drift.
+	//
+	// The trim set is the inbound path's too. filepath.Base("/") answers "/", which a trim of
+	// dots and spaces leaves intact — a bare separator in the header is the other name this
+	// guard exists to keep out.
+	if strings.Trim(name, `./\ `) == "" {
+		return "file"
+	}
+	return name
 }
