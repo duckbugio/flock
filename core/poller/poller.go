@@ -28,8 +28,13 @@ type PRComment struct {
 	Author  string
 }
 
+// RouteFilter limits notifications to checkouts owned by the receiving adapter.
+// Rejected notifications stay unread so another adapter can consume them.
+type RouteFilter func(chatID, repo, branch string) bool
+
 // Config configures the poller.
 type Config struct {
+	Accept    RouteFilter   // nil preserves unrestricted legacy routing
 	BaseURL   string        // GITEA_API_URL (trailing slash trimmed)
 	Token     string        // GIT_TOKEN — sent as "Authorization: token <token>"
 	SelfLogin string        // GIT_USER, lowercased — comments by this login are ignored (no self-trigger)
@@ -47,6 +52,7 @@ const defaultClientTimeout = 20 * time.Second
 
 // poller holds the resolved runtime state for one Run.
 type poller struct {
+	accept    RouteFilter
 	base      string
 	token     string
 	selfLogin string
@@ -71,6 +77,7 @@ func Run(ctx context.Context, cfg Config, out chan<- PRComment) error {
 		log = slog.Default()
 	}
 	p := &poller{
+		accept:    cfg.Accept,
 		base:      strings.TrimRight(cfg.BaseURL, "/"),
 		token:     cfg.Token,
 		selfLogin: cfg.SelfLogin,
@@ -151,7 +158,9 @@ func (p *poller) pollOnce(ctx context.Context, out chan<- PRComment) {
 func (p *poller) handleThread(ctx context.Context, t *notification, out chan<- PRComment) error {
 	threadID := t.ID.String()
 	if t.Subject.URL == "" {
-		p.markRead(ctx, threadID)
+		if p.accept == nil {
+			p.markRead(ctx, threadID)
+		}
 		return nil
 	}
 
@@ -166,13 +175,20 @@ func (p *poller) handleThread(ctx context.Context, t *notification, out chan<- P
 		// Transient — leave unread, retry next cycle.
 		return nil
 	}
+	repo := pr.Base.Repo.FullName
+	if repo == "" {
+		repo = t.Repository.FullName
+	}
+	ref := pr.Head.Ref
+	chatID, ok := teambranch.ChatID(ref)
+	if p.accept != nil && (!ok || !p.accept(chatID, repo, ref)) {
+		return nil
+	}
 	// Only act on OPEN PRs — the human merges; nothing to fix on a merged/closed PR.
 	if pr.State != "open" || pr.Merged {
 		p.markRead(ctx, threadID)
 		return nil
 	}
-	ref := pr.Head.Ref
-	chatID, ok := teambranch.ChatID(ref)
 	if !ok {
 		p.markRead(ctx, threadID) // not a (routable) team branch — clear it
 		return nil
@@ -194,11 +210,6 @@ func (p *poller) handleThread(ctx context.Context, t *notification, out chan<- P
 	if author != "" && p.selfLogin != "" && author == p.selfLogin {
 		p.markRead(ctx, threadID)
 		return nil
-	}
-
-	repo := pr.Base.Repo.FullName
-	if repo == "" {
-		repo = t.Repository.FullName
 	}
 
 	select {

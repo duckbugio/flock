@@ -64,7 +64,9 @@ startup-check errors remain fatal. `getUpdates`
 retains queued messages, advances the offset after dispatch, and does not request
 callback/edited-message updates it cannot handle. As with ordinary long polling,
 a crash before the next offset acknowledgement can redeliver the last batch;
-this adapter does not promise exactly-once agent execution or automatic resume.
+this adapter does not promise exactly-once agent execution. Interrupted and queued runs
+are persisted and resumed on startup before new messages or background events.
+Startup refuses an unreadable pending store instead of silently losing recovery.
 
 ## Behavior
 
@@ -124,16 +126,13 @@ this adapter does not promise exactly-once agent execution or automatic resume.
   MIME type (`document_<id>.pdf`, and `.bin` for anything outside the short table of types a
   chat carries — `documentExtensions` in `media.go`) — an extensionless path is the same opaque
   id this whole paragraph exists to avoid.
-- **Every other attachment gets its own sentence and stops the run.** Answering the caption
-  without the file it refers to produces a confident answer about nothing, so the adapter
-  refuses instead. The sentences differ by what is actually known. Audio and video answer
-  `getFile` WITHOUT a `file_path` by design — an LO audio is a catalogue track, so no address
-  for the bytes exists — and can only be echoed by reference. Voice, video notes and animations
-  say only that this adapter does not read them yet: the `501` on the platform is about SENDING
-  them, which is the OUTGOING direction, and whether `getFile` serves their bytes is a separate
-  question this change does not answer. Stickers get their own sentence and a different one —
-  the bytes exist, but a sticker carries nothing an agent can act on, so the answer asks for
-  the request as text.
+- **Voice input** uses `ENABLE_VOICE_MESSAGES` and the shared `VOICE_PROVIDER` configuration.
+  Allowed senders pass mention and rate/cost guards before downloading or transcribing.
+  `getFile` must expose bytes, and `MAX_UPLOAD_BYTES` caps both declared and streamed size
+  before the paid transcription call. Empty transcripts, missing bytes and provider failures
+  produce a notice and never start an agent. LO must include the inbound voice relay implementation.
+- **Other unsupported attachments** get a per-kind explanation and stop the run.
+  The adapter does not answer a caption while pretending to have read unavailable media.
 - **Outbound files are opt-in via `LO_ENABLE_DOCUMENTS`.** With it off (the default) the
   outbox sweep stays disabled and agent-created files remain in the workspace — the honest
   behaviour on a LO that predates `sendDocument`, which answers `501`. With it on, artifacts
@@ -145,9 +144,15 @@ this adapter does not promise exactly-once agent execution or automatic resume.
   posts every regular file through `sendDocument`, a screenshot included, which is what the
   workspace's screenshot convention already promises the agent. Native callback buttons, rich
   messages and the interactive star nudge are unavailable.
-- The LO command does not yet wire Telegram's interrupted-run recovery, CI watch
-  or PR-comment polling. These are **Flock adapter gaps**, not missing LO API
-  methods. The scheduler and goal evaluator are supported.
+- Interrupted-run recovery replays the durable per-chat FIFO before polling starts;
+  markers remain until a clean terminal result. A missing old progress message does not block replay.
+- `ENABLE_CI_WATCH` enables the shared GitHub/Gitea watcher; `ENABLE_AUTO_MERGE` retains its
+  explicit opt-in behavior. Watch state lives in the LO namespace by default.
+- Gitea PR-comment polling uses `ENABLE_PR_REVIEW`, `GITEA_API_URL` and `GIT_TOKEN`.
+  Only an exact repository, branch and chat match in the LO workspace can trigger a run.
+  Unowned notifications stay unread. CI and review-triggered runs use the shared autonomy budget.
+  Use separate git accounts for adapters if both consume notifications: older adapters may
+  still acknowledge all routable team notifications from a shared account.
 
 The shared chunker currently measures runes rather than UTF-16. LO advertises a
 conservative 2048-rune limit, guaranteeing every chunk fits 4096 UTF-16 units even

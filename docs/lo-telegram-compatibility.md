@@ -31,8 +31,8 @@ Flock live delivery remains to be verified with a dedicated bot token.
 | Native quoted reply | `reply_parameters` and legacy reply fields rejected | Completion notice is a separate message; inbound quoted text is included in the prompt when supplied |
 | Inbound photos | `getFile` returns a `file_path` for photos; bytes at `<base>/file/bot<token>/<file_path>` | Largest size downloaded into the chat's uploads dir, capped by `MAX_UPLOAD_BYTES`; the prompt carries the saved path AND the picture itself travels as a vision block, so the model sees it rather than a file name. The saved name is corrected to what the bytes actually are, and bytes that are not an image at all are refused with the download-failure sentence |
 | Inbound audio / video | `getFile` answers the reference WITHOUT a `file_path` (no address for the bytes exists) | Per-kind notice; the run is refused rather than answered without the file |
-| Inbound documents (where implemented) | `getFile` returns a `file_path` for documents; bytes at `<base>/file/bot<token>/<file_path>`. NOT yet on any deployed LO: the server side is LO/messenger#343, still open | Downloaded into the chat's uploads dir under the sender's own file name, capped by `MAX_UPLOAD_BYTES`; a nameless document is renamed from its declared MIME type; a reference served without bytes gets its own notice |
-| Outbound files / generated artifacts (where implemented) | `sendDocument` accepts a multipart upload where it is implemented and answers 501 where it is not. The implementation is LO/messenger#342, still open | Opt-in `LO_ENABLE_DOCUMENTS`; off by default, and with it off the agent's workspace instructions say the chat cannot deliver attachments so nothing is promised. On, the outbox sweep uploads each artifact after the run |
+| Inbound documents (where implemented) | `getFile` returns a `file_path` for documents; bytes at `<base>/file/bot<token>/<file_path>`. Server implementation merged as LO/messenger#343; live acceptance remains to be verified | Downloaded into the chat's uploads dir under the sender's own file name, capped by `MAX_UPLOAD_BYTES`; a nameless document is renamed from its declared MIME type; a reference served without bytes gets its own notice |
+| Outbound files / generated artifacts (where implemented) | `sendDocument` accepts a multipart upload where it is implemented and answers 501 where it is not. Server implementation merged as LO/messenger#342; live acceptance remains to be verified | Opt-in `LO_ENABLE_DOCUMENTS`; off by default, and with it off the agent's workspace instructions say the chat cannot deliver attachments so nothing is promised. On, the outbox sweep uploads each artifact after the run |
 | Outbound photos | `sendPhoto`'s upload branch answered 500 on the deployments exercised | Not attempted; an image the agent produces is delivered as a document |
 | Provider slash commands | No platform-specific requirement | Non-reserved commands such as `/loop` reach the configured agent backend |
 | Goals and scheduled work | Uses normal bot messaging | Shared Flock goal and scheduler services wired |
@@ -53,8 +53,8 @@ LO draft support is private-chat-only; groups use the persistent anchor fallback
    confirmation and navigation flows used by existing Telegram bots.
 3. **Documents and inbound media:** inbound photos and documents and the outbound
    document upload are done, the latter behind `LO_ENABLE_DOCUMENTS`. What remains
-   is the rest of the media surface: voice messages, media groups, and the
-   `sendPhoto` upload branch, none of which the adapter can use yet.
+   is deployed acceptance for voice input, media groups and the `sendPhoto` upload branch.
+   The adapter now supports voice transcription when enabled and served by the platform.
 4. **Formatting and reply parity:** wire the adapter to implemented parse modes/entities
    and complete native reply fields with visible client rendering. Test code blocks, escaping, emoji offsets,
    quote targets and edit behavior, not merely accepted JSON.
@@ -70,9 +70,9 @@ its own integration test and is outside this chatbot adapter.
 
 These are adapter/runtime limitations, not evidence of missing LO endpoints:
 
-- The LO entry point does not yet wire Flock's PR-comment polling, CI watcher,
-  pending-run restart recovery or star nudges. Do not advertise full operational
-  parity with the Telegram entry point.
+- Interrupted-run recovery, CI watch and scoped Gitea PR-comment polling are wired.
+  Review-triggered runs and CI events use the shared autonomy budget. Star nudges still
+  require callback support. Production acceptance remains separate from local contract tests.
 - Polling advances its in-memory offset after admission, not after an agent run
   completes. A restart can redeliver the last unacknowledged batch; this is not an
   exactly-once job queue. Run one polling instance per bot token.
@@ -93,10 +93,9 @@ cleanup failure), progress size limits,
 fallback to the persistent anchor and workspace instructions whose file-delivery
 promises follow the documents flag.
 
-The two document rows above describe what the adapter does WHERE the platform serves it. No
-deployed LO does yet — both server changes are open pull requests, named in the rows — which is
-why `LO_ENABLE_DOCUMENTS` is off by default. The validation note below covers this repository's
-own gate, not a live document round trip.
+The document rows describe behavior where the platform serves those methods. Both server
+changes are merged; source merge and publication do not establish a live document round trip.
+`LO_ENABLE_DOCUMENTS` remains off until the operator verifies the deployment.
 
 Validation passed on 2026-09-06 using the repository dev-tools image (Go 1.26.6):
 
