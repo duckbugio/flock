@@ -135,9 +135,10 @@ func TestSendDocumentErrorsCarryNoToken(t *testing.T) {
 }
 
 // The upload path shares the response envelope with every other method, so a 429 that names a
-// delay must survive it. Nothing re-sends a document by that delay yet — the outbox sweep just
-// leaves the file for the next run — so what this pins is the parsing: one envelope for every
-// method, rather than a second copy that answers a zero Delay where the first answers sixty.
+// delay must survive it. Nothing re-sends a DOCUMENT by that delay yet — the outbox sweep just
+// leaves the file for the next run — but the text path does (deliverWithBackoff sleeps on it),
+// and what this pins is that one envelope answers both rather than a second copy that reports
+// a zero Delay where the first reports sixty.
 func TestUploadRetryDelaySurvivesTheEnvelope(t *testing.T) {
 	t.Parallel()
 	api := client(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -245,6 +246,9 @@ func TestUploadSanitisesTheNameItPutsInTheHeader(t *testing.T) {
 		"only dots":        {"..", "file"},
 		// filepath.Base("/") answers "/", which a trim of dots and spaces leaves whole.
 		"bare separator": {"/", "file"},
+		// Legal on Linux, and filepath.Base does not treat it as a separator — the names in
+		// outbox/ are the agent's, so the whole path would otherwise ride in the header.
+		"windows separators": {`..\..\etc\passwd`, "passwd"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

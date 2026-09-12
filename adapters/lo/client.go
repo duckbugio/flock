@@ -139,9 +139,12 @@ func (c *Client) call(ctx context.Context, method string, body, out any) error {
 // that needs one. Every request path goes through it — a JSON call and a multipart upload
 // alike — because the two must agree on three things a second copy always gets wrong: the
 // response size limit, the fact that an `error_code` of zero means "read the HTTP status",
-// and retry_after. The last one carries no consequence TODAY — nothing re-sends a document by
-// Delay; the outbox sweep logs a failure and leaves the file for the next run — so the field is
-// filled for the same reason the other two are: one parse for every method, or two that drift.
+// and retry_after. That last one is not cosmetic where it is READ: RetryAfter feeds
+// deliverWithBackoff, which sleeps on APIError.Delay when a text send is rate-limited, so an
+// envelope that lost it would retry in a second a send the platform asked to hold for a minute.
+// On the UPLOAD path nothing reads it yet — the outbox sweep logs a failure and leaves the file
+// for the next run — and it is parsed there anyway for the reason the other two are: one parse
+// for every method, or two that drift.
 func (c *Client) envelope(resp *http.Response) (json.RawMessage, error) {
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
@@ -576,10 +579,15 @@ func partName(filename string) string {
 			return -1
 		}
 		return r
-	}, filepath.Base(filename))
-	// The same character set the inbound path trims. filepath.Base("/") answers "/", which a
-	// trim of dots and spaces leaves intact — and a bare separator in the header is exactly the
-	// name this guard exists to keep out.
+	}, filepath.Base(strings.ReplaceAll(filename, `\`, "/")))
+	// Backslashes are folded to "/" FIRST, because filepath.Base only knows this OS's separator
+	// and `..\..\etc\passwd` is a legal file name on Linux — the agent writes these names, so
+	// the header would carry the whole path. fsutil does exactly this for the inbound
+	// direction, with the same one-line reason; the two must not drift.
+	//
+	// The trim set is the inbound path's too. filepath.Base("/") answers "/", which a trim of
+	// dots and spaces leaves intact — a bare separator in the header is the other name this
+	// guard exists to keep out.
 	if strings.Trim(name, `./\ `) == "" {
 		return "file"
 	}
