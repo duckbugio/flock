@@ -82,6 +82,9 @@ func voiceReference(msg *Message) string {
 
 func (r *Receiver) handleVoice(ctx context.Context, msg *Message, chatID string, replyToBot bool, fileID string) {
 	transcript, err := r.cfg.Voice.Transcribe(ctx, fileID)
+	if ctx.Err() != nil {
+		return
+	}
 	if err != nil {
 		r.cfg.Logger.Warn("lo: voice transcription failed", "error", err)
 		note := "Sorry, I couldn't transcribe that voice message. Please send the request as text."
@@ -97,6 +100,12 @@ func (r *Receiver) handleVoice(ctx context.Context, msg *Message, chatID string,
 	transcript = strings.TrimSpace(transcript)
 	if transcript == "" {
 		r.notify(ctx, chatID, "Sorry, I couldn't make out that voice message. Please send the request as text.")
+		return
+	}
+	// Serialize the handoff with /stop so a late provider response cannot start a new run.
+	r.voiceMu.Lock()
+	defer r.voiceMu.Unlock()
+	if ctx.Err() != nil {
 		return
 	}
 	r.cfg.Service.Handle(ctx, chatID, msg.From.ID, strconv.FormatInt(msg.ID, 10), replyPrompt(msg, replyToBot, transcript))

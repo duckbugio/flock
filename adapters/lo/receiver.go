@@ -11,11 +11,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/chat"
+	"github.com/duckbugio/flock/core/dispatch"
 	"github.com/duckbugio/flock/core/goal"
+	"github.com/duckbugio/flock/core/pending"
 	"github.com/duckbugio/flock/core/schedule"
 	"github.com/duckbugio/flock/internal/fsutil"
 )
@@ -58,12 +61,19 @@ type ReceiverConfig struct {
 	// notice it got before — the adapter must still run where no workspace is wired.
 	Uploads *Uploader
 	// Voice is optional; transcription is attempted only after admission and cost guards.
-	Voice  VoiceInput
-	Logger *slog.Logger
+	Voice VoiceInput
+	// VoiceStore enables bounded, durable asynchronous transcription.
+	VoiceStore       pending.Store
+	VoiceConcurrency int
+	Logger           *slog.Logger
 }
 
 // Receiver serially admits updates while the shared dispatcher runs chats concurrently.
-type Receiver struct{ cfg ReceiverConfig }
+type Receiver struct {
+	cfg       ReceiverConfig
+	voiceJobs *dispatch.Dispatcher
+	voiceMu   sync.Mutex
+}
 
 // NewReceiver defaults to denying users unless an allow-list is wired.
 func NewReceiver(cfg ReceiverConfig) *Receiver {
@@ -76,12 +86,20 @@ func NewReceiver(cfg ReceiverConfig) *Receiver {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	return &Receiver{cfg: cfg}
+	receiver := &Receiver{cfg: cfg}
+	if cfg.Voice != nil && cfg.VoiceStore != nil {
+		receiver.voiceJobs = dispatch.New(cfg.VoiceConcurrency)
+	}
+	return receiver
 }
 
 // Run uses normal positive-offset acknowledgement, retaining queued updates on startup.
 // Only one polling process should run for a bot token; persistent conflicts stop polling.
 func (r *Receiver) Run(ctx context.Context) error {
+	if r.voiceJobs != nil {
+		defer r.voiceJobs.Close()
+		r.resumeVoice(ctx)
+	}
 	var offset int64
 	conflicts := 0
 	for ctx.Err() == nil {
@@ -209,6 +227,10 @@ func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
 		}
 	}
 	if isVoice {
+		if r.voiceJobs != nil {
+			r.queueVoice(ctx, msg, chatID, replyToBot, fileID)
+			return
+		}
 		r.handleVoice(ctx, msg, chatID, replyToBot, fileID)
 		return
 	}

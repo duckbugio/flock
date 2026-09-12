@@ -20,8 +20,8 @@ const HelpText = `Flock LO assistant
 /schedule — manage scheduled jobs
 
 Send text to work with the assistant. Use /stop instead of a Stop button.
-Send a photo, with or without a caption, and I will look at it. Other attachments,
-rich messages and native replies are not supported yet.`
+Send a photo or document to work with its contents. Voice messages are transcribed
+when enabled. Rich messages and native replies are not supported yet.`
 
 func (r *Receiver) reserved(ctx context.Context, chatID string, userID int64, name, args string) {
 	switch name {
@@ -29,11 +29,13 @@ func (r *Receiver) reserved(ctx context.Context, chatID string, userID int64, na
 		r.notify(ctx, chatID, HelpText)
 	case "stop":
 		text := "No active run."
-		if r.cfg.Service.StopChat(chatID) {
+		voiceStopped := r.cancelVoice(chatID)
+		if r.cfg.Service.StopChat(chatID) || voiceStopped {
 			text = "Stopping the current run."
 		}
 		r.notify(ctx, chatID, text)
 	case "new":
+		r.cancelVoice(chatID)
 		if err := r.cfg.Service.NewSession(chatID); err != nil {
 			r.cfg.Logger.Warn("lo: reset session failed", "error", err)
 			r.notify(ctx, chatID, "Could not reset the session. Please retry.")

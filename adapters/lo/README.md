@@ -68,6 +68,14 @@ this adapter does not promise exactly-once agent execution. Interrupted and queu
 are persisted and resumed on startup before new messages or background events.
 Startup refuses an unreadable pending store instead of silently losing recovery.
 
+With voice input enabled, raw message references are persisted separately in
+`voice-inputs.json` before asynchronous transcription. Up to 32 voice messages
+can wait across chats; excess requests receive a busy notice. Transcription does
+not block polling, `/stop`, or `/new`. Both commands cancel that chat's voice
+queue, including late provider results. Restart replays interrupted preparation
+after checking the sender's current access. A crash during the handoff to the
+agent's pending store can replay work; this is at-least-once recovery.
+
 ## Behavior
 
 - Private chats and groups; group prompts require an exact `@botname` token or
