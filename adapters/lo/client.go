@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
@@ -213,8 +214,15 @@ func RawAttachment(fileID string) json.RawMessage {
 // nor JSON null, nor an empty object or array. Everything this adapter does with the kinds it
 // cannot read needs exactly this and nothing more.
 func present(raw json.RawMessage) bool {
-	trimmed := strings.TrimSpace(string(raw))
-	switch trimmed {
+	// Whitespace is dropped everywhere, not only at the ends: `{ }` and `{}` are the same
+	// empty object on the wire, and a check that told them apart would be reading formatting.
+	compact := strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, string(raw))
+	switch compact {
 	case "", "null", "{}", "[]":
 		return false
 	}

@@ -476,4 +476,37 @@ func TestUnrecognisedPhotoBytesAreKept(t *testing.T) {
 	if _, err := os.Stat(savedPathFrom(t, svc.prompts[0])); err != nil {
 		t.Fatalf("the file the prompt names is gone: %v", err)
 	}
+	// The PATH travels, the vision block does not: core/chat derives the block's media type
+	// from the saved name, and nothing here identified these bytes — claiming image/jpeg on
+	// the strength of a name this adapter invented is the lie the whole sniff exists to stop.
+	for i, block := range svc.images {
+		if len(block) != 0 {
+			t.Fatalf("run %d carried %d images, want none for bytes nobody identified", i, len(block))
+		}
+	}
+}
+
+// Bot API fills `document` ALONGSIDE `animation` for a GIF, so the arm that answers documents
+// has to come last: otherwise someone who sent an animation is told about documents.
+func TestAnimationIsAnsweredAsAnAnimationNotAsADocument(t *testing.T) {
+	t.Parallel()
+	svc := &serviceSpy{}
+	api, notices := photoAPI(t, "")
+	receiver := lo.NewReceiver(lo.ReceiverConfig{
+		Service: svc, Client: api, Transport: lo.NewTransport(api, false),
+		IsAllowed: func(int64) bool { return true },
+		Uploads:   lo.NewUploader(api, fakeUploads{dir: t.TempDir()}, 0, nil),
+	})
+
+	msg := inbound("что тут")
+	msg.Animation = lo.RawAttachment("g")
+	msg.Document = &lo.Attachment{FileID: "g", FileName: "loop.gif", MimeType: "video/mp4"}
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
+
+	if len(svc.prompts) != 0 {
+		t.Fatalf("prompts=%v, want no run", svc.prompts)
+	}
+	if len(*notices) != 1 || !strings.Contains((*notices)[0], "animations") {
+		t.Fatalf("notices=%v, want the animation sentence, not the document one", *notices)
+	}
 }

@@ -206,7 +206,7 @@ func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
 	// Attachments are answered BEFORE the empty-text check: a photo with no caption is a
 	// complete request ("look at this"), and dropping it silently is what made the bot
 	// look broken.
-	saved, note := r.attachments(ctx, msg, chatID)
+	saved, confirmed, note := r.attachments(ctx, msg, chatID)
 	if note != "" {
 		// The file the request rests on never reached the agent, so the caption must not be
 		// answered on its own: "review this file" without the file invites a confident answer
@@ -218,7 +218,7 @@ func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
 		return
 	}
 	if saved != "" {
-		r.handlePhoto(ctx, msg, chatID, replyToBot, text, saved)
+		r.handlePhoto(ctx, msg, chatID, replyToBot, text, saved, confirmed)
 		return
 	}
 	r.cfg.Service.Handle(ctx, chatID, msg.From.ID, strconv.FormatInt(msg.ID, 10),
@@ -236,12 +236,21 @@ func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
 // A failed read falls back to the path alone rather than refusing: the file IS on disk and the
 // agent can still open it, so losing vision is a degradation, not a dead request. VK makes the
 // same fallback, in the same place.
-func (r *Receiver) handlePhoto(ctx context.Context, msg *Message, chatID string, replyToBot bool, text, saved string) {
+//
+// confirmed is the same fallback for a different reason: the vision block carries a media type
+// derived from the saved NAME, so it may only be built when the bytes were identified and the
+// name agrees with them. Bytes nothing could identify travel as a path, never as a claim.
+func (r *Receiver) handlePhoto(
+	ctx context.Context, msg *Message, chatID string, replyToBot bool, text, saved string, confirmed bool,
+) {
 	prompt := replyPrompt(msg, replyToBot, chat.PhotoPrompt(saved, text))
-	images, err := chat.LoadPhotoImage(saved)
-	if err != nil {
-		r.cfg.Logger.Warn("lo: load photo for vision failed; sending the path only", "error", err)
-		images = nil
+	var images []agent.ImageInput
+	if confirmed {
+		loaded, err := chat.LoadPhotoImage(saved)
+		if err != nil {
+			r.cfg.Logger.Warn("lo: load photo for vision failed; sending the path only", "error", err)
+		}
+		images = loaded
 	}
 	r.cfg.Service.HandleMedia(ctx, chatID, msg.From.ID, strconv.FormatInt(msg.ID, 10), prompt, images)
 }
@@ -274,16 +283,6 @@ var unservedKinds = []struct {
 	notice string
 }{
 	{
-		has: func(m *Message) bool { return m.Document != nil },
-		// Says what this ADAPTER does, not what the platform cannot do. The evidence for the
-		// platform claim would have been sendDocument's 501, and that is the OUTGOING method:
-		// whether getFile answers a document reference with a file_path is a separate
-		// question, unverified when this line was written, and answered by the change that
-		// follows it.
-		notice: "I cannot read documents yet. " +
-			"Paste the text, or point me at the file in a repository.",
-	},
-	{
 		has:    func(m *Message) bool { return present(m.Voice) },
 		notice: "I cannot listen to voice messages on LO yet. Please send the request as text.",
 	},
@@ -306,6 +305,20 @@ var unservedKinds = []struct {
 		notice: "I cannot open animations on LO yet. A still screenshot sent as a photo works.",
 	},
 	{
+		// LAST of the refusals, and deliberately: Bot API fills `document` ALONGSIDE
+		// `animation` for a GIF and alongside `video_note` for a round video, so a document
+		// arm placed first would answer "I cannot read documents" to someone who sent an
+		// animation. Every kind with a name of its own is answered by that name first.
+		has: func(m *Message) bool { return m.Document != nil },
+		// Says what this ADAPTER does, not what the platform cannot do. The evidence for the
+		// platform claim would have been sendDocument's 501, and that is the OUTGOING method:
+		// whether getFile answers a document reference with a file_path is a separate
+		// question, unverified when this line was written, and answered by the change that
+		// follows it.
+		notice: "I cannot read documents yet. " +
+			"Paste the text, or point me at the file in a repository.",
+	},
+	{
 		has:    func(m *Message) bool { return present(m.Sticker) },
 		notice: "Stickers carry nothing I can act on. Please send the request as text.",
 	},
@@ -317,7 +330,9 @@ var unservedKinds = []struct {
 //
 // A download failure is a NOTICE, never a dropped message: the user watched their file
 // arrive and deserves to know it did not reach the agent.
-func (r *Receiver) attachments(ctx context.Context, msg *Message, chatID string) (saved, notice string) {
+func (r *Receiver) attachments(
+	ctx context.Context, msg *Message, chatID string,
+) (saved string, confirmed bool, notice string) {
 	// LargestPhoto is the ONLY reader of msg.Photo here, deliberately. hasServedMedia counts a
 	// non-empty array as work and spends guard budget on it, so a ladder whose every rung
 	// lacks a file_id must still end in a sentence — otherwise the message is dropped in
@@ -326,24 +341,24 @@ func (r *Receiver) attachments(ctx context.Context, msg *Message, chatID string)
 	if len(msg.Photo) == 0 {
 		// No unserved-kind arm either: those are answered before the guards, without touching
 		// the network. See unservedNotice.
-		return "", ""
+		return "", false, ""
 	}
 	size, ok := LargestPhoto(msg.Photo)
 	if !ok {
-		return "", "I could not read that image. Please send it again."
+		return "", false, "I could not read that image. Please send it again."
 	}
 	if r.cfg.Uploads == nil {
-		return "", "I cannot read images in this deployment: no uploads directory is configured."
+		return "", false, "I cannot read images in this deployment: no uploads directory is configured."
 	}
 	path, err := r.cfg.Uploads.Save(ctx, chatID, size.FileID, photoFileName(msg.ID))
 	switch {
 	case errors.Is(err, ErrUploadTooLarge):
-		return "", "That image is too large for me to open. Please send a smaller one."
+		return "", false, "That image is too large for me to open. Please send a smaller one."
 	case errors.Is(err, ErrNoBytes):
-		return "", "LO did not hand me the bytes of that image, so I cannot open it."
+		return "", false, "LO did not hand me the bytes of that image, so I cannot open it."
 	case err != nil:
 		r.cfg.Logger.Warn("lo: photo download failed", "error", err)
-		return "", "I could not download that image. Please try sending it again."
+		return "", false, "I could not download that image. Please try sending it again."
 	}
 	return r.checkPhotoBytes(path)
 }
@@ -367,22 +382,28 @@ func (r *Receiver) attachments(ctx context.Context, msg *Message, chatID string)
 // DetectContentType does not recognise — and the file stays with the name it had. Deleting a
 // picture because this adapter could not identify it would lose a file that may be perfectly
 // readable.
-func (r *Receiver) checkPhotoBytes(path string) (saved, notice string) {
+func (r *Receiver) checkPhotoBytes(path string) (saved string, confirmed bool, notice string) {
 	path, detected := nameByContent(path, r.cfg.Logger)
 	switch {
+	case photoExtensions[detected] != "" && strings.HasSuffix(path, photoExtensions[detected]):
+		// The only case the model is SHOWN: the bytes were identified and the name on disk
+		// agrees with them, so the media type core/chat derives from that name is true.
+		return path, true, ""
 	case detected == "" || detected == "application/octet-stream":
-		return path, ""
-	case photoExtensions[detected] != "":
-		return path, ""
+		// Unidentified, or the rename failed. The file is real and may well be readable — the
+		// agent can open it — but nothing here knows what it IS, and core/chat would tell the
+		// model "image/jpeg" on the strength of a name this adapter invented. The run goes
+		// ahead on the PATH alone.
+		return path, false, ""
 	case strings.HasPrefix(detected, "image/"):
 		r.removeUnreadable(path)
-		return "", "I cannot read " + detected + " images. Please send it as PNG or JPEG."
+		return "", false, "I cannot read " + detected + " images. Please send it as PNG or JPEG."
 	case detected == emptyFileType:
 		r.removeUnreadable(path)
-		return "", "That image arrived empty. Please try sending it again."
+		return "", false, "That image arrived empty. Please try sending it again."
 	}
 	r.removeUnreadable(path)
-	return "", "I could not download that image. Please try sending it again."
+	return "", false, "I could not download that image. Please try sending it again."
 }
 
 // removeUnreadable drops a saved file the agent will never be shown, so a refused picture does
