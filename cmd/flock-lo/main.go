@@ -177,18 +177,30 @@ func run() int {
 	// uploads directory, a sibling of the cloned repositories, so user media is not
 	// swept into a commit. Missing media bytes get a specific explanatory notice.
 	uploads := lo.NewUploader(api, ws, cfg.MaxUploadBytes, logger)
+	voiceInput := buildVoice(cfg, api, logger)
+	var voiceStore pending.Store
+	if voiceInput != nil {
+		stored, err := pending.Open(filepath.Join(cfg.ApprovedDirectory, "voice-inputs.json"))
+		if err != nil {
+			logger.Error("open pending voice inputs", "error", err)
+			return 1
+		}
+		voiceStore = stored
+	}
 	receiver := lo.NewReceiver(lo.ReceiverConfig{
-		Service:        svc,
-		Client:         api,
-		Transport:      transport,
-		Username:       self.Username,
-		BotID:          self.ID,
-		IsAllowed:      cfg.IsLOAllowed,
-		RequireMention: cfg.RequireGroupMention,
-		Scheduler:      scheduler,
-		Uploads:        uploads,
-		Voice:          buildVoice(cfg, api, logger),
-		Logger:         logger,
+		Service:          svc,
+		Client:           api,
+		Transport:        transport,
+		Username:         self.Username,
+		BotID:            self.ID,
+		IsAllowed:        cfg.IsLOAllowed,
+		RequireMention:   cfg.RequireGroupMention,
+		Scheduler:        scheduler,
+		Uploads:          uploads,
+		Voice:            voiceInput,
+		VoiceStore:       voiceStore,
+		VoiceConcurrency: cfg.MaxConcurrentChatRuns,
+		Logger:           logger,
 		Guards: func(id int64) (bool, string) {
 			return chat.CheckGuards(limiter, costs, chat.GuardConfig{CostCapUSD: cfg.EffectiveCostCapUSD()}, id)
 		},
