@@ -155,6 +155,11 @@ func run() int {
 	})
 	autonomy.StartFollowups(ctx, svc, postRun, logger)
 	scheduler := startScheduler(ctx, cfg, svc, logger)
+	// Inbound photo downloads. Always constructed: the uploader writes into the per-chat
+	// uploads directory, a sibling of the cloned repositories, so a user's image can never
+	// be swept into a commit. LO serves bytes for photos only — every other attachment gets
+	// an explanatory notice instead (see lo.Receiver.attachments).
+	uploads := lo.NewUploader(api, ws, cfg.MaxUploadBytes, logger)
 	receiver := lo.NewReceiver(lo.ReceiverConfig{
 		Service:        svc,
 		Client:         api,
@@ -164,13 +169,14 @@ func run() int {
 		IsAllowed:      cfg.IsLOAllowed,
 		RequireMention: cfg.RequireGroupMention,
 		Scheduler:      scheduler,
+		Uploads:        uploads,
 		Logger:         logger,
 		Guards: func(id int64) (bool, string) {
 			return chat.CheckGuards(limiter, costs, chat.GuardConfig{CostCapUSD: cfg.EffectiveCostCapUSD()}, id)
 		},
 	})
 	logger.Info("starting LO adapter", "bot_id", self.ID, "drafts", cfg.LOEnableDrafts, "workspace", cfg.ApprovedDirectory)
-	logger.Info("LO compatibility: text only; /stop replaces buttons; document outbox and native replies disabled")
+	logger.Info("LO compatibility: text and inbound photos; /stop replaces buttons; document outbox and native replies disabled")
 	if err := receiver.Run(ctx); err != nil && ctx.Err() == nil {
 		logger.Error("LO adapter stopped", "error", err)
 		return 1

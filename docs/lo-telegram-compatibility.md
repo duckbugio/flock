@@ -29,7 +29,9 @@ Flock live delivery remains to be verified with a dedicated bot token.
 | Stop button | Callback keyboard fields rejected; `answerCallbackQuery` and `editMessageReplyMarkup` are stubs | `/stop` remains available to allowed users even when request/cost guards reject new work |
 | Command menu | `setMyCommands` / `getMyCommands` / `deleteMyCommands` are implemented | Text commands work; registration is separately opt-in |
 | Native quoted reply | `reply_parameters` and legacy reply fields rejected | Completion notice is a separate message; inbound quoted text is included in the prompt when supplied |
-| Files / generated artifacts | `sendDocument` is a stub; photo/audio/video support does not establish general document parity | Document outbox disabled; received attachments get an explicit unsupported notice |
+| Inbound photos | `getFile` returns a `file_path` for photos; bytes at `<base>/file/bot<token>/<file_path>` | Largest size downloaded into the chat's uploads dir, capped by `MAX_UPLOAD_BYTES`; the prompt carries the saved path AND the picture itself travels as a vision block, so the model sees it rather than a file name. The saved name is corrected to what the bytes actually are, and bytes that are not an image at all are refused with the download-failure sentence |
+| Inbound audio / video | `getFile` answers the reference WITHOUT a `file_path` (no address for the bytes exists) | Per-kind notice; the run is refused rather than answered without the file |
+| Files / generated artifacts | `sendDocument` is a stub (501); `sendPhoto`'s upload branch answered 500 on the deployments exercised | Document outbox disabled; each unreadable attachment kind gets its own notice |
 | Provider slash commands | No platform-specific requirement | Non-reserved commands such as `/loop` reach the configured agent backend |
 | Goals and scheduled work | Uses normal bot messaging | Shared Flock goal and scheduler services wired |
 | Rate limits | 429 with `retry_after` | Progress and final-delivery backoff use the LO classifier; polling backs off too |

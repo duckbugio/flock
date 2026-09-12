@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/duckbugio/flock/adapters/lo"
+	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/goal"
 )
 
@@ -22,10 +23,22 @@ type serviceSpy struct {
 	prompts     []string
 	stopped     int
 	newSessions int
+	// images records what the model was SHOWN, per run. A separate field from prompts because
+	// the two can disagree: a photo whose bytes would not load still starts a run, with the
+	// path in the prompt and nothing to look at.
+	images [][]agent.ImageInput
 }
 
 func (s *serviceSpy) Handle(_ context.Context, _ string, _ int64, _, prompt string) {
 	s.prompts = append(s.prompts, prompt)
+	s.images = append(s.images, nil)
+}
+
+func (s *serviceSpy) HandleMedia(
+	_ context.Context, _ string, _ int64, _, prompt string, images []agent.ImageInput,
+) {
+	s.prompts = append(s.prompts, prompt)
+	s.images = append(s.images, images)
 }
 func (s *serviceSpy) StopChat(string) bool                   { s.stopped++; return true }
 func (s *serviceSpy) NewSession(string) error                { s.newSessions++; return nil }
@@ -93,7 +106,7 @@ func TestReceiverDoesNotDropAttachmentsOrQuoteContextSilently(t *testing.T) {
 		Service: svc, Transport: lo.NewTransport(api, false), IsAllowed: func(int64) bool { return true },
 	})
 	media := inbound("review this file")
-	media.Document = []byte(`{"file_id":"lo-file"}`)
+	media.Document = &lo.Attachment{FileID: "lo-file", FileName: "notes.txt"}
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: media})
 	if len(svc.prompts) != 0 || notices.Load() != 1 {
 		t.Fatal("attachment silently discarded")
@@ -226,13 +239,20 @@ func TestIgnoredMessagesDoNotSpendGuardBudget(t *testing.T) {
 		IsAllowed: func(int64) bool { return true }, RequireMention: true,
 		Guards: func(int64) (bool, string) { calls++; return true, "" },
 	})
-	media := inbound("photo")
-	media.Photo = json.RawMessage(`[{}]`)
-	receiver.HandleUpdate(t.Context(), lo.Update{Message: media})
+	// A photo IS work and spends the budget; it has its own test. What must not spend it: an
+	// unaddressed group message, an empty one, and an attachment this platform will not hand
+	// over — the last because it produces one sentence and no work at all, and charging for it
+	// would not even save a message, since a guard refusal sends one too.
 	empty := inbound("@flock")
 	empty.Chat.ID, empty.Chat.Type = -42, groupChatType
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: empty})
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: inbound("")})
+	sticker := inbound("")
+	sticker.Sticker = lo.RawAttachment("s")
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: sticker})
+	voice := inbound("послушай")
+	voice.Voice = lo.RawAttachment("v")
+	receiver.HandleUpdate(t.Context(), lo.Update{Message: voice})
 	if calls != 0 {
 		t.Fatalf("ignored messages spent %d guard calls", calls)
 	}
@@ -308,7 +328,7 @@ func TestQuotedAttachmentIsExplicitInPrompt(t *testing.T) {
 		msg := inbound("explain this")
 		msg.Reply = inbound("")
 		msg.Reply.Caption = caption
-		msg.Reply.Photo = json.RawMessage(`[{}]`)
+		msg.Reply.Photo = []lo.PhotoSize{{FileID: "lo-photo", Width: 90, Height: 90}}
 		receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
 		if len(svc.prompts) != 1 ||
 			!strings.Contains(svc.prompts[0], "Quoted attachment is unavailable") || !strings.Contains(svc.prompts[0], caption) {
@@ -409,5 +429,113 @@ func TestReplyContextIdentifiesAssistantAndEmptyMessage(t *testing.T) {
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: msg})
 	if len(svc.prompts) != 1 || !strings.Contains(svc.prompts[0], "the assistant") || !strings.Contains(svc.prompts[0], "[media]") {
 		t.Fatalf("prompts=%v", svc.prompts)
+	}
+}
+
+// pollSpy is serviceSpy's synchronised twin, for the one test that drives Receiver.Run on its
+// own goroutine. The shared spy is deliberately lock-free — every other test calls HandleUpdate
+// directly — and adding a mutex there would make the simple tests pay for this one.
+type pollSpy struct {
+	prompts chan string
+}
+
+func (p *pollSpy) Handle(_ context.Context, _ string, _ int64, _, prompt string) {
+	p.prompts <- prompt
+}
+
+func (p *pollSpy) HandleMedia(
+	_ context.Context, _ string, _ int64, _, prompt string, _ []agent.ImageInput,
+) {
+	p.prompts <- prompt
+}
+func (*pollSpy) StopChat(string) bool                     { return false }
+func (*pollSpy) NewSession(string) error                  { return nil }
+func (*pollSpy) ArmGoal(string, string) (goal.Goal, bool) { return goal.Goal{}, false }
+func (*pollSpy) GoalStatus(string) (goal.Goal, bool)      { return goal.Goal{}, false }
+func (*pollSpy) DisarmGoal(string) bool                   { return false }
+
+// One update this adapter cannot decode must not stop it answering everyone else. Since the
+// media fields became typed, an unexpected shape in any of them fails that update's Unmarshal;
+// if that failed the whole batch, the offset would never advance and the poller would ask for
+// the same poisoned batch forever.
+func TestUndecodableUpdateDoesNotStopTheBatch(t *testing.T) {
+	t.Parallel()
+	svc := &pollSpy{prompts: make(chan string, 8)}
+	offsets := make(chan int64, 8)
+	api := client(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/getUpdates") {
+			reply(w, `{"ok":true,"result":{"message_id":1}}`)
+			return
+		}
+		var body struct {
+			Offset int64 `json:"offset"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		select {
+		case offsets <- body.Offset:
+		default:
+		}
+		if body.Offset > 0 {
+			reply(w, `{"ok":true,"result":[]}`)
+			return
+		}
+		const chat = `"chat":{"id":7,"type":"private"},"from":{"id":7}`
+		// The middle update models `document` as a string where this adapter expects an
+		// object, and the LAST one spells its own update_id as a string — the case that used
+		// to be skipped WITHOUT advancing the offset, so a poisoned tail re-fetched forever.
+		reply(w, `{"ok":true,"result":[
+			{"update_id":10,"message":{"message_id":1,"text":"first",`+chat+`}},
+			{"update_id":11,"message":{"message_id":2,"text":"poison",`+chat+`,"document":"not-an-object"}},
+			{"update_id":12,"message":{"message_id":3,"text":"third",`+chat+`}},
+			{"update_id":"13","message":{"message_id":4,"text":"tail",`+chat+`}}
+		]}`)
+	})
+	receiver := lo.NewReceiver(lo.ReceiverConfig{
+		Service: svc, Client: api, Transport: lo.NewTransport(api, false),
+		IsAllowed: func(int64) bool { return true },
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- receiver.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	// Every readable message must arrive — including the TAIL, whose only broken field is its
+	// own id: the body beside it is whole, so answering it costs nothing and losing it would
+	// mean an id spelling could silence the bot for every message in every batch. Before the
+	// fix none of them arrived: the batch failed to decode as a whole, the offset never moved,
+	// and the poller re-asked for it forever.
+	var got []string
+	for range 3 {
+		select {
+		case prompt := <-svc.prompts:
+			got = append(got, prompt)
+		case <-time.After(4 * time.Second):
+			t.Fatalf("the batch stalled; prompts so far: %v", got)
+		}
+	}
+	if !strings.Contains(got[0], "first") || !strings.Contains(got[1], "third") ||
+		!strings.Contains(got[2], "tail") {
+		t.Fatalf("prompts=%v, want every readable message in order", got)
+	}
+	// The poisoned one must NOT arrive: its body is what failed to decode.
+	select {
+	case extra := <-svc.prompts:
+		t.Fatalf("prompt %q arrived, want the unreadable body dropped", extra)
+	case <-time.After(200 * time.Millisecond):
+	}
+	// The offset must have moved PAST the poisoned update, not stopped at it.
+	select {
+	case <-offsets: // the first poll, from zero
+		select {
+		case next := <-offsets:
+			if next <= 13 {
+				t.Fatalf("second poll asked from offset %d, want past the poisoned tail", next)
+			}
+		case <-time.After(4 * time.Second):
+			t.Fatal("no second poll: the offset never advanced")
+		}
+	default:
+		t.Fatal("the poller never asked for updates")
 	}
 }

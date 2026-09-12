@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/chat"
 	"github.com/duckbugio/flock/core/goal"
 	"github.com/duckbugio/flock/core/schedule"
@@ -22,6 +24,14 @@ const privateChatType = "private"
 // Service is the transport-neutral inbound seam; no Telegram handlers are reused.
 type Service interface {
 	Handle(ctx context.Context, chatID chat.ChatID, userID int64, messageID chat.MessageID, text string)
+	// HandleMedia starts a run whose prompt carries IMAGES as well as words. Separate from
+	// Handle because the model is shown the picture rather than told where to find it: a path
+	// alone makes the agent open a tool to look at what it was already sent, and the Telegram
+	// and VK adapters both take this seam for exactly this case.
+	HandleMedia(
+		ctx context.Context, chatID chat.ChatID, userID int64, messageID chat.MessageID,
+		prompt string, images []agent.ImageInput,
+	)
 	StopChat(chatID chat.ChatID) bool
 	NewSession(chatID chat.ChatID) error
 	ArmGoal(chatID chat.ChatID, criterion string) (goal.Goal, bool)
@@ -42,7 +52,11 @@ type ReceiverConfig struct {
 	Guards         func(int64) (bool, string)
 	RequireMention bool
 	Scheduler      *schedule.Manager
-	Logger         *slog.Logger
+	// Uploads saves inbound photos into the per-chat uploads directory so the agent can
+	// open them. Nil disables the download and every attachment gets the same explanatory
+	// notice it got before — the adapter must still run where no workspace is wired.
+	Uploads *Uploader
+	Logger  *slog.Logger
 }
 
 // Receiver serially admits updates while the shared dispatcher runs chats concurrently.
@@ -125,63 +139,305 @@ func (r *Receiver) stopPolling(err error, conflicts *int) bool {
 	return fatalAPIError(err)
 }
 
-// HandleUpdate gates every command and message before invoking the shared service.
-func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
-	msg := update.Message
+// admits answers whether this message is for this bot at all, and hands back the three values
+// the rest of HandleUpdate needs.
+//
+// Split out of HandleUpdate rather than inlined, because the two halves answer different
+// questions: everything here is "is this addressed to me", and everything after is "what do I
+// do about it". Keeping them together also put the whole routine past the repository's
+// complexity gate.
+func (r *Receiver) admits(msg *Message) (text string, replyToBot, ok bool) {
 	if msg == nil || msg.From == nil || msg.From.IsBot || msg.From.ID <= 0 || msg.ID <= 0 ||
 		msg.Chat.ID == 0 || !r.cfg.IsAllowed(msg.From.ID) {
-		return
+		return "", false, false
 	}
 	if msg.Chat.Type != privateChatType && msg.Chat.Type != "group" && msg.Chat.Type != "supergroup" {
-		return
+		return "", false, false
 	}
-	text := strings.TrimSpace(msg.Text)
+	text = strings.TrimSpace(msg.Text)
 	if text == "" {
 		text = strings.TrimSpace(msg.Caption)
 	}
 	cleaned, addressed := addressedText(text, r.cfg.Username, msg.Chat.Type != privateChatType)
 	if !addressed {
+		return "", false, false
+	}
+	name, _ := command(cleaned)
+	replyToBot = r.cfg.BotID > 0 && msg.Reply != nil && msg.Reply.From != nil && msg.Reply.From.ID == r.cfg.BotID
+	if msg.Chat.Type != privateChatType && r.cfg.RequireMention &&
+		cleaned == text && !replyToBot && !chat.IsReservedCommand(name) {
+		return "", false, false
+	}
+	return cleaned, replyToBot, true
+}
+
+// HandleUpdate gates every command and message before invoking the shared service.
+func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
+	msg := update.Message
+	text, replyToBot, ok := r.admits(msg)
+	if !ok {
 		return
 	}
-	name, args := command(cleaned)
-	replyToBot := r.cfg.BotID > 0 && msg.Reply != nil && msg.Reply.From != nil && msg.Reply.From.ID == r.cfg.BotID
-	if msg.Chat.Type != privateChatType && r.cfg.RequireMention && cleaned == text && !replyToBot && !chat.IsReservedCommand(name) {
-		return
-	}
-	text = cleaned
+	name, args := command(text)
 	chatID := strconv.FormatInt(msg.Chat.ID, 10)
 	if chat.IsReservedCommand(name) {
 		r.reserved(ctx, chatID, msg.From.ID, name, args)
 		return
 	}
-	if hasMedia(msg) {
-		r.notify(ctx, chatID, "Attachments are not supported yet. Please send the relevant text or a repository path.")
+	// An attachment this platform will not hand over is answered FIRST, before the guards.
+	// It costs no network call, no disk write and no agent run, and core/chat's contract is
+	// that a message which produces no work spends no limiter budget. Charging for it would
+	// not even save a message: the guard refusal sends one too.
+	if note := unservedNotice(msg); note != "" {
+		r.notify(ctx, chatID, note)
 		return
 	}
-	if text == "" {
-		return
-	}
-	if r.cfg.Guards != nil {
-		if allowed, reason := r.cfg.Guards(msg.From.ID); !allowed {
-			r.notify(ctx, chatID, reason)
-			return
+	// Guards run BEFORE any attachment work that remains. A rate limit or a spent cost cap
+	// must be paid with a refusal, not with a download: doing the network call and the disk
+	// write first means a capped user still costs bandwidth and storage on every message.
+	if hasServedMedia(msg) || text != "" {
+		if r.cfg.Guards != nil {
+			if allowed, reason := r.cfg.Guards(msg.From.ID); !allowed {
+				r.notify(ctx, chatID, reason)
+				return
+			}
 		}
 	}
-	text = replyPrompt(msg, replyToBot, text)
-	r.cfg.Service.Handle(ctx, chatID, msg.From.ID, strconv.FormatInt(msg.ID, 10), text)
+	// Attachments are answered BEFORE the empty-text check: a photo with no caption is a
+	// complete request ("look at this"), and dropping it silently is what made the bot
+	// look broken.
+	saved, confirmed, note := r.attachments(ctx, msg, chatID)
+	if note != "" {
+		// The file the request rests on never reached the agent, so the caption must not be
+		// answered on its own: "review this file" without the file invites a confident answer
+		// about nothing. One notice, no run.
+		r.notify(ctx, chatID, note)
+		return
+	}
+	if text == "" && saved == "" {
+		return
+	}
+	if saved != "" {
+		r.handlePhoto(ctx, msg, chatID, replyToBot, text, saved, confirmed)
+		return
+	}
+	r.cfg.Service.Handle(ctx, chatID, msg.From.ID, strconv.FormatInt(msg.ID, 10),
+		replyPrompt(msg, replyToBot, text))
+}
+
+// handlePhoto starts the run for a message whose picture reached disk.
+//
+// The image is SHOWN to the model, not described to it. Both other adapters do this — the seam
+// (chat.PhotoPrompt, chat.LoadPhotoImage, Service.HandleMedia) exists in core/chat for exactly
+// this case — and the difference is not cosmetic: handed a path alone, the agent has to spend a
+// tool call opening a file it was already sent, and a model that never looks answers about the
+// caption instead of the picture.
+//
+// A failed read falls back to the path alone rather than refusing: the file IS on disk and the
+// agent can still open it, so losing vision is a degradation, not a dead request. VK makes the
+// same fallback, in the same place.
+//
+// confirmed is the same fallback for a different reason: the vision block carries a media type
+// derived from the saved NAME, so it may only be built when the bytes were identified and the
+// name agrees with them. Bytes nothing could identify travel as a path, never as a claim.
+func (r *Receiver) handlePhoto(
+	ctx context.Context, msg *Message, chatID string, replyToBot bool, text, saved string, confirmed bool,
+) {
+	prompt := replyPrompt(msg, replyToBot, chat.PhotoPrompt(saved, text))
+	var images []agent.ImageInput
+	if confirmed {
+		loaded, err := chat.LoadPhotoImage(saved)
+		if err != nil {
+			r.cfg.Logger.Warn("lo: load photo for vision failed; sending the path only", "error", err)
+		}
+		images = loaded
+	}
+	r.cfg.Service.HandleMedia(ctx, chatID, msg.From.ID, strconv.FormatInt(msg.ID, 10), prompt, images)
 }
 
 func hasMedia(msg *Message) bool {
+	if len(msg.Photo) > 0 {
+		return true
+	}
+	if msg.Document != nil {
+		return true
+	}
 	for _, raw := range []json.RawMessage{
-		msg.Photo, msg.Document, msg.Voice, msg.Audio, msg.Video,
-		msg.Animation, msg.Sticker, msg.VideoNote,
+		msg.Voice, msg.Audio, msg.Video, msg.Animation, msg.Sticker, msg.VideoNote,
 	} {
-		value := strings.TrimSpace(string(raw))
-		if value != "" && value != "null" && value != "[]" {
+		if present(raw) {
 			return true
 		}
 	}
 	return false
+}
+
+// unservedKinds names the attachments LO accepts from a user but will not hand to a bot,
+// in the order a message is inspected. Each carries its own sentence: "attachments are not
+// supported" taught users nothing about which of their files the bot could actually read,
+// and photos now CAN be read.
+//
+//nolint:gochecknoglobals // A fixed table, read-only, kept beside the function that uses it.
+var unservedKinds = []struct {
+	has    func(*Message) bool
+	notice string
+}{
+	{
+		has:    func(m *Message) bool { return present(m.Voice) },
+		notice: "I cannot listen to voice messages on LO yet. Please send the request as text.",
+	},
+	{
+		has:    func(m *Message) bool { return present(m.VideoNote) },
+		notice: "I cannot open video notes on LO yet. Please send the request as text.",
+	},
+	{
+		has: func(m *Message) bool { return present(m.Video) },
+		notice: "I cannot download video on LO: the platform hands bots a reference, not the bytes. " +
+			"Describe what it shows, or send a screenshot as a photo.",
+	},
+	{
+		has: func(m *Message) bool { return present(m.Audio) },
+		notice: "I cannot download audio on LO: the platform hands bots a reference, not the bytes. " +
+			"Please send the request as text.",
+	},
+	{
+		has:    func(m *Message) bool { return present(m.Animation) },
+		notice: "I cannot open animations on LO yet. A still screenshot sent as a photo works.",
+	},
+	{
+		// LAST of the refusals, and deliberately: Bot API fills `document` ALONGSIDE
+		// `animation` for a GIF and alongside `video_note` for a round video, so a document
+		// arm placed first would answer "I cannot read documents" to someone who sent an
+		// animation. Every kind with a name of its own is answered by that name first.
+		has: func(m *Message) bool { return m.Document != nil },
+		// Says what this ADAPTER does, not what the platform cannot do. The evidence for the
+		// platform claim would have been sendDocument's 501, and that is the OUTGOING method:
+		// whether getFile answers a document reference with a file_path is a separate
+		// question, unverified when this line was written, and answered by the change that
+		// follows it.
+		notice: "I cannot read documents yet. " +
+			"Paste the text, or point me at the file in a repository.",
+	},
+	{
+		has:    func(m *Message) bool { return present(m.Sticker) },
+		notice: "Stickers carry nothing I can act on. Please send the request as text.",
+	},
+}
+
+// attachments turns a message's files into (prompt addition, user notice). Both may be
+// empty. A photo is downloaded into the chat's uploads directory and the agent is told the
+// path; everything else gets the sentence that says what this platform withholds.
+//
+// A download failure is a NOTICE, never a dropped message: the user watched their file
+// arrive and deserves to know it did not reach the agent.
+func (r *Receiver) attachments(
+	ctx context.Context, msg *Message, chatID string,
+) (saved string, confirmed bool, notice string) {
+	// LargestPhoto is the ONLY reader of msg.Photo here, deliberately. hasServedMedia counts a
+	// non-empty array as work and spends guard budget on it, so a ladder whose every rung
+	// lacks a file_id must still end in a sentence — otherwise the message is dropped in
+	// silence, or worse, its caption reaches the agent without the picture it refers to. That
+	// is the "confident answer about nothing" every other arm here exists to prevent.
+	if len(msg.Photo) == 0 {
+		// No unserved-kind arm either: those are answered before the guards, without touching
+		// the network. See unservedNotice.
+		return "", false, ""
+	}
+	size, ok := LargestPhoto(msg.Photo)
+	if !ok {
+		return "", false, "I could not read that image. Please send it again."
+	}
+	if r.cfg.Uploads == nil {
+		return "", false, "I cannot read images in this deployment: no uploads directory is configured."
+	}
+	path, err := r.cfg.Uploads.Save(ctx, chatID, size.FileID, photoFileName(msg.ID))
+	switch {
+	case errors.Is(err, ErrUploadTooLarge):
+		return "", false, "That image is too large for me to open. Please send a smaller one."
+	case errors.Is(err, ErrNoBytes):
+		return "", false, "LO did not hand me the bytes of that image, so I cannot open it."
+	case err != nil:
+		r.cfg.Logger.Warn("lo: photo download failed", "error", err)
+		return "", false, "I could not download that image. Please try sending it again."
+	}
+	return r.checkPhotoBytes(path)
+}
+
+// checkPhotoBytes names a saved photo by what its bytes ARE, and decides whether the picture
+// can be shown to the model at all.
+//
+// The name was a GUESS until the bytes existed, and it is not decoration: core/chat reads the
+// vision block's media type out of the saved path, so a PNG saved as .jpg would be declared to
+// the model as a JPEG. The three outcomes below are that same rule carried through:
+//
+//   - A format the vision block CAN carry is renamed to it and shown.
+//   - A picture in a format it cannot carry (bmp, ico, tiff…) is refused BY NAME. Renaming is
+//     impossible — core/chat answers image/jpeg for every extension it does not know — so the
+//     choice is a false claim about the bytes or a sentence the user can act on.
+//   - Bytes that are not a picture at all (a storage error page served with 200, an empty
+//     body) get the sentence a failed download already has: to the person who sent it, the
+//     file arrived here and not at the agent, which is the same event.
+//
+// Anything else is UNKNOWN rather than disproven — the sniff failed, or the bytes are a format
+// DetectContentType does not recognise — and the file stays with the name it had. Deleting a
+// picture because this adapter could not identify it would lose a file that may be perfectly
+// readable.
+func (r *Receiver) checkPhotoBytes(path string) (saved string, confirmed bool, notice string) {
+	path, detected := nameByContent(path, r.cfg.Logger)
+	switch {
+	case photoExtensions[detected] != "" && strings.HasSuffix(path, photoExtensions[detected]):
+		// The only case the model is SHOWN: the bytes were identified and the name on disk
+		// agrees with them, so the media type core/chat derives from that name is true.
+		return path, true, ""
+	case photoExtensions[detected] != "" || detected == "" || detected == "application/octet-stream":
+		// Unidentified, or the rename failed. The file is real and may well be readable — the
+		// agent can open it — but nothing here knows what it IS, and core/chat would tell the
+		// model "image/jpeg" on the strength of a name this adapter invented. The run goes
+		// ahead on the PATH alone.
+		return path, false, ""
+	case strings.HasPrefix(detected, "image/"):
+		r.removeUnreadable(path)
+		return "", false, "I cannot read " + detected + " images. Please send it as PNG or JPEG."
+	case detected == emptyFileType:
+		r.removeUnreadable(path)
+		return "", false, "That image arrived empty. Please try sending it again."
+	}
+	r.removeUnreadable(path)
+	return "", false, "I could not download that image. Please try sending it again."
+}
+
+// removeUnreadable drops a saved file the agent will never be shown, so a refused picture does
+// not sit in the uploads directory forever.
+func (r *Receiver) removeUnreadable(path string) {
+	if err := os.Remove(path); err != nil {
+		r.cfg.Logger.Warn("lo: could not remove a photo the agent will not be shown", "error", err)
+	}
+}
+
+// unservedNotice is the whole of the attachment path that needs no I/O — the kinds this
+// platform will not hand over, each with its own sentence.
+//
+// It answers "" when the message carries something that CAN be read, so a photo that arrives
+// alongside a sticker is still work rather than a refusal. That is the precedence attachments
+// applies, kept here rather than restated.
+func unservedNotice(msg *Message) string {
+	if hasServedMedia(msg) {
+		return ""
+	}
+	for _, kind := range unservedKinds {
+		if kind.has(msg) {
+			return kind.notice
+		}
+	}
+	return ""
+}
+
+// hasServedMedia reports an attachment this adapter can actually turn into work. Distinct from
+// hasMedia, which answers "carries an attachment of any kind": the two differ exactly on the
+// kinds that produce a sentence and nothing else, and that difference is what keeps a refusal
+// from spending guard budget.
+func hasServedMedia(msg *Message) bool {
+	return len(msg.Photo) > 0
 }
 
 func (r *Receiver) notify(ctx context.Context, chatID, text string) {
