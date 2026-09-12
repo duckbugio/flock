@@ -103,7 +103,11 @@ this adapter does not promise exactly-once agent execution or automatic resume.
   the first bytes say the file is, because the vision block's media type is read back out of
   that name — and bytes that are not an image at all (a storage error page served with 200, an
   empty body) are thrown away with the download-failure sentence rather than declared a JPEG. A
-  photo with no caption starts a run on its own. `MAX_UPLOAD_BYTES` caps the download and
+  picture in a format the vision block cannot carry (bmp, ico) is refused BY NAME, because
+  core/chat answers `image/jpeg` for every extension it does not know and there is no true type
+  to rename it to; bytes the sniffer does not RECOGNISE keep the guessed name and travel as
+  JPEG, because an unidentified file is unknown rather than disproven. A photo with no caption
+  starts a run on its own. `MAX_UPLOAD_BYTES` caps the download and
   the cap also holds on the stream, because LO omits `file_size` for files it has not
   measured. Client-supplied names are sanitised; a saved file cannot leave the uploads
   directory.

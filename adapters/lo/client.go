@@ -185,15 +185,40 @@ type Message struct {
 	Caption string `json:"caption"`
 	// Photo is the size ladder Bot API sends for one image, ascending. LargestPhoto
 	// picks from it; the adapter never assumes a position.
-	Photo     []PhotoSize `json:"photo"`
-	Document  *Attachment `json:"document"`
-	Voice     *Attachment `json:"voice"`
-	Audio     *Attachment `json:"audio"`
-	Video     *Attachment `json:"video"`
-	Animation *Attachment `json:"animation"`
-	Sticker   *Attachment `json:"sticker"`
-	VideoNote *Attachment `json:"video_note"`       //nolint:tagliatelle // Bot API wire spelling.
-	Reply     *Message    `json:"reply_to_message"` //nolint:tagliatelle // Bot API wire spelling.
+	Photo []PhotoSize `json:"photo"`
+	// Document is typed because its NAME and declared type are read — the fallback that gives
+	// a nameless document an extension depends on them.
+	Document *Attachment `json:"document"`
+	// The rest are never read, only counted as present, so they stay RAW. A typed field this
+	// adapter does not look inside can still fail the whole message decode if the platform
+	// sends a shape it did not model — and the cost of that is the message, while the benefit
+	// is nothing, because presence is all these are asked for. See present.
+	Voice     json.RawMessage `json:"voice"`
+	Audio     json.RawMessage `json:"audio"`
+	Video     json.RawMessage `json:"video"`
+	Animation json.RawMessage `json:"animation"`
+	Sticker   json.RawMessage `json:"sticker"`
+	VideoNote json.RawMessage `json:"video_note"`       //nolint:tagliatelle // Bot API wire spelling.
+	Reply     *Message        `json:"reply_to_message"` //nolint:tagliatelle // Bot API wire spelling.
+}
+
+// RawAttachment builds the wire shape of an attachment this adapter only counts as present.
+// Exported for tests: they have to produce what the platform sends, and a hand-written literal
+// in every case would drift from what `present` actually accepts.
+func RawAttachment(fileID string) json.RawMessage {
+	return json.RawMessage(`{"file_id":"` + fileID + `"}`)
+}
+
+// present reports an attachment the platform actually sent: a raw field that is neither absent,
+// nor JSON null, nor an empty object or array. Everything this adapter does with the kinds it
+// cannot read needs exactly this and nothing more.
+func present(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	switch trimmed {
+	case "", "null", "{}", "[]":
+		return false
+	}
+	return true
 }
 
 // PhotoSize is one rung of an inbound photo's size ladder.

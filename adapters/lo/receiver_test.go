@@ -248,10 +248,10 @@ func TestIgnoredMessagesDoNotSpendGuardBudget(t *testing.T) {
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: empty})
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: inbound("")})
 	sticker := inbound("")
-	sticker.Sticker = &lo.Attachment{FileID: "s"}
+	sticker.Sticker = lo.RawAttachment("s")
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: sticker})
 	voice := inbound("послушай")
-	voice.Voice = &lo.Attachment{FileID: "v"}
+	voice.Voice = lo.RawAttachment("v")
 	receiver.HandleUpdate(t.Context(), lo.Update{Message: voice})
 	if calls != 0 {
 		t.Fatalf("ignored messages spent %d guard calls", calls)

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/duckbugio/flock/adapters/lo"
@@ -19,7 +20,10 @@ const pngBytes = "\x89PNG\r\n\x1a\n"
 
 func photoAPI(t *testing.T, bytes string) (*lo.Client, *[]string) {
 	t.Helper()
-	var notices []string
+	var (
+		mu      sync.Mutex
+		notices []string
+	)
 	api := client(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/getFile"):
@@ -29,7 +33,9 @@ func photoAPI(t *testing.T, bytes string) (*lo.Client, *[]string) {
 		default:
 			body := make([]byte, 4096)
 			n, _ := r.Body.Read(body)
+			mu.Lock()
 			notices = append(notices, string(body[:n]))
+			mu.Unlock()
 			reply(w, `{"ok":true,"result":{"message_id":1}}`)
 		}
 	})
@@ -171,13 +177,15 @@ func TestUnreadableAttachmentsExplainThemselvesAndStopTheRun(t *testing.T) {
 			func(m *lo.Message) { m.Document = &lo.Attachment{FileID: "d", FileName: "spec.pdf"} },
 			"documents", // Names the kind; the sentence deliberately claims nothing about the platform.
 		},
-		"voice": {func(m *lo.Message) { m.Voice = &lo.Attachment{FileID: "v"} }, "voice"},
-		"video": {func(m *lo.Message) { m.Video = &lo.Attachment{FileID: "m"} }, "video"},
-		"audio": {func(m *lo.Message) { m.Audio = &lo.Attachment{FileID: "a"} }, "audio"},
+		"voice": {func(m *lo.Message) { m.Voice = lo.RawAttachment("v") }, "voice"},
+		"video": {func(m *lo.Message) { m.Video = lo.RawAttachment("m") }, "video"},
+		"audio": {func(m *lo.Message) { m.Audio = lo.RawAttachment("a") }, "audio"},
 		"sticker": {
-			func(m *lo.Message) { m.Sticker = &lo.Attachment{FileID: "s"} },
+			func(m *lo.Message) { m.Sticker = lo.RawAttachment("s") },
 			"Stickers",
 		},
+		"animation":  {func(m *lo.Message) { m.Animation = lo.RawAttachment("g") }, "animations"},
+		"video note": {func(m *lo.Message) { m.VideoNote = lo.RawAttachment("n") }, "video notes"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

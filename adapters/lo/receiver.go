@@ -2,6 +2,7 @@ package lo
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"math"
@@ -249,11 +250,13 @@ func hasMedia(msg *Message) bool {
 	if len(msg.Photo) > 0 {
 		return true
 	}
-	for _, att := range []*Attachment{
-		msg.Document, msg.Voice, msg.Audio, msg.Video,
-		msg.Animation, msg.Sticker, msg.VideoNote,
+	if msg.Document != nil {
+		return true
+	}
+	for _, raw := range []json.RawMessage{
+		msg.Voice, msg.Audio, msg.Video, msg.Animation, msg.Sticker, msg.VideoNote,
 	} {
-		if att != nil {
+		if present(raw) {
 			return true
 		}
 	}
@@ -267,11 +270,11 @@ func hasMedia(msg *Message) bool {
 //
 //nolint:gochecknoglobals // A fixed table, read-only, kept beside the function that uses it.
 var unservedKinds = []struct {
-	get    func(*Message) *Attachment
+	has    func(*Message) bool
 	notice string
 }{
 	{
-		get: func(m *Message) *Attachment { return m.Document },
+		has: func(m *Message) bool { return m.Document != nil },
 		// Says what this ADAPTER does, not what the platform cannot do. The evidence for the
 		// platform claim would have been sendDocument's 501, and that is the OUTGOING method:
 		// whether getFile answers a document reference with a file_path is a separate
@@ -281,29 +284,29 @@ var unservedKinds = []struct {
 			"Paste the text, or point me at the file in a repository.",
 	},
 	{
-		get:    func(m *Message) *Attachment { return m.Voice },
+		has:    func(m *Message) bool { return present(m.Voice) },
 		notice: "I cannot listen to voice messages on LO yet. Please send the request as text.",
 	},
 	{
-		get:    func(m *Message) *Attachment { return m.VideoNote },
+		has:    func(m *Message) bool { return present(m.VideoNote) },
 		notice: "I cannot open video notes on LO yet. Please send the request as text.",
 	},
 	{
-		get: func(m *Message) *Attachment { return m.Video },
+		has: func(m *Message) bool { return present(m.Video) },
 		notice: "I cannot download video on LO: the platform hands bots a reference, not the bytes. " +
 			"Describe what it shows, or send a screenshot as a photo.",
 	},
 	{
-		get: func(m *Message) *Attachment { return m.Audio },
+		has: func(m *Message) bool { return present(m.Audio) },
 		notice: "I cannot download audio on LO: the platform hands bots a reference, not the bytes. " +
 			"Please send the request as text.",
 	},
 	{
-		get:    func(m *Message) *Attachment { return m.Animation },
+		has:    func(m *Message) bool { return present(m.Animation) },
 		notice: "I cannot open animations on LO yet. A still screenshot sent as a photo works.",
 	},
 	{
-		get:    func(m *Message) *Attachment { return m.Sticker },
+		has:    func(m *Message) bool { return present(m.Sticker) },
 		notice: "Stickers carry nothing I can act on. Please send the request as text.",
 	},
 }
@@ -401,7 +404,7 @@ func unservedNotice(msg *Message) string {
 		return ""
 	}
 	for _, kind := range unservedKinds {
-		if kind.get(msg) != nil {
+		if kind.has(msg) {
 			return kind.notice
 		}
 	}

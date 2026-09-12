@@ -20,7 +20,8 @@ const HelpText = `Flock LO assistant
 /schedule — manage scheduled jobs
 
 Send text to work with the assistant. Use /stop instead of a Stop button.
-Attachments, rich messages and native replies are not supported yet.`
+Send a photo, with or without a caption, and I will look at it. Other attachments,
+rich messages and native replies are not supported yet.`
 
 func (r *Receiver) reserved(ctx context.Context, chatID string, userID int64, name, args string) {
 	switch name {
