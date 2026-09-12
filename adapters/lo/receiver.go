@@ -57,7 +57,9 @@ type ReceiverConfig struct {
 	// open them. Nil disables the download and every attachment gets the same explanatory
 	// notice it got before — the adapter must still run where no workspace is wired.
 	Uploads *Uploader
-	Logger  *slog.Logger
+	// Voice is optional; transcription is attempted only after admission and cost guards.
+	Voice  VoiceInput
+	Logger *slog.Logger
 }
 
 // Receiver serially admits updates while the shared dispatcher runs chats concurrently.
@@ -189,20 +191,26 @@ func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
 	// It costs no network call, no disk write and no agent run, and core/chat's contract is
 	// that a message which produces no work spends no limiter budget. Charging for it would
 	// not even save a message: the guard refusal sends one too.
-	if note := unservedNotice(msg); note != "" {
+	fileID := voiceReference(msg)
+	isVoice := r.cfg.Voice != nil && fileID != ""
+	if note := unservedNotice(msg); !isVoice && note != "" {
 		r.notify(ctx, chatID, note)
 		return
 	}
 	// Guards run BEFORE any attachment work that remains. A rate limit or a spent cost cap
 	// must be paid with a refusal, not with a download: doing the network call and the disk
 	// write first means a capped user still costs bandwidth and storage on every message.
-	if hasServedMedia(msg) || text != "" {
+	if isVoice || hasServedMedia(msg) || text != "" {
 		if r.cfg.Guards != nil {
 			if allowed, reason := r.cfg.Guards(msg.From.ID); !allowed {
 				r.notify(ctx, chatID, reason)
 				return
 			}
 		}
+	}
+	if isVoice {
+		r.handleVoice(ctx, msg, chatID, replyToBot, fileID)
+		return
 	}
 	// Attachments are answered BEFORE the empty-text check: a photo with no caption is a
 	// complete request ("look at this"), and dropping it silently is what made the bot

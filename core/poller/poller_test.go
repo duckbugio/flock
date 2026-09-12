@@ -43,7 +43,7 @@ func newFakeGitea(t *testing.T, pr pull, c comment) *fakeGitea {
 				"url":                base + "/repos/owner/repo/issues/7",
 				"latest_comment_url": base + "/repos/owner/repo/issues/comments/100",
 			},
-			"repository": map[string]any{"full_name": "owner/repo"},
+			"repository": map[string]any{"full_name": testRepo},
 		}}
 		writeJSON(w, threads)
 	})
@@ -99,7 +99,10 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 // selfLogin is the bot's own Gitea login used across the poller tests.
-const selfLogin = "duckbot"
+const (
+	selfLogin = "duckbot"
+	testRepo  = "owner/repo"
+)
 
 // newPoller builds a poller pointed at the fake server.
 func newPoller(f *fakeGitea) *poller {
@@ -117,7 +120,7 @@ func openPull(ref string) pull {
 	p.Number = 7
 	p.State = "open"
 	p.Head.Ref = ref
-	p.Base.Repo.FullName = "owner/repo"
+	p.Base.Repo.FullName = testRepo
 	return p
 }
 
@@ -139,7 +142,7 @@ func TestPollOnceEmitsComment(t *testing.T) {
 		if c.ChatID != "-5164159101" {
 			t.Errorf("ChatID = %q, want -5164159101", c.ChatID)
 		}
-		if c.Repo != "owner/repo" {
+		if c.Repo != testRepo {
 			t.Errorf("Repo = %q, want owner/repo", c.Repo)
 		}
 		if c.PRIndex != 7 {
@@ -317,5 +320,38 @@ func TestRunCancels(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after cancel")
+	}
+}
+
+func TestRouteFilterLeavesOtherAdapterNotificationUnread(t *testing.T) {
+	for _, state := range []string{"open", "closed"} {
+		t.Run(state, func(t *testing.T) {
+			pr := openPull("duck/42/telegram-task")
+			pr.State = state
+			f := newFakeGitea(t, pr, comment{})
+			p := newPoller(f)
+			p.accept = func(chatID, repo, branch string) bool {
+				if chatID != "42" || repo != testRepo || branch != "duck/42/telegram-task" {
+					t.Fatal("incorrect filter arguments")
+				}
+				return false
+			}
+			out := make(chan PRComment, 1)
+			p.pollOnce(context.Background(), out)
+			if len(out) != 0 || len(f.markedRead()) != 0 {
+				t.Fatal("consumed another adapter's notification")
+			}
+		})
+	}
+}
+
+func TestRouteFilterAcceptsOwnedNotification(t *testing.T) {
+	f := newFakeGitea(t, openPull("duck/42/lo-task"), comment{Body: "review"})
+	p := newPoller(f)
+	p.accept = func(_, _, _ string) bool { return true }
+	out := make(chan PRComment, 1)
+	p.pollOnce(context.Background(), out)
+	if len(out) != 1 || len(f.markedRead()) != 1 {
+		t.Fatal("owned comment was not emitted and acknowledged")
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/duckbugio/flock/core/cost"
 	"github.com/duckbugio/flock/core/dispatch"
 	"github.com/duckbugio/flock/core/gitsetup"
+	"github.com/duckbugio/flock/core/pending"
 	"github.com/duckbugio/flock/core/ratelimit"
 	"github.com/duckbugio/flock/core/schedule"
 	"github.com/duckbugio/flock/core/session"
@@ -126,6 +127,11 @@ func run() int {
 		logger.Error("open costs", "error", err)
 		return 1
 	}
+	pendings, err := pending.Open(cfg.PendingStoreFile())
+	if err != nil {
+		logger.Error("open interrupted-run queue", "error", err)
+		return 1
+	}
 	limiter := ratelimit.New(cfg.RateLimitRequests, cfg.RateLimitWindow())
 	dispatcher := dispatch.New(cfg.MaxConcurrentChatRuns)
 	if cfg.ShutdownDrainClamped() {
@@ -151,6 +157,7 @@ func run() int {
 		Dispatcher: dispatcher,
 		Workspace:  ws,
 		Sessions:   sessions,
+		Pending:    pendings,
 		Outbox:     outbox,
 		Costs:      costs,
 		CostCapUSD: cfg.EffectiveCostCapUSD(),
@@ -160,12 +167,15 @@ func run() int {
 		RetryAfter: lo.RetryAfter,
 		Logger:     logger,
 	})
+	// Replay before any background or user submissions can enter the dispatcher.
+	resumePending(ctx, transport, svc, pendings, logger)
 	autonomy.StartFollowups(ctx, svc, postRun, logger)
+	startReviewPoller(ctx, cfg, svc, logger)
+	startCIWatch(ctx, cfg, transport, svc, logger)
 	scheduler := startScheduler(ctx, cfg, svc, logger)
 	// Inbound photo downloads. Always constructed: the uploader writes into the per-chat
-	// uploads directory, a sibling of the cloned repositories, so a user's image can never
-	// be swept into a commit. LO serves bytes for photos only — every other attachment gets
-	// an explanatory notice instead (see lo.Receiver.attachments).
+	// uploads directory, a sibling of the cloned repositories, so user media is not
+	// swept into a commit. Missing media bytes get a specific explanatory notice.
 	uploads := lo.NewUploader(api, ws, cfg.MaxUploadBytes, logger)
 	receiver := lo.NewReceiver(lo.ReceiverConfig{
 		Service:        svc,
@@ -177,13 +187,14 @@ func run() int {
 		RequireMention: cfg.RequireGroupMention,
 		Scheduler:      scheduler,
 		Uploads:        uploads,
+		Voice:          buildVoice(cfg, api, logger),
 		Logger:         logger,
 		Guards: func(id int64) (bool, string) {
 			return chat.CheckGuards(limiter, costs, chat.GuardConfig{CostCapUSD: cfg.EffectiveCostCapUSD()}, id)
 		},
 	})
 	logger.Info("starting LO adapter", "bot_id", self.ID, "drafts", cfg.LOEnableDrafts, "workspace", cfg.ApprovedDirectory)
-	logger.Info("LO compatibility: text and inbound photos; /stop replaces buttons; native replies disabled",
+	logger.Info("LO compatibility: text, photos, documents and optional voice; /stop replaces buttons; native replies disabled",
 		"documents", cfg.LOEnableDocuments)
 	if err := receiver.Run(ctx); err != nil && ctx.Err() == nil {
 		logger.Error("LO adapter stopped", "error", err)

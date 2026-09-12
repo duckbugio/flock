@@ -50,7 +50,7 @@ Everything else in [`.env.example`](adapters/telegram/.env.example) has sensible
 | `VK_GROUP_ID` | your community's numeric id (long-poll server + mention parse) |
 | `VK_ALLOWED_USERS` | comma-separated VK user IDs allowed to use the bot |
 
-**LO** has a text-first adapter with its own allow-list and workspace namespace. Its image is published as `ghcr.io/duckbugio/flock-lo`; start it using [`adapters/lo/`](adapters/lo/README.md). The LO entry point does not wire PR-comment polling, CI watch or interrupted-run recovery. See the [LO / Telegram compatibility audit](docs/lo-telegram-compatibility.md) for supported commands, optional streaming, and platform gaps.
+**LO** has a text-first adapter with its own allow-list and workspace namespace. Its image is published as `ghcr.io/duckbugio/flock-lo`; start it using [`adapters/lo/`](adapters/lo/README.md). The LO entry point supports interrupted-run recovery, optional CI watch and Gitea PR-comment polling restricted to its own checked-out branches. Voice input uses the shared transcription providers when enabled. See the [LO / Telegram compatibility audit](docs/lo-telegram-compatibility.md) for supported commands, optional streaming, and platform gaps.
 
 ## Highlights
 
