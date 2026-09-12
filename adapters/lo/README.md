@@ -108,8 +108,9 @@ this adapter does not promise exactly-once agent execution or automatic resume.
   to rename it to. Bytes the sniffer does not RECOGNISE are kept — unidentified is not
   disproven — but travel as a PATH ONLY, without a vision block: the model is never told a
   media type nothing confirmed. One rule covers all of it: the picture is shown when the bytes
-  were identified and the name on disk agrees with them, and in every other case the run gets
-  the file's path. A photo with no caption starts a run on its own. `MAX_UPLOAD_BYTES` caps the download and
+  were identified and the name on disk agrees with them. Other retained files, including a
+  supported image that could not be renamed, reach the run by path only. Refused files do not
+  start a run. A photo with no caption starts a run on its own. `MAX_UPLOAD_BYTES` caps the download and
   the cap also holds on the stream, because LO omits `file_size` for files it has not
   measured. Client-supplied names are sanitised; a saved file cannot leave the uploads
   directory.

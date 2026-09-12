@@ -183,7 +183,7 @@ func run() int {
 		},
 	})
 	logger.Info("starting LO adapter", "bot_id", self.ID, "drafts", cfg.LOEnableDrafts, "workspace", cfg.ApprovedDirectory)
-	logger.Info("LO compatibility: /stop replaces buttons; native replies disabled",
+	logger.Info("LO compatibility: text and inbound photos; /stop replaces buttons; native replies disabled",
 		"documents", cfg.LOEnableDocuments)
 	if err := receiver.Run(ctx); err != nil && ctx.Err() == nil {
 		logger.Error("LO adapter stopped", "error", err)

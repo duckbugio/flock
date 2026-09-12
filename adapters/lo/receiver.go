@@ -405,7 +405,7 @@ func (r *Receiver) checkPhotoBytes(path string) (saved string, confirmed bool, n
 		// The only case the model is SHOWN: the bytes were identified and the name on disk
 		// agrees with them, so the media type core/chat derives from that name is true.
 		return path, true, ""
-	case detected == "" || detected == "application/octet-stream":
+	case photoExtensions[detected] != "" || detected == "" || detected == "application/octet-stream":
 		// Unidentified, or the rename failed. The file is real and may well be readable — the
 		// agent can open it — but nothing here knows what it IS, and core/chat would tell the
 		// model "image/jpeg" on the strength of a name this adapter invented. The run goes
