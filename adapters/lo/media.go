@@ -24,10 +24,9 @@ const defaultMaxUploadBytes int64 = 20 << 20
 // filePerm keeps a saved upload readable only by the bot process.
 const filePerm os.FileMode = 0o600
 
-// ErrNoBytes reports a reference this platform will not serve bytes for. LO answers
-// getFile for audio and video WITHOUT a file_path on purpose — the reference is usable
-// for an echo, the bytes have no address. It is a normal outcome, not a fault, and the
-// caller turns it into a specific sentence rather than a generic failure.
+// ErrNoBytes reports a reference without a downloadable source. Some catalog media
+// only provides a player or stream; newer LO deployments expose direct audio/video
+// sources through getFile. The missing-source case remains a normal per-file outcome.
 var ErrNoBytes = errors.New("lo: this platform serves no bytes for that file")
 
 // ErrUploadTooLarge is re-exported so callers match one error for the size case.
@@ -136,6 +135,12 @@ func (u *Uploader) Save(ctx context.Context, chatID, fileID, fileName string) (s
 //
 //nolint:gochecknoglobals // A fixed table, read-only, kept beside the function that uses it.
 var documentExtensions = map[string]string{
+	"audio/mpeg":       ".mp3",
+	"audio/mp4":        ".m4a",
+	"audio/ogg":        ".ogg",
+	"audio/wav":        ".wav",
+	"video/mp4":        ".mp4",
+	"video/webm":       ".webm",
 	"application/pdf":  ".pdf",
 	"application/json": ".json",
 	"application/zip":  ".zip",
