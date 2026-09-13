@@ -314,7 +314,7 @@ func hasMedia(msg *Message) bool {
 	return false
 }
 
-// unservedKinds names the attachments LO accepts from a user but will not hand to a bot,
+// unservedKinds names attachments this receiver cannot process without optional services,
 // in the order a message is inspected. Each carries its own sentence: "attachments are not
 // supported" taught users nothing about which of their files the bot could actually read,
 // and photos now CAN be read.
@@ -333,16 +333,6 @@ var unservedKinds = []struct {
 		notice: "I cannot open video notes on LO yet. Please send the request as text.",
 	},
 	{
-		has: func(m *Message) bool { return present(m.Video) },
-		notice: "I cannot download video on LO: the platform hands bots a reference, not the bytes. " +
-			"Describe what it shows, or send a screenshot as a photo.",
-	},
-	{
-		has: func(m *Message) bool { return present(m.Audio) },
-		notice: "I cannot download audio on LO: the platform hands bots a reference, not the bytes. " +
-			"Please send the request as text.",
-	},
-	{
 		// Before any arm that could also match it. Bot API fills `document` ALONGSIDE
 		// `animation` for a GIF, and this adapter READS documents — so without this order a
 		// GIF would be downloaded and handed to the agent as a file it cannot act on, instead
@@ -358,7 +348,7 @@ var unservedKinds = []struct {
 
 // attachments turns a message's files into (prompt addition, user notice). Both may be
 // empty. A photo is downloaded into the chat's uploads directory and the agent is told the
-// path; everything else gets the sentence that says what this platform withholds.
+// path; documents, audio, and video are passed as saved files.
 //
 // A download failure is a NOTICE, never a dropped message: the user watched their file
 // arrive and deserves to know it did not reach the agent.
@@ -384,6 +374,10 @@ func (r *Receiver) attachments(
 			}
 		}
 		return saved, "", shown, note
+	}
+	if present(msg.Audio) || present(msg.Video) {
+		saved, note := r.downloadAV(ctx, msg, chatID)
+		return "", saved, false, note
 	}
 	if servedDocument(msg) {
 		// The name comes from the chat and is sanitised on the way to disk; keeping it is what
@@ -488,7 +482,7 @@ func unservedNotice(msg *Message) string {
 // kinds that produce a sentence and nothing else, and that difference is what keeps a refusal
 // from spending guard budget.
 func hasServedMedia(msg *Message) bool {
-	return len(msg.Photo) > 0 || servedDocument(msg)
+	return len(msg.Photo) > 0 || servedDocument(msg) || present(msg.Audio) || present(msg.Video)
 }
 
 // servedDocument reports a document this adapter should READ, as opposed to one the platform
@@ -538,8 +532,7 @@ func (r *Receiver) download(
 	case errors.Is(err, ErrUploadTooLarge):
 		return "", "That " + kind.noun + " is too large for me to open. Please send a smaller one."
 	case errors.Is(err, ErrNoBytes):
-		// The platform answered the reference and withheld the bytes — for a document that
-		// means this LO has not shipped document downloads yet.
+		// A valid reference may still lack a direct downloadable source.
 		return "", "This LO does not hand bots the bytes of that " + kind.noun + ", so I cannot open it. " +
 			kind.advice
 	case err != nil:

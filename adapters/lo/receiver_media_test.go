@@ -201,8 +201,6 @@ func TestUnreadableAttachmentsExplainThemselvesAndStopTheRun(t *testing.T) {
 		says   string
 	}{
 		"voice": {func(m *lo.Message) { m.Voice = lo.RawAttachment("v") }, "voice"},
-		"video": {func(m *lo.Message) { m.Video = lo.RawAttachment("m") }, "video"},
-		"audio": {func(m *lo.Message) { m.Audio = lo.RawAttachment("a") }, "audio"},
 		"sticker": {
 			func(m *lo.Message) { m.Sticker = lo.RawAttachment("s") },
 			"Stickers",

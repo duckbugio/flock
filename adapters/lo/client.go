@@ -213,10 +213,8 @@ type Message struct {
 	// Document is typed because its NAME and declared type are read — the fallback that gives
 	// a nameless document an extension depends on them.
 	Document *Attachment `json:"document"`
-	// The rest are never read, only counted as present, so they stay RAW. A typed field this
-	// adapter does not look inside can still fail the whole message decode if the platform
-	// sends a shape it did not model — and the cost of that is the message, while the benefit
-	// is nothing, because presence is all these are asked for. See present.
+	// Raw attachments are decoded after admission, so a malformed media object
+	// produces a per-message refusal without breaking the entire polling batch.
 	Voice     json.RawMessage `json:"voice"`
 	Audio     json.RawMessage `json:"audio"`
 	Video     json.RawMessage `json:"video"`
@@ -269,11 +267,9 @@ type Attachment struct {
 	FileSize int64  `json:"file_size"` //nolint:tagliatelle // Bot API wire spelling.
 }
 
-// File is the getFile result. FilePath is EMPTY for media whose bytes this platform does
-// not serve (LO answers audio and video references without a path on purpose: an LO audio
-// is a catalogue track, and there is no address for the bytes). A caller must check the
-// field before attempting a download — that empty path is the platform saying "reference
-// yes, bytes no", not a malformed response.
+// File is the getFile result. FilePath can be empty when the catalog has no direct
+// downloadable source, or on an older LO deployment. Callers check it before
+// downloading; the reference can remain valid without accessible bytes.
 type File struct {
 	FileID   string `json:"file_id"`   //nolint:tagliatelle // Bot API wire spelling.
 	FilePath string `json:"file_path"` //nolint:tagliatelle // Bot API wire spelling.
