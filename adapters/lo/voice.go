@@ -16,7 +16,7 @@ import (
 
 // VoiceInput is the optional receiver seam for speech recognition.
 type VoiceInput interface {
-	Transcribe(ctx context.Context, fileID string) (string, error)
+	TranscribeRecording(ctx context.Context, fileID, filename string) (string, error)
 }
 
 // VoiceTranscriber resolves LO's signed reference and transcribes bounded audio.
@@ -39,6 +39,11 @@ const voiceTimeout = time.Minute
 
 // Transcribe reads the complete bounded recording before calling the configured provider.
 func (v *VoiceTranscriber) Transcribe(ctx context.Context, fileID string) (string, error) {
+	return v.TranscribeRecording(ctx, fileID, "voice.ogg")
+}
+
+// TranscribeRecording preserves the audio container name supplied by the receiver.
+func (v *VoiceTranscriber) TranscribeRecording(ctx context.Context, fileID, filename string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, voiceTimeout)
 	defer cancel()
 	file, err := v.source.GetFile(ctx, fileID)
@@ -68,38 +73,46 @@ func (v *VoiceTranscriber) Transcribe(ctx context.Context, fileID string) (strin
 	if len(audio) == 0 {
 		return "", errors.New("empty voice recording")
 	}
-	return v.transcriber.Transcribe(ctx, bytes.NewReader(audio), "voice.ogg")
+	return v.transcriber.Transcribe(ctx, bytes.NewReader(audio), filename)
 }
 
 // voiceReference keeps unknown voice fields forward-compatible, but requires a real ID.
 func voiceReference(msg *Message) string {
 	var attachment Attachment
-	if json.Unmarshal(msg.Voice, &attachment) != nil {
+	raw := msg.Voice
+	if !present(raw) {
+		raw = msg.Audio
+	}
+	if json.Unmarshal(raw, &attachment) != nil {
 		return ""
 	}
 	return strings.TrimSpace(attachment.FileID)
 }
 
 func (r *Receiver) handleVoice(ctx context.Context, msg *Message, chatID string, replyToBot bool, fileID string) {
-	transcript, err := r.cfg.Voice.Transcribe(ctx, fileID)
+	kind := "voice message"
+	if !present(msg.Voice) {
+		kind = "audio recording"
+	}
+	transcript, err := r.cfg.Voice.TranscribeRecording(ctx, fileID, recordingFilename(msg))
 	if ctx.Err() != nil {
 		return
 	}
 	if err != nil {
 		r.cfg.Logger.Warn("lo: voice transcription failed", "error", err)
-		note := "Sorry, I couldn't transcribe that voice message. Please send the request as text."
+		note := "Sorry, I couldn't transcribe that " + kind + ". Please send the request as text."
 		if errors.Is(err, ErrNoBytes) {
-			note = "This LO deployment does not provide voice downloads yet. Please send the request as text."
+			note = "This LO cannot provide the bytes of that " + kind + ". Please send the request as text."
 		}
 		if errors.Is(err, ErrUploadTooLarge) {
-			note = "That voice message is too large. Please send a shorter recording."
+			note = "That " + kind + " is too large. Please send a shorter recording."
 		}
 		r.notify(ctx, chatID, note)
 		return
 	}
 	transcript = strings.TrimSpace(transcript)
 	if transcript == "" {
-		r.notify(ctx, chatID, "Sorry, I couldn't make out that voice message. Please send the request as text.")
+		r.notify(ctx, chatID, "Sorry, I couldn't make out that "+kind+". Please send the request as text.")
 		return
 	}
 	// Serialize the handoff with /stop so a late provider response cannot start a new run.
@@ -107,6 +120,9 @@ func (r *Receiver) handleVoice(ctx context.Context, msg *Message, chatID string,
 	defer r.voiceMu.Unlock()
 	if ctx.Err() != nil {
 		return
+	}
+	if caption := strings.TrimSpace(msg.Caption); caption != "" {
+		transcript = caption + "\n\nTranscript:\n" + transcript
 	}
 	r.cfg.Service.Handle(ctx, chatID, msg.From.ID, strconv.FormatInt(msg.ID, 10), replyPrompt(msg, replyToBot, transcript))
 }

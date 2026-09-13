@@ -127,3 +127,7 @@ Server draft IDs remain int64 in Go and are serialized as decimal strings in cli
 streaming events (`handler_internal_bot_draft.go`), so a 63-bit Flock draft ID is not
 converted to a JavaScript number by that delivery path. Real streaming rendering and
 cleanup still require the live acceptance run.
+
+### Audio transcription
+
+When speech recognition is configured, ordinary audio attachments use the same bounded, durable preparation queue as voice messages. The speech provider receives a safe filename based on the declared audio MIME type or an allowed filename extension; metadata-free LO catalog audio defaults to MP3. Captions are preserved alongside the transcript. Stop cancels pending work and prevents a late transcript from starting a run; interrupted preparation resumes from its stored message after restart. Without speech recognition, audio follows the downloaded-file path. Video remains a downloaded file.

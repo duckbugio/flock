@@ -12,12 +12,14 @@ import (
 
 type speechSpy struct {
 	bytes string
+	name  string
 	calls int
 }
 
-func (s *speechSpy) Transcribe(_ context.Context, audio io.Reader, _ string) (string, error) {
+func (s *speechSpy) Transcribe(_ context.Context, audio io.Reader, filename string) (string, error) {
 	raw, err := io.ReadAll(audio)
 	s.bytes = string(raw)
+	s.name = filename
 	s.calls++
 	return "review the changes", err
 }
@@ -49,7 +51,7 @@ type voiceInputSpy struct {
 	err   error
 }
 
-func (v *voiceInputSpy) Transcribe(context.Context, string) (string, error) {
+func (v *voiceInputSpy) TranscribeRecording(context.Context, string, string) (string, error) {
 	v.calls++
 	return v.text, v.err
 }

@@ -28,7 +28,7 @@ type heldVoice struct {
 	respectCancel bool
 }
 
-func (v *heldVoice) Transcribe(ctx context.Context, _ string) (string, error) {
+func (v *heldVoice) TranscribeRecording(ctx context.Context, _, _ string) (string, error) {
 	select {
 	case v.started <- struct{}{}:
 	default:
@@ -95,7 +95,16 @@ func voiceQueueReceiver(t *testing.T, speech lo.VoiceInput, store pending.Store,
 	return receiver, stop
 }
 
+const audioRecordingKind = "audio"
+
 func TestQueuedVoiceDoesNotDelayStopAndLateTranscriptCannotStartRun(t *testing.T) {
+	for _, kind := range []string{"voice", audioRecordingKind} {
+		t.Run(kind, func(t *testing.T) { testQueuedRecordingStop(t, kind == audioRecordingKind) })
+	}
+}
+
+func testQueuedRecordingStop(t *testing.T, audio bool) {
+	t.Helper()
 	store, err := pending.Open(filepath.Join(t.TempDir(), "voice.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -105,7 +114,11 @@ func TestQueuedVoiceDoesNotDelayStopAndLateTranscriptCannotStartRun(t *testing.T
 	svc := &queuedService{}
 	receiver, _ := voiceQueueReceiver(t, speech, observed, svc)
 	msg := inbound("")
-	msg.Voice = lo.RawAttachment("voice-ref")
+	if audio {
+		msg.Audio = lo.RawAttachment("audio-ref")
+	} else {
+		msg.Voice = lo.RawAttachment("voice-ref")
+	}
 	admitted := make(chan struct{})
 	go func() { receiver.HandleUpdate(t.Context(), lo.Update{Message: msg}); close(admitted) }()
 	awaitVoiceSignal(t, admitted)
@@ -125,13 +138,24 @@ func TestQueuedVoiceDoesNotDelayStopAndLateTranscriptCannotStartRun(t *testing.T
 }
 
 func TestInterruptedVoiceIsReplayedFromDurableReference(t *testing.T) {
+	for _, kind := range []string{"voice", audioRecordingKind} {
+		t.Run(kind, func(t *testing.T) { testInterruptedRecordingReplay(t, kind == audioRecordingKind) })
+	}
+}
+
+func testInterruptedRecordingReplay(t *testing.T, audio bool) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "voice.json")
 	store, err := pending.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	msg := inbound("")
-	msg.Voice = lo.RawAttachment("voice-ref")
+	if audio {
+		msg.Audio = lo.RawAttachment("audio-ref")
+	} else {
+		msg.Voice = lo.RawAttachment("voice-ref")
+	}
 	raw, err := json.Marshal(msg)
 	if err != nil {
 		t.Fatal(err)
