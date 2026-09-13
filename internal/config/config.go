@@ -93,6 +93,8 @@ type Config struct {
 	LOAPIURL       string  `env:"LO_API_URL"`
 	LOAllowedUsers []int64 `env:"LO_ALLOWED_USERS" envSeparator:","`
 	LOEnableDrafts bool    `env:"LO_ENABLE_DRAFTS" envDefault:"false"`
+	// LOEnableKeyboards requires public inline keyboards and atomic editMessageText reply_markup support.
+	LOEnableKeyboards bool `env:"LO_ENABLE_KEYBOARDS" envDefault:"false"`
 	// LOEnableDocuments turns on file delivery to LO. Opt-in because sendDocument is a
 	// platform method a deployment may predate: with it off the agent's files stay in the
 	// workspace instead of being promised and then refused.

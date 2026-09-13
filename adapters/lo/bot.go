@@ -2,6 +2,7 @@ package lo
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -25,14 +26,18 @@ const (
 // Transport implements text delivery and optional ephemeral progress for LO.
 // Markdown is kept as plain source until LO's formatter is released and verified.
 type Transport struct {
-	api    *Client
-	drafts bool
+	api         *Client
+	drafts      bool
+	callbackKey string
+	keyboards   bool
 	// documents is the operator's answer to "can this LO deliver files". See WithDocuments.
 	documents bool
 }
 
 // NewTransport enables drafts only when the deployment explicitly advertises them.
-func NewTransport(api *Client, drafts bool) *Transport { return &Transport{api: api, drafts: drafts} }
+func NewTransport(api *Client, drafts bool) *Transport {
+	return &Transport{api: api, drafts: drafts, callbackKey: rand.Text()}
+}
 
 // WithDocuments turns on file delivery. It is OPT-IN rather than probed at startup because
 // the answer differs per deployment: sendDocument is implemented on the platform, and a LO
@@ -41,6 +46,12 @@ func NewTransport(api *Client, drafts bool) *Transport { return &Transport{api: 
 // depend on a method call whose failure is indistinguishable from a transient one.
 func (t *Transport) WithDocuments(enabled bool) *Transport {
 	t.documents = enabled
+	return t
+}
+
+// WithKeyboards enables keyboards on deployments supporting atomic text-and-markup edits.
+func (t *Transport) WithKeyboards(enabled bool) *Transport {
+	t.keyboards = enabled
 	return t
 }
 
@@ -80,8 +91,20 @@ func messageText(text string) error {
 	return nil
 }
 
-// Send posts only fields implemented by LO; /stop replaces the unavailable Stop keyboard.
-func (t *Transport) Send(ctx context.Context, chatID, text, _ string, _ bool) (chat.MessageID, error) {
+// Send includes a Stop button while a run is active when keyboards are enabled.
+func (t *Transport) Send(ctx context.Context, chatID, text, runID string, _ bool) (chat.MessageID, error) {
+	var markup *inlineKeyboard
+	if t.keyboards && runID != "" {
+		data := t.stopButtonData(chatID, runID)
+		if data == "" {
+			return "", errors.New("invalid LO run ID")
+		}
+		markup = buttonKeyboard("⏹ Stop", data)
+	}
+	return t.sendWithKeyboard(ctx, chatID, text, markup)
+}
+
+func (t *Transport) sendWithKeyboard(ctx context.Context, chatID, text string, markup *inlineKeyboard) (chat.MessageID, error) {
 	id, err := numericID(chatID)
 	if err != nil {
 		return "", err
@@ -90,7 +113,11 @@ func (t *Transport) Send(ctx context.Context, chatID, text, _ string, _ bool) (c
 		return "", err
 	}
 	var result Message
-	if err := t.api.call(ctx, "sendMessage", map[string]any{"chat_id": id, "text": text}, &result); err != nil {
+	body := map[string]any{"chat_id": id, "text": text}
+	if markup != nil {
+		body["reply_markup"] = markup
+	}
+	if err := t.api.call(ctx, "sendMessage", body, &result); err != nil {
 		return "", err
 	}
 	if result.ID <= 0 {
@@ -105,7 +132,7 @@ func (t *Transport) SendReply(ctx context.Context, chatID, _ chat.MessageID, tex
 }
 
 // Edit updates the persistent anchor in deployments without sendMessageDraft.
-func (t *Transport) Edit(ctx context.Context, chatID, messageID, text, _ string, _ bool) error {
+func (t *Transport) Edit(ctx context.Context, chatID, messageID, text, runID string, _ bool) error {
 	id, err := numericID(chatID)
 	if err != nil {
 		return err
@@ -119,7 +146,18 @@ func (t *Transport) Edit(ctx context.Context, chatID, messageID, text, _ string,
 	}
 	var result Message
 	body := map[string]any{"chat_id": id, "message_id": msgID, "text": text}
-	if err := t.api.call(ctx, "editMessageText", body, &result); err != nil {
+	if t.keyboards {
+		markup := &inlineKeyboard{Rows: [][]inlineButton{}}
+		if runID != "" {
+			data := t.stopButtonData(chatID, runID)
+			if data == "" {
+				return errors.New("invalid LO run ID")
+			}
+			markup = buttonKeyboard("⏹ Stop", data)
+		}
+		body["reply_markup"] = markup
+	}
+	if err := t.api.call(ctx, editTextMethod, body, &result); err != nil {
 		return err
 	}
 	if result.ID != msgID {
@@ -164,9 +202,12 @@ func (t *Transport) SendDocument(ctx context.Context, chatID chat.ChatID, name s
 	return t.api.UploadDocument(ctx, id, name, data)
 }
 
-// SendStarNudge is unavailable because its confirmation callback is not implemented in LO.
-func (*Transport) SendStarNudge(context.Context, chat.ChatID, string) (chat.MessageID, error) {
-	return "", ErrUnsupported
+// SendStarNudge sends the account-action confirmation button when keyboards are enabled.
+func (t *Transport) SendStarNudge(ctx context.Context, chatID chat.ChatID, text string) (chat.MessageID, error) {
+	if !t.keyboards {
+		return "", ErrUnsupported
+	}
+	return t.sendWithKeyboard(ctx, chatID, text, buttonKeyboard("⭐ Поставить звезду", "star:confirm"))
 }
 
 // SendDraft maps one run to a stable, non-zero int64 draft ID. It never returns a

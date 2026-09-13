@@ -45,6 +45,7 @@ type Service interface {
 
 // ReceiverConfig owns the LO allow-list separately from Telegram/VK identities.
 type ReceiverConfig struct {
+	Callbacks CallbackService
 	Service   Service
 	Client    *Client
 	Transport *Transport
@@ -172,7 +173,7 @@ func (r *Receiver) admits(msg *Message) (text string, replyToBot, ok bool) {
 		msg.Chat.ID == 0 || !r.cfg.IsAllowed(msg.From.ID) {
 		return "", false, false
 	}
-	if msg.Chat.Type != privateChatType && msg.Chat.Type != "group" && msg.Chat.Type != "supergroup" {
+	if msg.Chat.Type != privateChatType && msg.Chat.Type != groupChatType && msg.Chat.Type != supergroupChatType {
 		return "", false, false
 	}
 	text = strings.TrimSpace(msg.Text)
@@ -194,6 +195,10 @@ func (r *Receiver) admits(msg *Message) (text string, replyToBot, ok bool) {
 
 // HandleUpdate gates every command and message before invoking the shared service.
 func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
+	if update.CallbackQuery != nil {
+		r.handleCallback(ctx, update.CallbackQuery)
+		return
+	}
 	msg := update.Message
 	text, replyToBot, ok := r.admits(msg)
 	if !ok {
