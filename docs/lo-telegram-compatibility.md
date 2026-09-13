@@ -26,7 +26,7 @@ Flock live delivery remains to be verified with a dedicated bot token.
 | Persistent answer / progress edits | `sendMessage`, `editMessageText`, `deleteMessage` | Implemented with numeric IDs and plain text |
 | Ephemeral progress | `sendMessageDraft` supports private chats and empty-text cleanup | Opt-in `LO_ENABLE_DRAFTS`; stable draft ID per run; explicit empty-text cleanup before a real final `sendMessage`; initial failure falls back to an editable anchor |
 | HTML / entities | `sendMessage` accepts parse modes and entities | Formatting source is sent as plain text; unsupported fields are never transmitted |
-| Stop button | Callback keyboard fields rejected; `answerCallbackQuery` and `editMessageReplyMarkup` are stubs | `/stop` remains available to allowed users even when request/cost guards reject new work |
+| Stop button | Inline send/edit keyboards in #354; atomic text/markup edits in #355; callback answers implemented | `LO_ENABLE_KEYBOARDS` enables signed Stop callbacks and atomic final-text/button cleanup; `/stop` remains available despite cost guards. Production acceptance pending |
 | Command menu | `setMyCommands` / `getMyCommands` / `deleteMyCommands` are implemented | Text commands work; registration is separately opt-in |
 | Native quoted reply | `reply_parameters` and legacy reply fields rejected | Completion notice is a separate message; inbound quoted text is included in the prompt when supplied |
 | Inbound photos | `getFile` returns a `file_path` for photos; bytes at `<base>/file/bot<token>/<file_path>` | Largest size downloaded into the chat's uploads dir, capped by `MAX_UPLOAD_BYTES`; the prompt carries the saved path AND the picture itself travels as a vision block, so the model sees it rather than a file name. The saved name is corrected to what the bytes actually are, and bytes that are not an image at all are refused with the download-failure sentence |
@@ -48,9 +48,9 @@ LO draft support is private-chat-only; groups use the persistent anchor fallback
 1. **Ship and exercise the Bot API as a deployed product:** establish the public
    endpoint and token onboarding, then test real inbound delivery, edits, 429s,
    restart behavior and final answer delivery against the actual chat clients.
-2. **Callbacks and keyboards:** implement `reply_markup`, callback update delivery,
-   `answerCallbackQuery`, and markup edits end to end. This restores inline Stop,
-   confirmation and navigation flows used by existing Telegram bots.
+2. **Callbacks and keyboards:** deploy and exercise the implemented inline Stop
+   and star-confirmation lifecycle with `LO_ENABLE_KEYBOARDS`. Verify callback
+   delivery and atomic final edits against a compatible native LO client.
 3. **Documents and inbound media:** inbound photos and documents and the outbound
    document upload are done, the latter behind `LO_ENABLE_DOCUMENTS`. What remains
    is deployed acceptance for voice input, media groups and the `sendPhoto` upload branch.

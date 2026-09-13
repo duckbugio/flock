@@ -10,7 +10,7 @@ import (
 	"github.com/duckbugio/flock/core/chat"
 )
 
-// HelpText describes the functional fallback when LO cannot display callback keyboards.
+// HelpText lists commands available regardless of optional keyboard support.
 const HelpText = `Flock LO assistant
 
 /start, /help — show commands
@@ -19,7 +19,7 @@ const HelpText = `Flock LO assistant
 /goal <criterion> — arm a goal (/goal off to disarm)
 /schedule — manage scheduled jobs
 
-Send text to work with the assistant. Use /stop instead of a Stop button.
+Send text to work with the assistant. Use /stop to stop work at any time.
 Send a photo or document to work with its contents. Voice messages are transcribed
 when enabled. Rich messages and native replies are not supported yet.`
 

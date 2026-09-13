@@ -61,8 +61,8 @@ retries transient 409 conflicts with ten-second waits and stops on the fifth
 consecutive conflict (40 seconds of waiting, covering the 30-second long poll).
 Cancellation interrupts the wait immediately. Authentication failures and other
 startup-check errors remain fatal. `getUpdates`
-retains queued messages, advances the offset after dispatch, and does not request
-callback/edited-message updates it cannot handle. As with ordinary long polling,
+retains queued messages, advances the offset after dispatch, and requests message
+and callback-query updates. Edited-message updates are not requested. As with ordinary long polling,
 a crash before the next offset acknowledgement can redeliver the last batch;
 this adapter does not promise exactly-once agent execution. Interrupted and queued runs
 are persisted and resumed on startup before new messages or background events.
@@ -150,8 +150,7 @@ agent's pending store can replay work; this is at-least-once recovery.
 - `sendPhoto`'s upload branch answered `500` on the deployments exercised so far, so an image
   is never sent AS A PHOTO. It still reaches the chat when documents are on: the outbox sweep
   posts every regular file through `sendDocument`, a screenshot included, which is what the
-  workspace's screenshot convention already promises the agent. Native callback buttons, rich
-  messages and the interactive star nudge are unavailable.
+  workspace's screenshot convention already promises the agent. Rich messages remain unavailable.
 - Interrupted-run recovery replays the durable per-chat FIFO before polling starts;
   markers remain until a clean terminal result. A missing old progress message does not block replay.
 - `ENABLE_CI_WATCH` enables the shared GitHub/Gitea watcher; `ENABLE_AUTO_MERGE` retains its
@@ -172,3 +171,26 @@ BMP-only text; the transport also validates the actual UTF-16 length.
 See [the compatibility audit](../../docs/lo-telegram-compatibility.md). Local
 contract tests use HTTP fixtures derived from the LO handlers; they do not claim
 that a public LO deployment, mobile build or real bot token has been exercised.
+
+## Inline buttons
+
+Set `LO_ENABLE_KEYBOARDS=true` in `.env` only after deploying public inline
+keyboards and atomic `editMessageText` with `reply_markup` (LO/messenger #354 and
+#355). The default is false for older deployments. Update the native LO app to a
+build containing keyboard rendering and callback delivery.
+
+Persistent progress messages show Stop while a run is active. The final edit
+changes text and clears the keyboard in one request. `/stop` remains available
+with keyboards or ephemeral drafts disabled or unavailable. Stop tokens are signed
+for the chat and the current bot process; buttons from an earlier process cannot
+stop a new run whose counter happens to match. After a restart, use `/stop` for
+resumed work.
+
+Callbacks require an allowed LO user and a message authored by this bot in the
+matching private chat or a supported group. Stop bypasses new-work cost and rate
+guards. Enable the existing GitHub star-nudge settings separately to receive its
+confirmation button; account actions are disabled when keyboards are disabled.
+
+Local HTTP and race tests cover the request lifecycle and callback admission.
+Production acceptance still requires real bot credentials, a deployed compatible
+server, and a compatible native client.

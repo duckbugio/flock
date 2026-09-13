@@ -97,6 +97,11 @@ func (r *Receiver) cancelVoice(chatID string) bool {
 	}
 	r.voiceMu.Lock()
 	defer r.voiceMu.Unlock()
+	return r.cancelVoiceLocked(chatID)
+}
+
+// cancelVoiceLocked serializes cancellation with transcription handoff.
+func (r *Receiver) cancelVoiceLocked(chatID string) bool {
 	active := len(r.cfg.VoiceStore.All()[chatID]) > 0
 	r.voiceJobs.Cancel(chatID)
 	if err := r.cfg.VoiceStore.Clear(chatID); err != nil {

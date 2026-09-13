@@ -145,7 +145,7 @@ func run() int {
 			logger.Warn("dispatcher drain", "error", err)
 		}
 	}()
-	transport := lo.NewTransport(api, cfg.LOEnableDrafts).WithDocuments(cfg.LOEnableDocuments)
+	transport := lo.NewTransport(api, cfg.LOEnableDrafts).WithDocuments(cfg.LOEnableDocuments).WithKeyboards(cfg.LOEnableKeyboards)
 	postRun := autonomy.Build(cfg, logger)
 	// The outbox sweep is what turns an agent's file into a delivery. Always constructed, as
 	// in the Telegram and VK binaries: the core already skips the sweep when the transport
@@ -162,6 +162,7 @@ func run() int {
 		Costs:      costs,
 		CostCapUSD: cfg.EffectiveCostCapUSD(),
 		PostRun:    postRun,
+		StarNudge:  buildStarNudge(cfg, logger),
 		Opts:       opts,
 		Timeout:    cfg.ClaudeTimeout(),
 		RetryAfter: lo.RetryAfter,
@@ -189,6 +190,7 @@ func run() int {
 	}
 	receiver := lo.NewReceiver(lo.ReceiverConfig{
 		Service:          svc,
+		Callbacks:        svc,
 		Client:           api,
 		Transport:        transport,
 		Username:         self.Username,

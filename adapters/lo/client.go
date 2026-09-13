@@ -307,8 +307,9 @@ func LargestPhoto(sizes []PhotoSize) (PhotoSize, bool) {
 
 // Update is an ordered getUpdates item. Unsupported event kinds are acknowledged and ignored.
 type Update struct {
-	ID      int64    `json:"update_id"` //nolint:tagliatelle // Bot API wire spelling.
-	Message *Message `json:"message"`
+	ID            int64          `json:"update_id"` //nolint:tagliatelle // Bot API wire spelling.
+	Message       *Message       `json:"message"`
+	CallbackQuery *CallbackQuery `json:"callback_query"` //nolint:tagliatelle // Bot API wire spelling.
 }
 
 // GetMe validates the token and discovers the authoritative username at startup.
@@ -323,7 +324,7 @@ func (c *Client) GetMe(ctx context.Context) (User, error) {
 	return user, nil
 }
 
-// GetUpdates requests only new messages; it never drops queued updates or disables webhooks.
+// GetUpdates requests messages and callback queries; it never drops queued updates or disables webhooks.
 //
 // The batch is decoded one update at a time, and an update that will not decode is SKIPPED
 // rather than failing the batch. Since the media fields became typed, an unexpected shape in
@@ -346,7 +347,8 @@ func (c *Client) GetMe(ctx context.Context) (User, error) {
 func (c *Client) GetUpdates(ctx context.Context, offset int64) ([]Update, error) {
 	var raw []json.RawMessage
 	body := map[string]any{
-		"offset": offset, "timeout": pollTimeoutSeconds, "limit": pollBatchSize, "allowed_updates": []string{"message"},
+		"offset": offset, "timeout": pollTimeoutSeconds, "limit": pollBatchSize,
+		"allowed_updates": []string{"message", "callback_query"},
 	}
 	if err := c.call(ctx, "getUpdates", body, &raw); err != nil {
 		return nil, err
@@ -358,8 +360,9 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64) ([]Update, error)
 		// a poisoned LAST update in a batch would be re-fetched forever. RawMessage for the
 		// body, so a shape this adapter does not model cannot take the id down with it.
 		var header struct {
-			ID      json.Number     `json:"update_id"` //nolint:tagliatelle // Bot API wire spelling.
-			Message json.RawMessage `json:"message"`
+			ID            json.Number     `json:"update_id"` //nolint:tagliatelle // Bot API wire spelling.
+			Message       json.RawMessage `json:"message"`
+			CallbackQuery json.RawMessage `json:"callback_query"` //nolint:tagliatelle // Bot API wire spelling.
 		}
 		var (
 			id    int64
@@ -373,20 +376,20 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64) ([]Update, error)
 			slog.Warn("LO sent an update this adapter cannot read at all")
 			continue
 		}
-		if len(header.Message) == 0 {
-			// An event kind this adapter did not ask for, or an empty envelope. Acknowledged.
-			updates = append(updates, Update{ID: id})
-			continue
+		update := Update{ID: id}
+		if len(header.Message) != 0 {
+			if err := json.Unmarshal(header.Message, &update.Message); err != nil {
+				update.Message = nil
+				slog.Warn("LO sent an unreadable message", "update_id", id)
+			}
 		}
-		var message Message
-		if err := json.Unmarshal(header.Message, &message); err != nil {
-			// A body that will not decode: keep the id so the offset moves past it, and leave
-			// Message nil, which the receiver already treats as nothing to do.
-			slog.Warn("LO sent an update whose message this adapter cannot read", "update_id", id)
-			updates = append(updates, Update{ID: id})
-			continue
+		if len(header.CallbackQuery) != 0 {
+			if err := json.Unmarshal(header.CallbackQuery, &update.CallbackQuery); err != nil {
+				update.CallbackQuery = nil
+				slog.Warn("LO sent an unreadable callback query", "update_id", id)
+			}
 		}
-		updates = append(updates, Update{ID: id, Message: &message})
+		updates = append(updates, update)
 	}
 	return updates, nil
 }
