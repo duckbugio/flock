@@ -25,7 +25,7 @@ Flock live delivery remains to be verified with a dedicated bot token.
 | Incoming text | `getUpdates`, positive offset acknowledgement | Long polling; separate LO user allow-list; group mention gate |
 | Persistent answer / progress edits | `sendMessage`, `editMessageText`, `deleteMessage` | Implemented with numeric IDs and plain text |
 | Ephemeral progress | `sendMessageDraft` supports private chats and empty-text cleanup | Opt-in `LO_ENABLE_DRAFTS`; stable draft ID per run; explicit empty-text cleanup before a real final `sendMessage`; initial failure falls back to an editable anchor |
-| HTML / entities | `sendMessage` accepts parse modes and entities | Formatting source is sent as plain text; unsupported fields are never transmitted |
+| HTML / entities | `sendMessage` accepts parse modes and entities | Assistant Markdown uses the shared Telegram HTML formatter for sends and edits; an explicit pre-write formatting rejection retries the original text once. Plain progress and drafts remain plain text |
 | Stop button | Inline send/edit keyboards in #354; atomic text/markup edits in #355; callback answers implemented | `LO_ENABLE_KEYBOARDS` enables signed Stop callbacks and atomic final-text/button cleanup; `/stop` remains available despite cost guards. Production acceptance pending |
 | Command menu | `setMyCommands` / `getMyCommands` / `deleteMyCommands` are implemented | Text commands work; registration is separately opt-in |
 | Native quoted reply | `reply_parameters` and legacy reply fields rejected | Completion notice is a separate message; inbound quoted text is included in the prompt when supplied |
@@ -55,8 +55,8 @@ LO draft support is private-chat-only; groups use the persistent anchor fallback
    document upload are done, the latter behind `LO_ENABLE_DOCUMENTS`. What remains
    is deployed acceptance for voice input, media groups and the `sendPhoto` upload branch.
    The adapter now supports voice transcription when enabled and served by the platform.
-4. **Formatting and reply parity:** wire the adapter to implemented parse modes/entities
-   and complete native reply fields with visible client rendering. Test code blocks, escaping, emoji offsets,
+4. **Formatting and reply parity:** the adapter now sends HTML for formatted answers
+   and edits; complete native reply fields with visible client rendering. Test code blocks, escaping, emoji offsets,
    quote targets and edit behavior, not merely accepted JSON.
 5. **Drafts and command discovery:** deploy and verify temporary-event delivery,
    expiration, final-message replacement and command menus. The opt-in flags in

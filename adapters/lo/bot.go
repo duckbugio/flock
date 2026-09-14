@@ -24,7 +24,7 @@ const (
 )
 
 // Transport implements text delivery and optional ephemeral progress for LO.
-// Markdown is kept as plain source until LO's formatter is released and verified.
+// Assistant Markdown uses the shared HTML formatter with a plain-text fallback.
 type Transport struct {
 	api         *Client
 	drafts      bool
@@ -92,7 +92,7 @@ func messageText(text string) error {
 }
 
 // Send includes a Stop button while a run is active when keyboards are enabled.
-func (t *Transport) Send(ctx context.Context, chatID, text, runID string, _ bool) (chat.MessageID, error) {
+func (t *Transport) Send(ctx context.Context, chatID, text, runID string, markdown bool) (chat.MessageID, error) {
 	var markup *inlineKeyboard
 	if t.keyboards && runID != "" {
 		data := t.stopButtonData(chatID, runID)
@@ -101,10 +101,12 @@ func (t *Transport) Send(ctx context.Context, chatID, text, runID string, _ bool
 		}
 		markup = buttonKeyboard("⏹ Stop", data)
 	}
-	return t.sendWithKeyboard(ctx, chatID, text, markup)
+	return t.sendWithKeyboard(ctx, chatID, text, markup, markdown)
 }
 
-func (t *Transport) sendWithKeyboard(ctx context.Context, chatID, text string, markup *inlineKeyboard) (chat.MessageID, error) {
+func (t *Transport) sendWithKeyboard(
+	ctx context.Context, chatID, text string, markup *inlineKeyboard, markdown bool,
+) (chat.MessageID, error) {
 	id, err := numericID(chatID)
 	if err != nil {
 		return "", err
@@ -117,7 +119,7 @@ func (t *Transport) sendWithKeyboard(ctx context.Context, chatID, text string, m
 	if markup != nil {
 		body["reply_markup"] = markup
 	}
-	if err := t.api.call(ctx, "sendMessage", body, &result); err != nil {
+	if err := t.callFormatted(ctx, "sendMessage", body, text, markdown, &result); err != nil {
 		return "", err
 	}
 	if result.ID <= 0 {
@@ -132,7 +134,7 @@ func (t *Transport) SendReply(ctx context.Context, chatID, _ chat.MessageID, tex
 }
 
 // Edit updates the persistent anchor in deployments without sendMessageDraft.
-func (t *Transport) Edit(ctx context.Context, chatID, messageID, text, runID string, _ bool) error {
+func (t *Transport) Edit(ctx context.Context, chatID, messageID, text, runID string, markdown bool) error {
 	id, err := numericID(chatID)
 	if err != nil {
 		return err
@@ -157,7 +159,7 @@ func (t *Transport) Edit(ctx context.Context, chatID, messageID, text, runID str
 		}
 		body["reply_markup"] = markup
 	}
-	if err := t.api.call(ctx, editTextMethod, body, &result); err != nil {
+	if err := t.callFormatted(ctx, editTextMethod, body, text, markdown, &result); err != nil {
 		return err
 	}
 	if result.ID != msgID {
@@ -207,7 +209,7 @@ func (t *Transport) SendStarNudge(ctx context.Context, chatID chat.ChatID, text 
 	if !t.keyboards {
 		return "", ErrUnsupported
 	}
-	return t.sendWithKeyboard(ctx, chatID, text, buttonKeyboard("⭐ Поставить звезду", "star:confirm"))
+	return t.sendWithKeyboard(ctx, chatID, text, buttonKeyboard("⭐ Поставить звезду", "star:confirm"), false)
 }
 
 // SendDraft maps one run to a stable, non-zero int64 draft ID. It never returns a
