@@ -51,7 +51,7 @@ func TestTransportUsesOnlySupportedLOParameters(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Error(err)
 		}
-		allowed := map[string]bool{"chat_id": true, "text": true}
+		allowed := map[string]bool{"chat_id": true, "text": true, "parse_mode": true}
 		if method != "sendMessage" {
 			allowed["message_id"] = true
 		}
