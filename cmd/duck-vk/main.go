@@ -236,9 +236,12 @@ func run() int {
 		StarNudge:  starNudge,
 		PostRun:    postRun,
 		Opts:       opts,
-		Timeout:    cfg.ClaudeTimeout(),
-		RetryAfter: vk.RetryAfter,
-		Logger:     logger,
+		// Let a turn-limit stop name the knob that raises the cap. Empty for a
+		// provider that applies no turn cap, which keeps the knob out of the message.
+		MaxTurnsEnv: airunner.TurnLimitEnv(provider.Name),
+		Timeout:     cfg.ClaudeTimeout(),
+		RetryAfter:  vk.RetryAfter,
+		Logger:      logger,
 	})
 
 	// One-shot follow-ups (the workspace followup/<delay>.md convention).

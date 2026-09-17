@@ -1363,28 +1363,66 @@ func assertMarkdownSafe(t *testing.T, line string) {
 	}
 }
 
+// assertCodeSpanSafe checks a message that legitimately carries an inline-code
+// span: every span opens and closes (an even backtick count) and none is broken
+// by a newline, which also ends a code span and would leave the backticks
+// visible. It deliberately asserts LESS than assertMarkdownSafe: a stage line
+// strips every markdown metacharacter from its labels, whereas the turn-limit
+// message interpolates an operator-supplied env-var name that KEEPS "_"
+// (sanitizeEnvName strips only the backtick, because a knob name with its
+// underscores removed names no variable). Inside a code span "_" and "*" are
+// inert, so a realistic name like MAX_TURNS leaves an odd "_" count on a message
+// that is perfectly safe — demanding balance here would fail a correct message
+// and pressure the next reader into stripping "_".
+func assertCodeSpanSafe(t *testing.T, msg string) {
+	t.Helper()
+	parts := strings.Split(msg, "`")
+	if len(parts)%2 == 0 {
+		t.Fatalf("unbalanced backticks in message (%d occurrences): %q", len(parts)-1, msg)
+	}
+	// Odd indices are the contents of a code span: parts[1] sits between the
+	// first and second backtick, parts[3] between the third and fourth, and so on.
+	for i := 1; i < len(parts); i += 2 {
+		if strings.ContainsAny(parts[i], "\n\r") {
+			t.Fatalf("newline inside a code span (%q) breaks it: %q", parts[i], msg)
+		}
+	}
+	// Even indices are OUTSIDE every span, where the metacharacters are NOT inert and
+	// the stage line's balance rule still applies. Only the span interior earned the
+	// exemption above, so anything a future clause interpolates outside one stays held
+	// to it.
+	for i := 0; i < len(parts); i += 2 {
+		for _, meta := range []string{"*", "_", "~", "|"} {
+			if c := strings.Count(parts[i], meta); c%2 != 0 {
+				t.Fatalf("unbalanced %q outside a code span (%d occurrences): %q", meta, c, msg)
+			}
+		}
+	}
+}
+
 func TestFinalSuccess(t *testing.T) {
-	out := Final(&agent.RunResult{Text: "  the answer is 42  ", IsError: false})
+	out := Final(&agent.RunResult{Text: "  the answer is 42  ", IsError: false}, RunLimits{})
 	if out != "the answer is 42" {
 		t.Fatalf("got %q", out)
 	}
 }
 
 func TestFinalErrorResult(t *testing.T) {
-	out := Final(&agent.RunResult{Text: "max turns exceeded", IsError: true})
+	out := Final(&agent.RunResult{Text: "max turns exceeded", IsError: true}, RunLimits{})
 	if !strings.HasPrefix(out, "⚠️") || !strings.Contains(out, "max turns exceeded") {
 		t.Fatalf("error result not flagged: %q", out)
 	}
 
-	empty := Final(&agent.RunResult{Text: "", IsError: true})
+	empty := Final(&agent.RunResult{Text: "", IsError: true}, RunLimits{})
 	if !strings.HasPrefix(empty, "⚠️") {
 		t.Fatalf("empty error result not flagged: %q", empty)
 	}
 
-	// Diagnostic: an empty-bodied error Result surfaces the subtype so the cause
-	// isn't fully opaque.
-	withSub := Final(&agent.RunResult{Text: "", IsError: true, Subtype: "error_max_turns"})
-	if !strings.Contains(withSub, "error_max_turns") {
+	// Diagnostic: the raw subtype survives into the message so the cause isn't
+	// fully opaque, including for the subtype that has dedicated wording
+	// (TestFinalTurnLimitStop covers what that wording says).
+	withSub := Final(&agent.RunResult{Text: "", IsError: true, Subtype: turnLimitSubtype}, RunLimits{})
+	if !strings.Contains(withSub, turnLimitSubtype) {
 		t.Fatalf("empty error result should include the subtype: %q", withSub)
 	}
 	// With no subtype the plain fallback is kept (no empty parentheses).
@@ -1392,11 +1430,237 @@ func TestFinalErrorResult(t *testing.T) {
 		t.Fatalf("empty error result without subtype should use the plain fallback: %q", empty)
 	}
 
-	if got := Final(&agent.RunResult{Text: "", IsError: false}); got != "(empty response)" {
+	if got := Final(&agent.RunResult{Text: "", IsError: false}, RunLimits{}); got != "(empty response)" {
 		t.Fatalf("empty success placeholder: %q", got)
 	}
-	if got := Final(nil); got != "(no result)" {
+	if got := Final(nil, RunLimits{}); got != "(no result)" {
 		t.Fatalf("nil result: %q", got)
+	}
+}
+
+// testMaxTurnsEnv stands in for the deployment's real turn-cap variable. core/chat
+// must never hardcode a provider env name, so the tests do not name one either.
+const testMaxTurnsEnv = "X_MAX_TURNS"
+
+// turnLimitProviderText is the result text a real provider ships with an
+// error_max_turns envelope, copied verbatim from core/claude/testdata/error.jsonl
+// (which also reports num_turns 5). It is fixed boilerplate that says what the
+// explanation says, which is why the message does not echo it back.
+const turnLimitProviderText = "Reached the maximum number of turns."
+
+// turnLimitOpener is the explanation's first clause. It must appear exactly once in
+// every turn-limit message: twice would mean a provider result was echoed alongside
+// it, stating the same fact in two consecutive lines.
+const turnLimitOpener = "The run stopped because it reached its turn limit"
+
+// TestFinalTurnLimitStop covers the terminal message for a run that exhausted the
+// agent turn cap. It must state the cause, rule out a crash/timeout/API error,
+// keep the raw subtype token, and name the knob plus the value actually in force —
+// each clause appearing exactly when the limit behind it is known. The reported
+// turn count rides along ONLY when it equals the cap (num_turns semantics are
+// unverified, so a count that contradicts the sentence is dropped, not shown), the
+// provider's own result text is never echoed alongside it (it only restates the
+// cause), and the knob name — operator-supplied — can never break out of its code
+// span.
+func TestFinalTurnLimitStop(t *testing.T) {
+	tests := []struct {
+		name    string
+		res     *agent.RunResult
+		limits  RunLimits
+		want    []string
+		notWant []string
+		// oddUnderscores marks the case that exists to prove this message is checked
+		// as a code span rather than for emphasis balance: its rendered text must
+		// carry an ODD number of "_", which assertMarkdownSafe (right for a stage
+		// line) would reject even though every "_" here is inert.
+		oddUnderscores bool
+	}{
+		{
+			// The count corroborates the cap exactly, so it is safe to show.
+			name:   "reported turns match the cap",
+			res:    &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 40},
+			limits: RunLimits{MaxTurns: 40, MaxTurnsEnv: testMaxTurnsEnv},
+			want: []string{
+				"turn limit", "not a crash, timeout or API error", "restate anything you want continued",
+				"(40 of 40 turns)", "`" + testMaxTurnsEnv + "`", "current: 40", turnLimitSubtype,
+			},
+			// A stopped run's session is cleared when it was resuming, so the message
+			// must not promise the next one picks up where this one left off.
+			notWant: []string{"starts a new run"},
+		},
+		{
+			// num_turns semantics are unverified and the counter can undershoot the
+			// cap; "3 of 40 turns" under a sentence that says the cap was reached reads
+			// as a bug, so the count is dropped while the cap itself still shows.
+			name:    "reported turns fall short of the cap",
+			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 3},
+			limits:  RunLimits{MaxTurns: 40, MaxTurnsEnv: testMaxTurnsEnv},
+			want:    []string{"turn limit", "`" + testMaxTurnsEnv + "`", "current: 40", turnLimitSubtype},
+			notWant: []string{" of ", "3"},
+		},
+		{
+			// The same counter can also exceed the cap: "501 of 250" reads as a bug too.
+			name:    "reported turns exceed the cap",
+			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 501},
+			limits:  RunLimits{MaxTurns: 250, MaxTurnsEnv: testMaxTurnsEnv},
+			want:    []string{"turn limit", "current: 250", turnLimitSubtype},
+			notWant: []string{"501", " of "},
+		},
+		{
+			name:    "no turn count reported",
+			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype},
+			limits:  RunLimits{MaxTurns: 40, MaxTurnsEnv: testMaxTurnsEnv},
+			want:    []string{"turn limit", "current: 40", turnLimitSubtype},
+			notWant: []string{" of "},
+		},
+		{
+			name:    "cap known but provider has no knob",
+			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 40},
+			limits:  RunLimits{MaxTurns: 40},
+			want:    []string{"turn limit", "not a crash, timeout or API error", "(40 of 40 turns)", turnLimitSubtype},
+			notWant: []string{testMaxTurnsEnv, "current:", "`"},
+		},
+		{
+			// No cap is configured, so never print a cap of 0 and never corroborate it
+			// with a count: only the knob to set is actionable here. The clause also has
+			// to say WHOSE limit then bound the run, or it contradicts the opening
+			// sentence — without claiming to know what that limit is.
+			name:   "knob known but no cap configured",
+			res:    &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 7},
+			limits: RunLimits{MaxTurnsEnv: testMaxTurnsEnv},
+			want: []string{
+				"turn limit", "No turn cap is configured for this bot, so the run was bound by" +
+					" whatever default the provider applies", "`" + testMaxTurnsEnv + "`", turnLimitSubtype,
+			},
+			notWant: []string{"0", "7", "current:", " of ", "raise"},
+		},
+		{
+			name:    "neither cap nor knob known",
+			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 7},
+			limits:  RunLimits{},
+			want:    []string{"turn limit", "not a crash, timeout or API error", turnLimitSubtype},
+			notWant: []string{testMaxTurnsEnv, "current:", " of ", "0", "7", "`"},
+		},
+		{
+			// chat.Config.MaxTurnsEnv is exported, so the knob name is whatever an
+			// embedder set: a backtick in it would leave an odd count and take the
+			// WHOLE message off the rich-markdown path. Backticks are stripped and
+			// surrounding whitespace/newlines collapsed, so the code span always closes.
+			name:    "hostile knob name cannot break the code span",
+			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 40},
+			limits:  RunLimits{MaxTurns: 40, MaxTurnsEnv: "  X`_MAX`_TURNS\n"},
+			want:    []string{"raise `" + testMaxTurnsEnv + "` (current: 40)", turnLimitSubtype},
+			notWant: []string{"X`", "\n"},
+		},
+		{
+			// The everyday case the code span exists for: "_" is legal in an env var
+			// name and sanitizeEnvName keeps it (a name with its underscores removed
+			// names no variable), so a realistic knob leaves an odd "_" count in the
+			// message. That is safe — the underscores sit inside a code span, where
+			// they are inert — and the assertion below must not demand otherwise.
+			name:           "knob name with an odd underscore count stays safe",
+			res:            &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 40},
+			limits:         RunLimits{MaxTurns: 40, MaxTurnsEnv: "MAX_TURNS"},
+			want:           []string{"raise `MAX_TURNS` (current: 40)", turnLimitSubtype},
+			oddUnderscores: true,
+		},
+		{
+			// A knob name that is nothing BUT metacharacters names no variable, so the
+			// clause is dropped rather than rendered as empty backticks.
+			name:    "knob name left empty by sanitizing drops the clause",
+			res:     &agent.RunResult{IsError: true, Subtype: turnLimitSubtype, NumTurns: 40},
+			limits:  RunLimits{MaxTurns: 40, MaxTurnsEnv: " `` "},
+			want:    []string{"turn limit", "(40 of 40 turns)", turnLimitSubtype},
+			notWant: []string{"`", "current:", "raise"},
+		},
+		{
+			// The realistic payload: the provider fills the result with fixed boilerplate
+			// for this subtype. It states exactly what the explanation's first sentence
+			// states, so echoing it would open the message with a duplicate of its own
+			// next line — the explanation stands alone instead.
+			name:    "provider boilerplate is not echoed back",
+			res:     &agent.RunResult{Text: turnLimitProviderText, IsError: true, Subtype: turnLimitSubtype, NumTurns: 5},
+			limits:  RunLimits{MaxTurns: 5, MaxTurnsEnv: testMaxTurnsEnv},
+			want:    []string{"⚠️ " + turnLimitOpener, "(5 of 5 turns)", "current: 5", turnLimitSubtype},
+			notWant: []string{turnLimitProviderText},
+		},
+		{
+			// The rule is gated on the subtype, not on matching the boilerplate sentence,
+			// so ANY text arriving with this subtype is dropped and a reworded provider
+			// message cannot start leaking back in.
+			name:    "result text is dropped whatever it says",
+			res:     &agent.RunResult{Text: "partial answer", IsError: true, Subtype: turnLimitSubtype, NumTurns: 40},
+			limits:  RunLimits{MaxTurns: 40, MaxTurnsEnv: testMaxTurnsEnv},
+			want:    []string{"⚠️ " + turnLimitOpener, "current: 40", turnLimitSubtype},
+			notWant: []string{"partial answer"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Final(tt.res, tt.limits)
+			if !strings.HasPrefix(got, "⚠️") {
+				t.Fatalf("turn-limit stop not flagged: %q", got)
+			}
+			// The cause is stated once and only once, whatever the result carried.
+			if n := strings.Count(got, turnLimitOpener); n != 1 {
+				t.Fatalf("Final() = %q, want the explanation exactly once, got %d", got, n)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("Final() = %q, want it to contain %q", got, want)
+				}
+			}
+			for _, notWant := range tt.notWant {
+				if strings.Contains(got, notWant) {
+					t.Fatalf("Final() = %q, want it NOT to contain %q", got, notWant)
+				}
+			}
+			// This message is NOT a stage line: it carries an inline-code span whose
+			// content keeps its underscores on purpose, so only the code-span
+			// invariant applies here (see assertCodeSpanSafe).
+			assertCodeSpanSafe(t, got)
+			if tt.oddUnderscores && strings.Count(got, "_")%2 == 0 {
+				t.Fatalf("Final() = %q, want an ODD underscore count so this case covers what assertMarkdownSafe rejects", got)
+			}
+		})
+	}
+}
+
+// TestFinalKeepsWordingOutsideTurnLimit pins the exact terminal text for every
+// result the turn-limit wording does not own, so threading RunLimits through
+// Final cannot silently reword an unrelated message. The limits must make no
+// difference to any of them.
+func TestFinalKeepsWordingOutsideTurnLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		res  *agent.RunResult
+		want string
+	}{
+		{"success text is trimmed", &agent.RunResult{Text: "  the answer is 42  "}, "the answer is 42"},
+		{"empty success", &agent.RunResult{}, "(empty response)"},
+		{"nil result", nil, "(no result)"},
+		{"error with text", &agent.RunResult{Text: "boom", IsError: true}, "⚠️ boom"},
+		{"error without subtype", &agent.RunResult{IsError: true}, "⚠️ the run ended with an error"},
+		{
+			// Another subtype's cause cannot be stated truthfully, so it keeps the
+			// generic message with the raw token appended.
+			"other error subtype",
+			&agent.RunResult{IsError: true, Subtype: "error_during_execution"},
+			"⚠️ the run ended with an error (error_during_execution)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Final(tt.res, RunLimits{}); got != tt.want {
+				t.Fatalf("Final() with zero limits = %q, want %q", got, tt.want)
+			}
+			limits := RunLimits{MaxTurns: 40, MaxTurnsEnv: testMaxTurnsEnv}
+			if got := Final(tt.res, limits); got != tt.want {
+				t.Fatalf("Final() with limits = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
