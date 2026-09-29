@@ -3,10 +3,35 @@ package airunner
 
 import (
 	"errors"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/duckbugio/flock/internal/config"
 )
+
+func TestCodingRunnersDoNotInheritSecretaryAPIKey(t *testing.T) {
+	t.Setenv("OPENAI_COMPAT_API_KEY", "secretary-key")
+	t.Setenv("SECRETARY_CUSTOM_KEY", "custom-secretary-key")
+	cfg := config.Config{SecretaryMode: config.SecretaryModeApproval, OpenAICompatAPIKeyEnv: "SECRETARY_CUSTOM_KEY"}
+	for _, env := range [][]string{ClaudeEnv(cfg), CodexEnv(cfg)} {
+		for _, kv := range env {
+			if strings.HasPrefix(kv, "OPENAI_COMPAT_API_KEY=") || strings.HasPrefix(kv, "SECRETARY_CUSTOM_KEY=") {
+				t.Fatalf("coding runner inherited secretary credential: %s", strings.SplitN(kv, "=", 2)[0])
+			}
+		}
+	}
+}
+
+func TestCodingRunnersPreserveCustomProviderKeyWhenSecretaryOff(t *testing.T) {
+	t.Setenv("SECRETARY_CUSTOM_KEY", "shared-key")
+	cfg := config.Config{OpenAICompatAPIKeyEnv: "SECRETARY_CUSTOM_KEY"}
+	for _, env := range [][]string{ClaudeEnv(cfg), CodexEnv(cfg)} {
+		if !slices.Contains(env, "SECRETARY_CUSTOM_KEY=shared-key") {
+			t.Fatal("disabled Secretary Mode removed an unrelated provider key")
+		}
+	}
+}
 
 func TestBuildDefaultProviderIsClaude(t *testing.T) {
 	runner, opts, info, err := Build(config.Config{

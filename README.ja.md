@@ -40,6 +40,10 @@ docker compose up -d
 
 [`.env.example`](adapters/telegram/.env.example) のそれ以外の項目には妥当なデフォルト値が設定されています。更新は後から `docker compose pull && docker compose up -d` で行えます。
 
+### Telegram の秘書モード
+
+@BotFather でボットの秘書モードを有効にし、Telegram でアクセスを許す個人チャットを選びます。アカウント所有者の ID を `ALLOWED_USERS` に追加してください。`SECRETARY_MODE=approval` は所有者へ送信・破棄ボタン付きの下書きを送り、`SECRETARY_MODE=auto` は直ちに返信します。`OPENAI_COMPAT_BASE_URL`、`OPENAI_COMPAT_MODEL`、`OPENAI_COMPAT_API_KEY`、`OPENAI_COMPAT_BILLING_ACK=true` が必要です。`SECRETARY_MODEL` と `SECRETARY_PROMPT` は任意です。ボットは過去の会話ではなく現在のメッセージだけを受け取ります。自動返信前にプロバイダー側で支出上限を設定してください。[英語の詳細](README.md#telegram-secretary-mode)。
+
 > **リージョン:** **Anthropic がサポートするリージョン**でホストしてください（一部の国、例えば RU/CN などはジオブロックされています）。そうでない場合、Claude の呼び出しは失敗します。
 
 **VK** も同じパターンで [`adapters/vk/`](adapters/vk/) に用意されており、同じコアの上に構築され、`ghcr.io/duckbugio/flock-vk` として公開されています。配布されるのは env テンプレートのみ（compose ファイルはありません）。`cp .env.example .env` のあと、`docker run --env-file .env ghcr.io/duckbugio/flock-vk` を実行します。Claude の認証とコア設定は Telegram と同じで、トランスポート用の 3 つの変数のみが異なります。

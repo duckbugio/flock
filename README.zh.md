@@ -40,6 +40,10 @@ docker compose up -d
 
 [`.env.example`](adapters/telegram/.env.example) 中的其余一切都有合理的默认值。日后可用 `docker compose pull && docker compose up -d` 更新。
 
+### Telegram 秘书模式
+
+先在 @BotFather 为机器人启用秘书模式，再在 Telegram 中选择允许访问的私人聊天。账户所有者必须列在 `ALLOWED_USERS` 中。`SECRETARY_MODE=approval` 将草稿发给账户所有者，由其发送或丢弃；`SECRETARY_MODE=auto` 会立即回复。需要设置 `OPENAI_COMPAT_BASE_URL`、`OPENAI_COMPAT_MODEL`、`OPENAI_COMPAT_API_KEY` 和 `OPENAI_COMPAT_BILLING_ACK=true`；`SECRETARY_MODEL` 与 `SECRETARY_PROMPT` 可选。机器人只接收当前消息，不接收聊天历史。启用自动回复前，请在服务提供商处设置支出上限。[英文详情](README.md#telegram-secretary-mode)。
+
 > **地区：** 请托管在 **Anthropic 支持的地区**（部分国家/地区会被地理封锁，例如 RU/CN）——否则 Claude 调用会失败。
 
 **VK** 在 [`adapters/vk/`](adapters/vk/) 下采用相同的模式，构建于同一套核心之上，并以 `ghcr.io/duckbugio/flock-vk` 形式发布。它只附带一个环境变量模板（没有 compose 文件）：`cp .env.example .env`，然后 `docker run --env-file .env ghcr.io/duckbugio/flock-vk`。Claude 认证与核心设置都与 Telegram 一致；只有三个传输变量不同：

@@ -993,6 +993,54 @@ func TestAutonomyStoreFileDefaults(t *testing.T) {
 	}
 }
 
+func TestTelegramSecretaryModeRequiresAnswerOnlyProvider(t *testing.T) {
+	base := Config{
+		TelegramBotToken: "123:token", SecretaryMode: "approval",
+		OpenAICompatBaseURL: "https://api.example.test/v1", OpenAICompatModel: "reply-model",
+		OpenAICompatAPIKey: "secret", OpenAICompatBillingAck: true,
+	}
+	for _, mode := range []string{"approval", "auto"} {
+		c := base
+		c.SecretaryMode = mode
+		if err := c.ValidateTelegram(); err != nil {
+			t.Fatalf("%s mode: %v", mode, err)
+		}
+	}
+	invalid := base
+	invalid.OpenAICompatBaseURL = "not-a-url"
+	if err := invalid.ValidateTelegram(); err == nil {
+		t.Fatal("Secretary Mode accepted invalid API URL")
+	}
+	for _, value := range []string{"http://api.example.test/v1", "https://api.example.test/v1?", "https://api.example.test/v1#"} {
+		invalid = base
+		invalid.OpenAICompatBaseURL = value
+		if err := invalid.ValidateTelegram(); err == nil {
+			t.Errorf("Secretary Mode accepted insecure or malformed API URL %q", value)
+		}
+	}
+	for _, value := range []string{
+		"http://localhost:8080/v1", "http://127.0.0.1:8080/v1", "http://[::1]:8080/v1",
+		"http://vllm:8000/v1", "http://host.docker.internal:8000/v1",
+		"http://10.0.0.5:8000/v1", "http://[fd00::5]:8000/v1",
+	} {
+		local := base
+		local.OpenAICompatBaseURL = value
+		if err := local.ValidateTelegram(); err != nil {
+			t.Errorf("Secretary Mode rejected loopback API URL %q: %v", value, err)
+		}
+	}
+	invalid = base
+	invalid.OpenAICompatAPIKey = ""
+	if err := invalid.ValidateTelegram(); err == nil {
+		t.Fatal("Secretary Mode accepted missing API key")
+	}
+	invalid = base
+	invalid.SecretaryMode = "unknown"
+	if err := invalid.ValidateTelegram(); err == nil {
+		t.Fatal("Secretary Mode accepted unknown mode")
+	}
+}
+
 func TestEffectiveGoalMaxAttempts(t *testing.T) {
 	for in, want := range map[int]int{0: 1, -3: 1, 1: 1, 5: 5} {
 		c := Config{GoalMaxAttempts: in}

@@ -60,6 +60,8 @@ func main() {
 // run holds the adapter's startup and serve logic, returning a process exit code.
 // Splitting it out of main lets deferred cleanups (signal context, dispatcher
 // drain) run before the process exits, which a direct os.Exit in main would skip.
+//
+//nolint:gocyclo // Startup wires independently gated services; keep their failure paths explicit.
 func run() int {
 	cfg, err := config.Load()
 	if err != nil {
@@ -220,13 +222,17 @@ func run() int {
 
 	guards := chat.GuardConfig{CostCapUSD: cfg.EffectiveCostCapUSD()}
 
-	opts2 := []bot.Option{
+	opts2 := append([]bot.Option{
 		bot.WithDefaultHandler(textHandler(cfg, &svc, &vt, &up, limiter, costs, guards)),
-	}
+	}, secretaryBotOptions(cfg)...)
 
 	b, err := bot.New(cfg.TelegramBotToken, opts2...)
 	if err != nil {
 		logger.Error("create bot", "error", err)
+		return 1
+	}
+	if err := wireSecretary(cfg, b, logger); err != nil {
+		logger.Error("open secretary state", "error", err)
 		return 1
 	}
 
