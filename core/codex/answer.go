@@ -98,8 +98,9 @@ func selectsCustomModelProvider(data []byte) bool {
 		if strings.HasPrefix(line, "#") {
 			continue
 		}
-		key, _, found := strings.Cut(line, "=")
-		if found && strings.TrimSpace(key) == "model_provider" {
+		// Fail closed for quoted, dotted and inline-table TOML keys. Pure
+		// declarations have no '='; comment lines were skipped above.
+		if strings.Contains(line, "model_provider") && strings.Contains(line, "=") {
 			return true
 		}
 	}

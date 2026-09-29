@@ -260,7 +260,11 @@ func TestAnswerOnlyReasoningIsModelSpecific(t *testing.T) {
 
 func TestCustomModelProviderDetectionIgnoresDeclarations(t *testing.T) {
 	config := []byte("# model_provider = 'old'\n[model_providers.gateway]\nname = 'gateway'\n")
-	if selectsCustomModelProvider(config) || !selectsCustomModelProvider(append(config, []byte("model_provider = 'gateway'\n")...)) {
+	if selectsCustomModelProvider(config) ||
+		!selectsCustomModelProvider(append(config, []byte("model_provider = 'gateway'\n")...)) ||
+		!selectsCustomModelProvider([]byte(`"model_provider" = "gateway"`)) ||
+		!selectsCustomModelProvider([]byte(`profiles.dev.model_provider = "gateway"`)) ||
+		!selectsCustomModelProvider([]byte(`profile = { model_provider = "gateway" }`)) {
 		t.Fatal("custom model provider selection was misclassified")
 	}
 }

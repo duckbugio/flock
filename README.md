@@ -62,6 +62,9 @@ may expose MCP tools.
 Codex setups that override the model provider or CLI arguments are also
 unsupported for secretary drafts; no private message is sent to the default
 OpenAI endpoint in those configurations.
+For the standalone OpenAI-compatible backend, public base URLs require HTTPS;
+HTTP remains available for loopback, private IPs, and local service names such
+as `.internal`, `.local`, `.localdomain`, and `.svc`.
 Set a spending limit with your provider before enabling automatic replies; the
 bot caps requests per minute but does not track provider costs. Each reply uses
 only the current incoming text or caption, without earlier chat history.

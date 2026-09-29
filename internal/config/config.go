@@ -558,11 +558,16 @@ func openAICompatInternalHost(host string) bool {
 		return true
 	}
 	addr, err := netip.ParseAddr(host)
-	if err != nil {
-		return false
+	if err == nil {
+		addr = addr.Unmap()
+		return addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast()
 	}
-	addr = addr.Unmap()
-	return addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast()
+	for _, suffix := range []string{".internal", ".local", ".localdomain", ".svc"} {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // SlogLevel maps the configured LOG_LEVEL word (case-insensitive) to a
