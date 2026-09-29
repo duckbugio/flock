@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/openaicompat"
@@ -28,6 +29,8 @@ import (
 
 const (
 	secretaryCallbackPrefix                = "sec:"
+	secretaryActionSend                    = "send"
+	secretaryActionDiscard                 = "discard"
 	secretaryMaxReplyRunes                 = 3000
 	secretaryMaxIncomingRunes              = 8000
 	secretaryMaxPreviewRunes               = 700
@@ -37,6 +40,8 @@ const (
 	secretaryConcurrency                   = 4
 	secretaryDirPerm           os.FileMode = 0o700
 	secretaryStateLifetime                 = 48 * time.Hour
+	secretaryApprovalLifetime              = 24 * time.Hour
+	secretaryConnectionTTL                 = 5 * time.Minute
 )
 
 // secretaryAPI is intentionally smaller than bot.Bot: business messages never
@@ -65,18 +70,25 @@ type secretaryState struct {
 	Pending map[string]secretaryPending `json:"pending"`
 }
 
+type secretaryConnectionCache struct {
+	connection models.BusinessConnection
+	expiresAt  time.Time
+}
+
 type secretaryManager struct {
 	mode   string
 	prompt string
 	runner agent.Runner
 	opts   agent.Options
 	path   string
-	users  []int64
+	allow  func(int64) bool
 	limit  *ratelimit.Limiter
 	sem    chan struct{}
+	lookup singleflight.Group
 
-	mu    sync.Mutex
-	state secretaryState
+	mu          sync.Mutex
+	state       secretaryState
+	connections map[string]secretaryConnectionCache
 }
 
 func secretaryBotOptions(cfg config.Config) []bot.Option {
@@ -99,6 +111,9 @@ func wireSecretary(cfg config.Config, b *bot.Bot, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if len(cfg.AllowedUsers) == 0 {
+		logger.Warn("telegram secretary has no allowed account owner; set ALLOWED_USERS")
+	}
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
 		return u != nil && (u.BusinessConnection != nil || u.BusinessMessage != nil ||
 			u.EditedBusinessMessage != nil || u.DeletedBusinessMessages != nil)
@@ -114,22 +129,27 @@ func wireSecretary(cfg config.Config, b *bot.Bot, logger *slog.Logger) error {
 }
 
 func newSecretaryManager(cfg config.Config) (*secretaryManager, error) {
+	model := strings.TrimSpace(cfg.SecretaryModel)
+	if model == "" {
+		model = cfg.OpenAICompatModel
+	}
 	runner := openaicompat.New(openaicompat.Config{
 		BaseURL: cfg.OpenAICompatBaseURL,
-		Model:   cfg.OpenAICompatModel,
+		Model:   model,
 		APIKey:  cfg.OpenAICompatResolvedAPIKey(),
 		Timeout: cfg.OpenAICompatTimeout(),
 	})
 	m := &secretaryManager{
-		mode:   cfg.SecretaryModeName(),
-		prompt: strings.TrimSpace(cfg.SecretaryPrompt),
-		runner: runner,
-		opts:   agent.Options{Model: cfg.OpenAICompatModel},
-		path:   filepath.Join(cfg.ApprovedDirectory, "secretary-state.json"),
-		users:  cfg.AllowedUsers,
-		limit:  ratelimit.New(secretaryRequestsPerMinute, time.Minute),
-		sem:    make(chan struct{}, secretaryConcurrency),
-		state:  secretaryState{Seen: map[string]int64{}, Invalid: map[string]int64{}, Pending: map[string]secretaryPending{}},
+		mode:        cfg.SecretaryModeName(),
+		prompt:      strings.TrimSpace(cfg.SecretaryPrompt),
+		runner:      runner,
+		opts:        agent.Options{Model: model},
+		path:        filepath.Join(cfg.ApprovedDirectory, "secretary-state.json"),
+		allow:       cfg.IsAllowed,
+		limit:       ratelimit.New(secretaryRequestsPerMinute, time.Minute),
+		sem:         make(chan struct{}, secretaryConcurrency),
+		state:       secretaryState{Seen: map[string]int64{}, Invalid: map[string]int64{}, Pending: map[string]secretaryPending{}},
+		connections: make(map[string]secretaryConnectionCache),
 	}
 	if err := os.MkdirAll(filepath.Dir(m.path), secretaryDirPerm); err != nil {
 		return nil, fmt.Errorf("create secretary state directory: %w", err)
@@ -155,15 +175,6 @@ func newSecretaryManager(cfg config.Config) (*secretaryManager, error) {
 	return m, nil
 }
 
-func (m *secretaryManager) allowed(ownerID int64) bool {
-	for _, id := range m.users {
-		if id == ownerID {
-			return true
-		}
-	}
-	return false
-}
-
 func (m *secretaryManager) saveLocked() error {
 	data, err := json.Marshal(m.state)
 	if err != nil {
@@ -174,6 +185,7 @@ func (m *secretaryManager) saveLocked() error {
 
 func (m *secretaryManager) pruneLocked(now time.Time) {
 	cutoff := now.Add(-secretaryStateLifetime).Unix()
+	approvalCutoff := now.Add(-secretaryApprovalLifetime).Unix()
 	for key, at := range m.state.Seen {
 		if at < cutoff {
 			delete(m.state.Seen, key)
@@ -185,7 +197,7 @@ func (m *secretaryManager) pruneLocked(now time.Time) {
 		}
 	}
 	for token, p := range m.state.Pending {
-		if p.CreatedAt < cutoff {
+		if p.CreatedAt < approvalCutoff {
 			delete(m.state.Pending, token)
 		}
 	}
@@ -223,7 +235,39 @@ func (m *secretaryManager) connection(ctx context.Context, api secretaryAPI, id 
 	if id == "" {
 		return nil, errors.New("missing business connection ID")
 	}
-	return api.GetBusinessConnection(ctx, &bot.GetBusinessConnectionParams{BusinessConnectionID: id})
+	m.mu.Lock()
+	cached, found := m.connections[id]
+	m.mu.Unlock()
+	if found && time.Now().Before(cached.expiresAt) {
+		result := cached.connection
+		return &result, nil
+	}
+	value, err, _ := m.lookup.Do(id, func() (any, error) {
+		connection, lookupErr := api.GetBusinessConnection(ctx, &bot.GetBusinessConnectionParams{BusinessConnectionID: id})
+		if lookupErr != nil || connection == nil {
+			return nil, lookupErr
+		}
+		m.cacheConnection(connection)
+		return connection, nil
+	})
+	if err != nil || value == nil {
+		return nil, err
+	}
+	return value.(*models.BusinessConnection), nil
+}
+
+func (m *secretaryManager) cacheConnection(connection *models.BusinessConnection) {
+	entry := *connection
+	if entry.Rights != nil {
+		rights := *entry.Rights
+		entry.Rights = &rights
+	}
+	m.mu.Lock()
+	if m.connections == nil {
+		m.connections = make(map[string]secretaryConnectionCache)
+	}
+	m.connections[entry.ID] = secretaryConnectionCache{connection: entry, expiresAt: time.Now().Add(secretaryConnectionTTL)}
+	m.mu.Unlock()
 }
 
 func (m *secretaryManager) handleUpdate(ctx context.Context, api secretaryAPI, update *models.Update) {
@@ -231,7 +275,8 @@ func (m *secretaryManager) handleUpdate(ctx context.Context, api secretaryAPI, u
 		return
 	}
 	if c := update.BusinessConnection; c != nil {
-		if c.IsEnabled && m.allowed(c.User.ID) {
+		m.cacheConnection(c)
+		if c.IsEnabled && m.allow(c.User.ID) {
 			slog.Info("secretary connection enabled", "owner_id", c.User.ID, "can_reply", c.Rights != nil && c.Rights.CanReply)
 		}
 		return
@@ -248,23 +293,30 @@ func (m *secretaryManager) handleUpdate(ctx context.Context, api secretaryAPI, u
 	if msg == nil || msg.BusinessConnectionID == "" || msg.From == nil || msg.Chat.Type != models.ChatTypePrivate {
 		return
 	}
-	connection, err := m.connection(ctx, api, msg.BusinessConnectionID)
-	if err != nil || connection == nil {
-		slog.Warn("get secretary connection", "error", err)
-		return
-	}
-	if !connection.IsEnabled || !m.allowed(connection.User.ID) || connection.Rights == nil || !connection.Rights.CanReply {
-		return
-	}
-	// Owner messages and bot echoes must never generate a response loop.
-	if msg.From.ID == connection.User.ID || msg.From.IsBot || msg.SenderBusinessBot != nil {
+	// Avoid a Telegram API call for bot echoes and unsupported media.
+	if msg.From.IsBot || msg.SenderBusinessBot != nil {
 		return
 	}
 	incoming := strings.TrimSpace(msg.Text)
 	if incoming == "" {
 		incoming = strings.TrimSpace(msg.Caption)
 	}
-	if incoming == "" || !m.limit.Allow(connection.User.ID, time.Now()) || !m.claim(msg) {
+	if incoming == "" {
+		return
+	}
+	connection, err := m.connection(ctx, api, msg.BusinessConnectionID)
+	if err != nil || connection == nil {
+		slog.Warn("get secretary connection", "error", err)
+		return
+	}
+	if !connection.IsEnabled || !m.allow(connection.User.ID) || connection.Rights == nil || !connection.Rights.CanReply {
+		return
+	}
+	// Owner messages and bot echoes must never generate a response loop.
+	if msg.From.ID == connection.User.ID {
+		return
+	}
+	if !m.limit.Allow(connection.User.ID, time.Now()) || !m.claim(msg) {
 		return
 	}
 	select {
@@ -279,7 +331,7 @@ func (m *secretaryManager) handleUpdate(ctx context.Context, api secretaryAPI, u
 		slog.Warn("generate secretary reply", "error", err)
 		return
 	}
-	if m.mode == "auto" {
+	if m.mode == config.SecretaryModeAuto {
 		err = m.sendAuto(ctx, api, msg, reply)
 		if err != nil {
 			slog.Warn("send secretary reply", "error", err)
@@ -301,8 +353,9 @@ func (m *secretaryManager) releaseClaim(msg *models.Message) {
 
 func (m *secretaryManager) sendAuto(ctx context.Context, api secretaryAPI, msg *models.Message, reply string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, invalid := m.state.Invalid[secretaryMessageKey(msg)]; invalid {
+	_, invalid := m.state.Invalid[secretaryMessageKey(msg)]
+	m.mu.Unlock()
+	if invalid {
 		return nil
 	}
 	_, err := api.SendMessage(ctx, &bot.SendMessageParams{
@@ -393,8 +446,8 @@ func (m *secretaryManager) queueApproval(
 	sent, err := api.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: connection.UserChatID, Text: notice,
 		ReplyMarkup: &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{
-			{Text: "Send", CallbackData: secretaryCallbackPrefix + "send:" + token},
-			{Text: "Discard", CallbackData: secretaryCallbackPrefix + "discard:" + token},
+			{Text: "Send", CallbackData: secretaryCallbackPrefix + secretaryActionSend + ":" + token},
+			{Text: "Discard", CallbackData: secretaryCallbackPrefix + secretaryActionDiscard + ":" + token},
 		}}},
 	})
 	if err != nil {
@@ -425,8 +478,13 @@ func (m *secretaryManager) removePending(token string) {
 func (m *secretaryManager) invalidate(connectionID string, chatID int64, ids []int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	changed := false
 	for _, id := range ids {
-		m.state.Invalid[secretaryKey(connectionID, chatID, id)] = time.Now().Unix()
+		key := secretaryKey(connectionID, chatID, id)
+		if _, seen := m.state.Seen[key]; seen {
+			m.state.Invalid[key] = time.Now().Unix()
+			changed = true
+		}
 	}
 	for token, p := range m.state.Pending {
 		if p.ConnectionID != connectionID || p.ChatID != chatID {
@@ -435,8 +493,12 @@ func (m *secretaryManager) invalidate(connectionID string, chatID int64, ids []i
 		for _, id := range ids {
 			if p.MessageID == id {
 				delete(m.state.Pending, token)
+				changed = true
 			}
 		}
+	}
+	if !changed {
+		return
 	}
 	if err := m.saveLocked(); err != nil {
 		slog.Error("invalidate secretary approval", "error", err)
@@ -448,16 +510,19 @@ func (m *secretaryManager) handleCallback(ctx context.Context, api secretaryAPI,
 		return
 	}
 	cq := update.CallbackQuery
-	parts := strings.Split(cq.Data, ":")
-	if len(parts) != 3 || parts[0] != "sec" || (parts[1] != "send" && parts[1] != "discard") {
+	if !strings.HasPrefix(cq.Data, secretaryCallbackPrefix) {
 		return
 	}
-	token := parts[2]
+	parts := strings.Split(strings.TrimPrefix(cq.Data, secretaryCallbackPrefix), ":")
+	if len(parts) != 2 || (parts[0] != secretaryActionSend && parts[0] != secretaryActionDiscard) {
+		return
+	}
+	token := parts[1]
 	m.mu.Lock()
 	p, ok := m.state.Pending[token]
-	if !ok || !m.allowed(cq.From.ID) || cq.From.ID != p.OwnerID || cq.Message.Message == nil ||
+	if !ok || !m.allow(cq.From.ID) || cq.From.ID != p.OwnerID || cq.Message.Message == nil ||
 		cq.Message.Message.Chat.ID != p.OwnerChatID || (p.NoticeID != 0 && cq.Message.Message.ID != p.NoticeID) ||
-		time.Since(time.Unix(p.CreatedAt, 0)) > secretaryStateLifetime {
+		time.Since(time.Unix(p.CreatedAt, 0)) > secretaryApprovalLifetime {
 		m.mu.Unlock()
 		m.answerCallback(ctx, api, cq.ID, "This draft is no longer available.")
 		return
@@ -472,7 +537,7 @@ func (m *secretaryManager) handleCallback(ctx context.Context, api secretaryAPI,
 	}
 	m.mu.Unlock()
 	status := "Discarded."
-	if parts[1] == "send" {
+	if parts[0] == secretaryActionSend {
 		status = m.sendApproved(ctx, api, p)
 	}
 	m.answerCallback(ctx, api, cq.ID, status)
@@ -485,14 +550,15 @@ func (m *secretaryManager) handleCallback(ctx context.Context, api secretaryAPI,
 }
 
 func (m *secretaryManager) sendApproved(ctx context.Context, api secretaryAPI, p secretaryPending) string {
-	connection, err := m.connection(ctx, api, p.ConnectionID)
+	connection, err := api.GetBusinessConnection(ctx, &bot.GetBusinessConnectionParams{BusinessConnectionID: p.ConnectionID})
 	if err != nil || connection == nil || !connection.IsEnabled || connection.User.ID != p.OwnerID ||
 		connection.Rights == nil || !connection.Rights.CanReply {
 		return "Connection is unavailable; draft was not sent."
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, invalid := m.state.Invalid[secretaryKey(p.ConnectionID, p.ChatID, p.MessageID)]; invalid {
+	_, invalid := m.state.Invalid[secretaryKey(p.ConnectionID, p.ChatID, p.MessageID)]
+	m.mu.Unlock()
+	if invalid {
 		return "Original message changed; draft was not sent."
 	}
 	_, err = api.SendMessage(ctx, &bot.SendMessageParams{

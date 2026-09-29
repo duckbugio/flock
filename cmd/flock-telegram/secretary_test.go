@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/ratelimit"
+	"github.com/duckbugio/flock/internal/config"
 )
 
 type secretaryFakeRunner struct{ calls int }
@@ -25,6 +27,7 @@ func (r *secretaryFakeRunner) Run(_ context.Context, _ string, _ agent.Options) 
 
 type secretaryFakeAPI struct {
 	connection models.BusinessConnection
+	gets       int
 	sends      []*bot.SendMessageParams
 	edits      []*bot.EditMessageTextParams
 	callbacks  []*bot.AnswerCallbackQueryParams
@@ -34,6 +37,7 @@ type secretaryFakeAPI struct {
 func (f *secretaryFakeAPI) GetBusinessConnection(
 	_ context.Context, _ *bot.GetBusinessConnectionParams,
 ) (*models.BusinessConnection, error) {
+	f.gets++
 	c := f.connection
 	return &c, nil
 }
@@ -61,7 +65,8 @@ func testSecretary(t *testing.T, mode string) (*secretaryManager, *secretaryFake
 	runner := &secretaryFakeRunner{}
 	m := &secretaryManager{
 		mode: mode, runner: runner, path: filepath.Join(t.TempDir(), "secretary.json"),
-		users: []int64{10}, limit: ratelimit.New(30, time.Minute), sem: make(chan struct{}, 4),
+		allow: func(id int64) bool { return id == 10 },
+		limit: ratelimit.New(30, time.Minute), sem: make(chan struct{}, 4),
 		state: secretaryState{Seen: map[string]int64{}, Invalid: map[string]int64{}, Pending: map[string]secretaryPending{}},
 	}
 	api := &secretaryFakeAPI{connection: models.BusinessConnection{
@@ -78,12 +83,49 @@ func incomingSecretaryMessage() *models.Message {
 	}
 }
 
+func TestSecretaryModelOverride(t *testing.T) {
+	m, err := newSecretaryManager(config.Config{
+		SecretaryMode: config.SecretaryModeAuto, SecretaryModel: "reply-model",
+		OpenAICompatModel: "coding-model", ApprovedDirectory: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.opts.Model != "reply-model" {
+		t.Fatalf("model=%q, want reply-model", m.opts.Model)
+	}
+}
+
+func TestSecretarySkipsUnsupportedMessagesWithoutConnectionLookup(t *testing.T) {
+	m, runner, api := testSecretary(t, config.SecretaryModeAuto)
+	msg := incomingSecretaryMessage()
+	msg.Text = ""
+	m.handleUpdate(context.Background(), api, &models.Update{BusinessMessage: msg})
+	msg.Text = "Hello"
+	msg.From.IsBot = true
+	m.handleUpdate(context.Background(), api, &models.Update{BusinessMessage: msg})
+	if api.gets != 0 || runner.calls != 0 {
+		t.Fatalf("unsupported messages: connection lookups=%d drafts=%d", api.gets, runner.calls)
+	}
+}
+
+func TestSecretaryUnseenEditDoesNotWriteState(t *testing.T) {
+	m, _, api := testSecretary(t, config.SecretaryModeApproval)
+	m.handleUpdate(context.Background(), api, &models.Update{EditedBusinessMessage: incomingSecretaryMessage()})
+	if _, err := os.Stat(m.path); !os.IsNotExist(err) {
+		t.Fatalf("unseen edit wrote state: %v", err)
+	}
+}
+
 func TestSecretaryAutoOnlyRepliesToAllowedInboundMessageOnce(t *testing.T) {
 	m, runner, api := testSecretary(t, "auto")
 	ctx := context.Background()
 	msg := incomingSecretaryMessage()
 	m.handleUpdate(ctx, api, &models.Update{BusinessMessage: msg})
 	m.handleUpdate(ctx, api, &models.Update{BusinessMessage: msg})
+	if api.gets != 1 {
+		t.Fatalf("business connection lookups=%d, want one cached lookup", api.gets)
+	}
 	if runner.calls != 1 || len(api.sends) != 1 {
 		t.Fatalf("calls=%d sends=%d, want one each", runner.calls, len(api.sends))
 	}
@@ -95,6 +137,7 @@ func TestSecretaryAutoOnlyRepliesToAllowedInboundMessageOnce(t *testing.T) {
 	ownerMessage.From = &models.User{ID: 10}
 	m.handleUpdate(ctx, api, &models.Update{BusinessMessage: &ownerMessage})
 	api.connection.Rights.CanReply = false
+	m.handleUpdate(ctx, api, &models.Update{BusinessConnection: &api.connection})
 	noRights := *msg
 	noRights.ID = 7
 	m.handleUpdate(ctx, api, &models.Update{BusinessMessage: &noRights})
@@ -219,7 +262,7 @@ func TestSecretaryExpiredApprovalCannotSend(t *testing.T) {
 	m.state.Pending["expired"] = secretaryPending{
 		OwnerID: 10, OwnerChatID: 100, ConnectionID: "conn", ChatID: 200,
 		MessageID: 5, NoticeID: 1, Reply: "Old draft",
-		CreatedAt: time.Now().Add(-secretaryStateLifetime - time.Minute).Unix(),
+		CreatedAt: time.Now().Add(-secretaryApprovalLifetime - time.Minute).Unix(),
 	}
 	m.handleCallback(context.Background(), api, &models.Update{CallbackQuery: &models.CallbackQuery{
 		ID: "cb", From: models.User{ID: 10}, Data: secretaryCallbackPrefix + "send:expired",

@@ -1011,6 +1011,20 @@ func TestTelegramSecretaryModeRequiresAnswerOnlyProvider(t *testing.T) {
 	if err := invalid.ValidateTelegram(); err == nil {
 		t.Fatal("Secretary Mode accepted invalid API URL")
 	}
+	for _, value := range []string{"http://api.example.test/v1", "https://api.example.test/v1?", "https://api.example.test/v1#"} {
+		invalid = base
+		invalid.OpenAICompatBaseURL = value
+		if err := invalid.ValidateTelegram(); err == nil {
+			t.Errorf("Secretary Mode accepted insecure or malformed API URL %q", value)
+		}
+	}
+	for _, value := range []string{"http://localhost:8080/v1", "http://127.0.0.1:8080/v1", "http://[::1]:8080/v1"} {
+		local := base
+		local.OpenAICompatBaseURL = value
+		if err := local.ValidateTelegram(); err != nil {
+			t.Errorf("Secretary Mode rejected loopback API URL %q: %v", value, err)
+		}
+	}
 	invalid = base
 	invalid.OpenAICompatAPIKey = ""
 	if err := invalid.ValidateTelegram(); err == nil {

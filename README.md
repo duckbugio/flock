@@ -52,12 +52,17 @@ Set `SECRETARY_MODE=approval` to receive an AI draft in your private chat with
 the bot and choose **Send** or **Discard**. Set `SECRETARY_MODE=auto` to send the
 draft automatically. The default is `off`. Both modes need
 `OPENAI_COMPAT_BASE_URL`, `OPENAI_COMPAT_MODEL`, `OPENAI_COMPAT_API_KEY`, and
-`OPENAI_COMPAT_BILLING_ACK=true`; `SECRETARY_PROMPT` optionally sets your reply
-style. The separate answer-only model receives the selected chats' text and has
-no access to Flock's coding tools or workspace. Incoming business messages never
-enter the coding-agent conversation. Only text and media captions are handled;
-edited or deleted messages cancel unsent approval drafts. Telegram limits when
-the bot can reply, including a 24-hour window after an incoming message.
+`OPENAI_COMPAT_BILLING_ACK=true`; `SECRETARY_MODEL` optionally selects a different
+model on the same endpoint, and `SECRETARY_PROMPT` sets your reply style. This
+answer-only runner has no coding tools or workspace access, but shares the
+`OPENAI_COMPAT_*` endpoint and API key with an openai-compatible coding backend.
+Set a spending limit with your provider before enabling automatic replies; the
+bot caps requests per minute but does not track provider costs. Each reply uses
+only the current incoming text or caption, without earlier chat history.
+Incoming business messages never enter the coding-agent conversation. Edited or
+deleted messages cancel unsent approval drafts. Approval buttons expire after
+24 hours; Telegram may reject a reply earlier if its business reply window has
+closed.
 
 > **Region:** host in an **Anthropic-supported region** (some countries, e.g. RU/CN, are geo-blocked) — otherwise Claude calls fail.
 

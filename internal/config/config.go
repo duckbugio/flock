@@ -22,8 +22,12 @@ import (
 // demanding the Telegram token.
 var ErrMissingTelegramToken = errors.New("TELEGRAM_BOT_TOKEN is required")
 
-// SecretaryModeOff is the default for Telegram business messages.
-const SecretaryModeOff = "off"
+// Telegram business-message behaviors.
+const (
+	SecretaryModeOff      = "off"
+	SecretaryModeApproval = "approval"
+	SecretaryModeAuto     = "auto"
+)
 
 // ErrMissingVKToken is returned by ValidateVK when VK_BOT_TOKEN is unset.
 var ErrMissingVKToken = errors.New("VK_BOT_TOKEN is required")
@@ -111,6 +115,7 @@ type Config struct {
 	// SecretaryMode handles Telegram Business messages through a separate,
 	// answer-only provider. Supported values: off, approval, auto.
 	SecretaryMode   string `env:"SECRETARY_MODE" envDefault:"off"`
+	SecretaryModel  string `env:"SECRETARY_MODEL"`
 	SecretaryPrompt string `env:"SECRETARY_PROMPT"`
 
 	// Telegram user IDs allowed to use the bot (comma-separated).
@@ -834,15 +839,17 @@ func (c Config) ValidateTelegram() error {
 	switch c.SecretaryModeName() {
 	case SecretaryModeOff:
 		return nil
-	case "approval", "auto":
+	case SecretaryModeApproval, SecretaryModeAuto:
 		answerOnly := c
 		answerOnly.AIBackend = AIBackendOpenAICompat
 		if err := answerOnly.ValidateOpenAICompat(); err != nil {
 			return err
 		}
 		u, err := url.Parse(c.OpenAICompatBaseURL)
-		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || u.User != nil {
-			return errors.New("OPENAI_COMPAT_BASE_URL must be an absolute HTTP(S) URL in Secretary Mode")
+		loopback := u != nil && (u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1" || u.Hostname() == "::1")
+		if err != nil || (u.Scheme != "https" && (u.Scheme != "http" || !loopback)) || u.Hostname() == "" ||
+			u.User != nil || u.RawQuery != "" || u.ForceQuery || strings.Contains(c.OpenAICompatBaseURL, "#") {
+			return errors.New("OPENAI_COMPAT_BASE_URL must be HTTPS, or HTTP on loopback, without credentials, query, or fragment")
 		}
 		return nil
 	default:

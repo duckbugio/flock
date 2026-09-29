@@ -40,6 +40,10 @@ Das zieht das vorgefertigte Image `ghcr.io/duckbugio/flock-telegram` — kein Bu
 
 Alles Übrige in [`.env.example`](adapters/telegram/.env.example) hat sinnvolle Standardwerte. Aktualisiere es später mit `docker compose pull && docker compose up -d`.
 
+### Telegram-Sekretärmodus
+
+Aktiviere den Modus für den Bot in @BotFather und wähle die zugänglichen privaten Chats in Telegram. `SECRETARY_MODE=approval` sendet dem Kontoinhaber einen Entwurf mit Senden/Verwerfen; `SECRETARY_MODE=auto` antwortet sofort. Erforderlich sind `OPENAI_COMPAT_BASE_URL`, `OPENAI_COMPAT_MODEL`, `OPENAI_COMPAT_API_KEY` und `OPENAI_COMPAT_BILLING_ACK=true`; `SECRETARY_MODEL` und `SECRETARY_PROMPT` sind optional. Der Bot erhält nur die aktuelle Nachricht, keinen Chatverlauf. Setze vor automatischen Antworten ein Ausgabenlimit beim Anbieter. [Weitere Einzelheiten auf Englisch](README.md#telegram-secretary-mode).
+
 > **Region:** Hoste in einer **von Anthropic unterstützten Region** (einige Länder, z. B. RU/CN, sind geoblockt) — andernfalls schlagen Claude-Aufrufe fehl.
 
 **VK** folgt demselben Muster unter [`adapters/vk/`](adapters/vk/), auf demselben Core aufgebaut und veröffentlicht als `ghcr.io/duckbugio/flock-vk`. Es liefert nur ein Env-Template (keine Compose-Datei): `cp .env.example .env`, dann `docker run --env-file .env ghcr.io/duckbugio/flock-vk`. Die Claude-Authentifizierung und die Core-Einstellungen sind identisch mit Telegram; nur die drei Transport-Variablen ändern sich:

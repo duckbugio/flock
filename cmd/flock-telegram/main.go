@@ -53,8 +53,6 @@ const voiceClientTimeout = 60 * time.Second
 // download.
 const uploadClientTimeout = 120 * time.Second
 
-const telegramBotOptionCapacity = 2
-
 func main() {
 	os.Exit(run())
 }
@@ -224,9 +222,9 @@ func run() int {
 
 	guards := chat.GuardConfig{CostCapUSD: cfg.EffectiveCostCapUSD()}
 
-	opts2 := make([]bot.Option, 0, telegramBotOptionCapacity)
-	opts2 = append(opts2, bot.WithDefaultHandler(textHandler(cfg, &svc, &vt, &up, limiter, costs, guards)))
-	opts2 = append(opts2, secretaryBotOptions(cfg)...)
+	opts2 := append([]bot.Option{
+		bot.WithDefaultHandler(textHandler(cfg, &svc, &vt, &up, limiter, costs, guards)),
+	}, secretaryBotOptions(cfg)...)
 
 	b, err := bot.New(cfg.TelegramBotToken, opts2...)
 	if err != nil {
