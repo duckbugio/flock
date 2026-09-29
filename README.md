@@ -40,6 +40,25 @@ That pulls the prebuilt image `ghcr.io/duckbugio/flock-telegram` — no build, n
 
 Everything else in [`.env.example`](adapters/telegram/.env.example) has sensible defaults. Update later with `docker compose pull && docker compose up -d`.
 
+### Telegram Secretary Mode
+
+Telegram can connect your bot to your account so it receives messages from selected
+private chats and may reply on your behalf. Enable **Secretary Mode** for the bot
+in [@BotFather](https://t.me/botfather), then connect it in Telegram's chat
+automation settings and grant only the chats and `can_reply` permission you want.
+The Telegram account owner must be listed in `ALLOWED_USERS`.
+
+Set `SECRETARY_MODE=approval` to receive an AI draft in your private chat with
+the bot and choose **Send** or **Discard**. Set `SECRETARY_MODE=auto` to send the
+draft automatically. The default is `off`. Both modes need
+`OPENAI_COMPAT_BASE_URL`, `OPENAI_COMPAT_MODEL`, `OPENAI_COMPAT_API_KEY`, and
+`OPENAI_COMPAT_BILLING_ACK=true`; `SECRETARY_PROMPT` optionally sets your reply
+style. The separate answer-only model receives the selected chats' text and has
+no access to Flock's coding tools or workspace. Incoming business messages never
+enter the coding-agent conversation. Only text and media captions are handled;
+edited or deleted messages cancel unsent approval drafts. Telegram limits when
+the bot can reply, including a 24-hour window after an incoming message.
+
 > **Region:** host in an **Anthropic-supported region** (some countries, e.g. RU/CN, are geo-blocked) — otherwise Claude calls fail.
 
 **VK** is the same pattern under [`adapters/vk/`](adapters/vk/), built on the same core and published as `ghcr.io/duckbugio/flock-vk`. It ships only an env template (no compose file): `cp .env.example .env`, then `docker run --env-file .env ghcr.io/duckbugio/flock-vk`. Claude auth and core settings match Telegram; only the three transport vars change:

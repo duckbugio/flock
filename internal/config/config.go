@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,9 @@ import (
 // non-Telegram binary (e.g. cmd/duck-vk) can share the same Config without
 // demanding the Telegram token.
 var ErrMissingTelegramToken = errors.New("TELEGRAM_BOT_TOKEN is required")
+
+// SecretaryModeOff is the default for Telegram business messages.
+const SecretaryModeOff = "off"
 
 // ErrMissingVKToken is returned by ValidateVK when VK_BOT_TOKEN is unset.
 var ErrMissingVKToken = errors.New("VK_BOT_TOKEN is required")
@@ -104,6 +108,10 @@ type Config struct {
 	// Telegram (cmd/flock-telegram). Validated by ValidateTelegram, not env-required.
 	TelegramBotToken    string `env:"TELEGRAM_BOT_TOKEN"`
 	TelegramBotUsername string `env:"TELEGRAM_BOT_USERNAME"`
+	// SecretaryMode handles Telegram Business messages through a separate,
+	// answer-only provider. Supported values: off, approval, auto.
+	SecretaryMode   string `env:"SECRETARY_MODE" envDefault:"off"`
+	SecretaryPrompt string `env:"SECRETARY_PROMPT"`
 
 	// Telegram user IDs allowed to use the bot (comma-separated).
 	AllowedUsers []int64 `env:"ALLOWED_USERS" envSeparator:","`
@@ -823,7 +831,32 @@ func (c Config) ValidateTelegram() error {
 	if strings.TrimSpace(c.TelegramBotToken) == "" {
 		return ErrMissingTelegramToken
 	}
-	return nil
+	switch c.SecretaryModeName() {
+	case SecretaryModeOff:
+		return nil
+	case "approval", "auto":
+		answerOnly := c
+		answerOnly.AIBackend = AIBackendOpenAICompat
+		if err := answerOnly.ValidateOpenAICompat(); err != nil {
+			return err
+		}
+		u, err := url.Parse(c.OpenAICompatBaseURL)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || u.User != nil {
+			return errors.New("OPENAI_COMPAT_BASE_URL must be an absolute HTTP(S) URL in Secretary Mode")
+		}
+		return nil
+	default:
+		return errors.New("SECRETARY_MODE must be off, approval, or auto")
+	}
+}
+
+// SecretaryModeName normalizes the opt-in business-message behavior.
+func (c Config) SecretaryModeName() string {
+	mode := strings.ToLower(strings.TrimSpace(c.SecretaryMode))
+	if mode == "" {
+		return SecretaryModeOff
+	}
+	return mode
 }
 
 // ValidateVK checks the fields the VK binary requires at startup (the community

@@ -206,7 +206,12 @@ func (openAICompatProvider) Build(cfg config.Config) (agent.Runner, agent.Option
 
 // ClaudeEnv derives the child process environment for the Claude CLI.
 func ClaudeEnv(cfg config.Config) []string {
-	env := os.Environ()
+	// The Secretary Mode API credential belongs to the transport's answer-only
+	// model. Coding-agent subprocesses must not inherit it.
+	env := removeEnv(os.Environ(), "OPENAI_COMPAT_API_KEY")
+	if cfg.OpenAICompatAPIKeyEnv != "" {
+		env = removeEnv(env, cfg.OpenAICompatAPIKeyEnv)
+	}
 	if strings.TrimSpace(cfg.ClaudeCodeOAuthToken) != "" {
 		env = setEnv(env, "CLAUDE_CODE_OAUTH_TOKEN", cfg.ClaudeCodeOAuthToken)
 	}
@@ -219,7 +224,10 @@ func ClaudeEnv(cfg config.Config) []string {
 // CodexEnv derives the child process environment for the Codex CLI. In
 // subscription mode it strips CODEX_API_KEY even if the outer process has one.
 func CodexEnv(cfg config.Config) []string {
-	env := os.Environ()
+	env := removeEnv(os.Environ(), "OPENAI_COMPAT_API_KEY")
+	if cfg.OpenAICompatAPIKeyEnv != "" {
+		env = removeEnv(env, cfg.OpenAICompatAPIKeyEnv)
+	}
 	if strings.TrimSpace(cfg.CodexHome) != "" {
 		env = setEnv(env, "CODEX_HOME", cfg.CodexHome)
 	}

@@ -53,6 +53,8 @@ const voiceClientTimeout = 60 * time.Second
 // download.
 const uploadClientTimeout = 120 * time.Second
 
+const telegramBotOptionCapacity = 2
+
 func main() {
 	os.Exit(run())
 }
@@ -60,6 +62,8 @@ func main() {
 // run holds the adapter's startup and serve logic, returning a process exit code.
 // Splitting it out of main lets deferred cleanups (signal context, dispatcher
 // drain) run before the process exits, which a direct os.Exit in main would skip.
+//
+//nolint:gocyclo // Startup wires independently gated services; keep their failure paths explicit.
 func run() int {
 	cfg, err := config.Load()
 	if err != nil {
@@ -220,13 +224,17 @@ func run() int {
 
 	guards := chat.GuardConfig{CostCapUSD: cfg.EffectiveCostCapUSD()}
 
-	opts2 := []bot.Option{
-		bot.WithDefaultHandler(textHandler(cfg, &svc, &vt, &up, limiter, costs, guards)),
-	}
+	opts2 := make([]bot.Option, 0, telegramBotOptionCapacity)
+	opts2 = append(opts2, bot.WithDefaultHandler(textHandler(cfg, &svc, &vt, &up, limiter, costs, guards)))
+	opts2 = append(opts2, secretaryBotOptions(cfg)...)
 
 	b, err := bot.New(cfg.TelegramBotToken, opts2...)
 	if err != nil {
 		logger.Error("create bot", "error", err)
+		return 1
+	}
+	if err := wireSecretary(cfg, b, logger); err != nil {
+		logger.Error("open secretary state", "error", err)
 		return 1
 	}
 
