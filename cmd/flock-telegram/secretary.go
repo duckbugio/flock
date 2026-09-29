@@ -247,8 +247,23 @@ func (m *secretaryManager) connection(ctx context.Context, api secretaryAPI, id 
 		if lookupErr != nil || connection == nil {
 			return nil, lookupErr
 		}
-		m.cacheConnection(connection)
-		return connection, nil
+		result := *connection
+		if result.Rights != nil {
+			rights := *result.Rights
+			result.Rights = &rights
+		}
+		m.mu.Lock()
+		// A rights update received during the lookup is newer than its response.
+		if current, ok := m.connections[id]; ok && time.Now().Before(current.expiresAt) {
+			result = current.connection
+		} else {
+			if m.connections == nil {
+				m.connections = make(map[string]secretaryConnectionCache)
+			}
+			m.connections[id] = secretaryConnectionCache{connection: result, expiresAt: time.Now().Add(secretaryConnectionTTL)}
+		}
+		m.mu.Unlock()
+		return &result, nil
 	})
 	if err != nil || value == nil {
 		return nil, err

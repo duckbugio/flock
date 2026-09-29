@@ -32,6 +32,7 @@ type secretaryFakeAPI struct {
 	edits      []*bot.EditMessageTextParams
 	callbacks  []*bot.AnswerCallbackQueryParams
 	onSend     func(*bot.SendMessageParams)
+	onGet      func()
 }
 
 func (f *secretaryFakeAPI) GetBusinessConnection(
@@ -39,6 +40,9 @@ func (f *secretaryFakeAPI) GetBusinessConnection(
 ) (*models.BusinessConnection, error) {
 	f.gets++
 	c := f.connection
+	if f.onGet != nil {
+		f.onGet()
+	}
 	return &c, nil
 }
 
@@ -106,6 +110,19 @@ func TestSecretarySkipsUnsupportedMessagesWithoutConnectionLookup(t *testing.T) 
 	m.handleUpdate(context.Background(), api, &models.Update{BusinessMessage: msg})
 	if api.gets != 0 || runner.calls != 0 {
 		t.Fatalf("unsupported messages: connection lookups=%d drafts=%d", api.gets, runner.calls)
+	}
+}
+
+func TestSecretaryConnectionUpdateWinsInFlightLookup(t *testing.T) {
+	m, _, api := testSecretary(t, config.SecretaryModeAuto)
+	api.onGet = func() {
+		updated := api.connection
+		updated.Rights = &models.BusinessBotRights{CanReply: false}
+		m.handleUpdate(context.Background(), api, &models.Update{BusinessConnection: &updated})
+	}
+	connection, err := m.connection(context.Background(), api, "conn")
+	if err != nil || connection.Rights == nil || connection.Rights.CanReply {
+		t.Fatalf("stale lookup restored revoked rights: connection=%+v error=%v", connection, err)
 	}
 }
 
