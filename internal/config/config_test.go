@@ -1018,7 +1018,11 @@ func TestTelegramSecretaryModeRequiresAnswerOnlyProvider(t *testing.T) {
 			t.Errorf("Secretary Mode accepted insecure or malformed API URL %q", value)
 		}
 	}
-	for _, value := range []string{"http://localhost:8080/v1", "http://127.0.0.1:8080/v1", "http://[::1]:8080/v1"} {
+	for _, value := range []string{
+		"http://localhost:8080/v1", "http://127.0.0.1:8080/v1", "http://[::1]:8080/v1",
+		"http://vllm:8000/v1", "http://host.docker.internal:8000/v1",
+		"http://10.0.0.5:8000/v1", "http://[fd00::5]:8000/v1",
+	} {
 		local := base
 		local.OpenAICompatBaseURL = value
 		if err := local.ValidateTelegram(); err != nil {

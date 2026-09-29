@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -846,15 +847,27 @@ func (c Config) ValidateTelegram() error {
 			return err
 		}
 		u, err := url.Parse(c.OpenAICompatBaseURL)
-		loopback := u != nil && (u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1" || u.Hostname() == "::1")
-		if err != nil || (u.Scheme != "https" && (u.Scheme != "http" || !loopback)) || u.Hostname() == "" ||
+		internalHost := u != nil && secretaryInternalHost(u.Hostname())
+		if err != nil || (u.Scheme != "https" && (u.Scheme != "http" || !internalHost)) || u.Hostname() == "" ||
 			u.User != nil || u.RawQuery != "" || u.ForceQuery || strings.Contains(c.OpenAICompatBaseURL, "#") {
-			return errors.New("OPENAI_COMPAT_BASE_URL must be HTTPS, or HTTP on loopback, without credentials, query, or fragment")
+			return errors.New("OPENAI_COMPAT_BASE_URL requires HTTPS for public hosts and no credentials, query or fragment")
 		}
 		return nil
 	default:
 		return errors.New("SECRETARY_MODE must be off, approval, or auto")
 	}
+}
+
+func secretaryInternalHost(host string) bool {
+	if host == "host.docker.internal" || (host != "" && !strings.Contains(host, ".") && !strings.Contains(host, ":")) {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	return addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast()
 }
 
 // SecretaryModeName normalizes the opt-in business-message behavior.

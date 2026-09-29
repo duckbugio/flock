@@ -39,9 +39,10 @@ const (
 	secretaryRequestsPerMinute             = 30
 	secretaryConcurrency                   = 4
 	secretaryDirPerm           os.FileMode = 0o700
-	secretaryStateLifetime                 = 48 * time.Hour
-	secretaryApprovalLifetime              = 24 * time.Hour
-	secretaryConnectionTTL                 = 5 * time.Minute
+	// Deduplication and cancellation outlive the approval window.
+	secretaryStateLifetime    = 48 * time.Hour
+	secretaryApprovalLifetime = 24 * time.Hour
+	secretaryConnectionTTL    = 5 * time.Minute
 )
 
 // secretaryAPI is intentionally smaller than bot.Bot: business messages never
@@ -496,8 +497,10 @@ func (m *secretaryManager) invalidate(connectionID string, chatID int64, ids []i
 	changed := false
 	for _, id := range ids {
 		key := secretaryKey(connectionID, chatID, id)
+		// Telegram may deliver an edit before its original message. Keep the
+		// cancellation in memory even when no draft has started yet.
+		m.state.Invalid[key] = time.Now().Unix()
 		if _, seen := m.state.Seen[key]; seen {
-			m.state.Invalid[key] = time.Now().Unix()
 			changed = true
 		}
 	}

@@ -134,6 +134,15 @@ func TestSecretaryUnseenEditDoesNotWriteState(t *testing.T) {
 	}
 }
 
+func TestSecretaryEditBeforeMessagePreventsAutoReply(t *testing.T) {
+	m, runner, api := testSecretary(t, config.SecretaryModeAuto)
+	m.handleUpdate(context.Background(), api, &models.Update{EditedBusinessMessage: incomingSecretaryMessage()})
+	m.handleUpdate(context.Background(), api, &models.Update{BusinessMessage: incomingSecretaryMessage()})
+	if runner.calls != 0 || len(api.sends) != 0 {
+		t.Fatal("reordered edit allowed an auto reply to stale message text")
+	}
+}
+
 func TestSecretaryAutoOnlyRepliesToAllowedInboundMessageOnce(t *testing.T) {
 	m, runner, api := testSecretary(t, "auto")
 	ctx := context.Background()

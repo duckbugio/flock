@@ -42,7 +42,7 @@ docker compose up -d
 
 ### Режим секретаря Telegram
 
-Включите режим у бота через @BotFather и выберите доступные личные чаты в настройках Telegram. `SECRETARY_MODE=approval` отправляет владельцу черновик с кнопками отправки и отклонения; `SECRETARY_MODE=auto` отвечает сразу. Нужны `OPENAI_COMPAT_BASE_URL`, `OPENAI_COMPAT_MODEL`, `OPENAI_COMPAT_API_KEY` и `OPENAI_COMPAT_BILLING_ACK=true`. Дополнительно можно задать `SECRETARY_MODEL` и `SECRETARY_PROMPT`. Бот видит только текущее сообщение, без истории переписки. Перед автоответами задайте лимит расходов у провайдера. [Подробности на английском](README.md#telegram-secretary-mode).
+Включите режим у бота через @BotFather и выберите доступные личные чаты в настройках Telegram. Владелец аккаунта должен быть указан в `ALLOWED_USERS`. `SECRETARY_MODE=approval` отправляет владельцу черновик с кнопками отправки и отклонения; `SECRETARY_MODE=auto` отвечает сразу. Нужны `OPENAI_COMPAT_BASE_URL`, `OPENAI_COMPAT_MODEL`, `OPENAI_COMPAT_API_KEY` и `OPENAI_COMPAT_BILLING_ACK=true`. Дополнительно можно задать `SECRETARY_MODEL` и `SECRETARY_PROMPT`. Бот видит только текущее сообщение, без истории переписки. Перед автоответами задайте лимит расходов у провайдера. [Подробности на английском](README.md#telegram-secretary-mode).
 
 > **Регион:** размещайте в **поддерживаемом Anthropic регионе** (некоторые страны, например RU/CN, заблокированы по геолокации) — иначе вызовы Claude будут падать.
 
