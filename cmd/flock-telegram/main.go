@@ -224,14 +224,14 @@ func run() int {
 
 	opts2 := append([]bot.Option{
 		bot.WithDefaultHandler(textHandler(cfg, &svc, &vt, &up, limiter, costs, guards)),
-	}, secretaryBotOptions(cfg)...)
+	}, secretaryBotOptions(cfg, opts)...)
 
 	b, err := bot.New(cfg.TelegramBotToken, opts2...)
 	if err != nil {
 		logger.Error("create bot", "error", err)
 		return 1
 	}
-	if err := wireSecretary(cfg, b, logger, runner, opts); err != nil {
+	if err := wireSecretary(ctx, cfg, b, logger, runner, opts); err != nil {
 		logger.Error("open secretary state", "error", err)
 		return 1
 	}

@@ -22,41 +22,74 @@ const (
 	secretaryMaxResponseSize = 1 << 20
 )
 
+//nolint:tagliatelle // OpenAI Responses API uses snake_case request fields.
+type secretaryAnswerRequest struct {
+	Model           string           `json:"model"`
+	Input           string           `json:"input"`
+	Tools           []any            `json:"tools"`
+	Reasoning       *answerReasoning `json:"reasoning,omitempty"`
+	Store           bool             `json:"store"`
+	MaxOutputTokens int              `json:"max_output_tokens"`
+}
+
+type answerReasoning struct {
+	Effort string `json:"effort"`
+}
+
+func supportsLowReasoning(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(model, "gpt-5") || strings.HasPrefix(model, "gpt-6") ||
+		strings.HasPrefix(model, "o1") || strings.HasPrefix(model, "o3") || strings.HasPrefix(model, "o4")
+}
+
 // answerOnly uses the selected Codex model through Responses without offering
 // any tools. Subscription login is CLI-only and cannot provide this guarantee.
 func (r *runner) answerOnly(ctx context.Context, prompt string, o agent.Options) (<-chan agent.Event, error) {
-	if r.authMode() != AuthBilling {
-		return nil, errors.New("codex secretary requires CODEX_AUTH_MODE=billing for a tool-free Responses API request")
+	if err := ValidateAnswerOnly(r.cfg, o); err != nil {
+		return nil, err
 	}
-	if len(r.cfg.ExtraArgs) > 0 {
-		return nil, errors.New("codex secretary cannot use custom Codex CLI arguments with the direct Responses API")
+	out := make(chan agent.Event)
+	go r.streamAnswer(ctx, prompt, o.Model, envValue(o.Env, "CODEX_API_KEY"), out)
+	return out, nil
+}
+
+// ValidateAnswerOnly checks the static preconditions for a tool-free Codex
+// draft. Telegram uses the same check before requesting business updates.
+func ValidateAnswerOnly(cfg Config, o agent.Options) error {
+	if cfg.AuthMode != AuthBilling {
+		return errors.New("codex secretary requires CODEX_AUTH_MODE=billing for a tool-free Responses API request")
+	}
+	if len(cfg.ExtraArgs) > 0 {
+		return errors.New("codex secretary cannot use custom Codex CLI arguments with the direct Responses API")
 	}
 	for _, key := range []string{"OPENAI_BASE_URL", "CODEX_BASE_URL", "CODEX_API_BASE_URL"} {
 		if envValue(o.Env, key) != "" {
-			return nil, fmt.Errorf("codex secretary cannot use %s with the direct Responses API", key)
+			return fmt.Errorf("codex secretary cannot use %s with the direct Responses API", key)
 		}
 	}
 	home := envValue(o.Env, "CODEX_HOME")
-	if home != "" {
-		//nolint:gosec // CODEX_HOME is operator config; only its fixed config.toml is read.
-		data, err := os.ReadFile(filepath.Join(home, "config.toml"))
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("read Codex config for secretary: %w", err)
+	if home == "" {
+		userHome, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("find Codex home for secretary: %w", err)
 		}
-		if strings.Contains(string(data), "model_provider") {
-			return nil, errors.New("codex secretary cannot use a custom Codex model provider with the direct Responses API")
-		}
+		home = filepath.Join(userHome, ".codex")
 	}
-	key := envValue(r.childEnv(o.Env), "CODEX_API_KEY")
-	if key == "" {
-		return nil, errors.New("codex secretary requires CODEX_API_KEY")
+	//nolint:gosec // CODEX_HOME is operator config; only its fixed config.toml is read.
+	data, err := os.ReadFile(filepath.Join(home, "config.toml"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read Codex config for secretary: %w", err)
+	}
+	if strings.Contains(string(data), "model_provider") {
+		return errors.New("codex secretary cannot use a custom Codex model provider with the direct Responses API")
+	}
+	if envValue(o.Env, "CODEX_API_KEY") == "" {
+		return errors.New("codex secretary requires CODEX_API_KEY")
 	}
 	if strings.TrimSpace(o.Model) == "" {
-		return nil, errors.New("codex secretary requires the selected CODEX_MODEL")
+		return errors.New("codex secretary requires the selected CODEX_MODEL")
 	}
-	out := make(chan agent.Event)
-	go r.streamAnswer(ctx, prompt, o.Model, key, out)
-	return out, nil
+	return nil
 }
 
 func envValue(env []string, key string) string {
@@ -71,23 +104,14 @@ func envValue(env []string, key string) string {
 
 func (r *runner) streamAnswer(ctx context.Context, prompt, model, key string, out chan<- agent.Event) {
 	defer close(out)
-	//nolint:tagliatelle // OpenAI Responses API uses snake_case request fields.
-	requestBody, err := json.Marshal(struct {
-		Model     string `json:"model"`
-		Input     string `json:"input"`
-		Tools     []any  `json:"tools"`
-		Reasoning struct {
-			Effort string `json:"effort"`
-		} `json:"reasoning"`
-		Store           bool `json:"store"`
-		MaxOutputTokens int  `json:"max_output_tokens"`
-	}{
+	payload := secretaryAnswerRequest{
 		Model: model, Input: prompt, Tools: []any{}, Store: false,
-		Reasoning: struct {
-			Effort string `json:"effort"`
-		}{Effort: "low"},
 		MaxOutputTokens: secretaryMaxOutputTokens,
-	})
+	}
+	if supportsLowReasoning(model) {
+		payload.Reasoning = &answerReasoning{Effort: "low"}
+	}
+	requestBody, err := json.Marshal(payload)
 	if err != nil {
 		out <- agent.Event{Type: agent.RunError, Err: err}
 		return

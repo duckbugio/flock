@@ -211,7 +211,7 @@ func TestAnswerOnlyUsesSelectedModelWithoutTools(t *testing.T) {
 		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 			t.Error(err)
 		}
-		if body.Model != "gpt-selected" || body.Input != "reply" || body.Reasoning.Effort != "low" ||
+		if body.Model != "gpt-5.5" || body.Input != "reply" || body.Reasoning.Effort != "low" ||
 			body.MaxOutputTokens != secretaryMaxOutputTokens || body.Tools == nil || len(body.Tools) != 0 || body.Store {
 			t.Errorf("unsafe answer request: %+v", body)
 		}
@@ -220,7 +220,8 @@ func TestAnswerOnlyUsesSelectedModelWithoutTools(t *testing.T) {
 	defer server.Close()
 	r := New(Config{AuthMode: AuthBilling, AnswerAPIURL: server.URL})
 	ch, err := r.Run(context.Background(), "reply", agent.Options{
-		Model: "gpt-selected", AnswerOnly: true, Env: []string{"CODEX_API_KEY=selected-key"},
+		Model: "gpt-5.5", AnswerOnly: true,
+		Env: []string{"CODEX_API_KEY=selected-key", "CODEX_HOME=" + t.TempDir()},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -248,6 +249,12 @@ func TestAnswerOnlyRejectsCustomCodexModelProvider(t *testing.T) {
 		AnswerOnly: true, Model: "gpt-selected", Env: []string{"CODEX_HOME=" + home, "CODEX_API_KEY=test-key"},
 	}); err == nil {
 		t.Fatal("custom model provider sent private message to default OpenAI endpoint")
+	}
+}
+
+func TestAnswerOnlyReasoningIsModelSpecific(t *testing.T) {
+	if !supportsLowReasoning("gpt-5.5") || supportsLowReasoning("gpt-4.1") {
+		t.Fatal("reasoning effort must be omitted for non-reasoning models")
 	}
 }
 

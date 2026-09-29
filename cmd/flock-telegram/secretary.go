@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/duckbugio/flock/core/agent"
+	"github.com/duckbugio/flock/core/codex"
 	"github.com/duckbugio/flock/core/ratelimit"
 	"github.com/duckbugio/flock/internal/atomicfile"
 	"github.com/duckbugio/flock/internal/config"
@@ -45,6 +46,7 @@ const (
 	secretaryDraftTimeout     = 2 * time.Minute
 	secretaryMaxInvalidKeys   = 10000
 	secretaryMaxConnections   = 1024
+	secretaryUpdateCount      = 7
 )
 
 // secretaryAPI is intentionally smaller than bot.Bot: business messages never
@@ -93,25 +95,47 @@ type secretaryManager struct {
 	connections map[string]secretaryConnectionCache
 }
 
-func secretaryBotOptions(cfg config.Config) []bot.Option {
+func secretaryAvailability(cfg config.Config, opts agent.Options) (bool, error) {
 	if cfg.SecretaryModeName() == config.SecretaryModeOff {
-		return nil
-	}
-	return []bot.Option{bot.WithAllowedUpdates(bot.AllowedUpdates{
-		models.AllowedUpdateMessage, models.AllowedUpdateEditedMessage,
-		models.AllowedUpdateCallbackQuery, models.AllowedUpdateBusinessConnection,
-		models.AllowedUpdateBusinessMessage, models.AllowedUpdateEditedBusinessMessage,
-		models.AllowedUpdateDeletedBusinessMessages,
-	})}
-}
-
-func wireSecretary(cfg config.Config, b *bot.Bot, logger *slog.Logger, runner agent.Runner, opts agent.Options) error {
-	if cfg.SecretaryModeName() == config.SecretaryModeOff {
-		return nil
+		return false, nil
 	}
 	backend, _ := cfg.AIBackendName()
-	if backend == config.AIBackendCodex && cfg.CodexAuthModeName() != config.CodexAuthBilling {
-		logger.Warn("telegram secretary disabled: codex subscription auth cannot run tool-free drafts")
+	if backend != config.AIBackendCodex {
+		return true, nil
+	}
+	err := codex.ValidateAnswerOnly(codex.Config{
+		AuthMode: cfg.CodexAuthModeName(), ExtraArgs: strings.Fields(cfg.CodexExtraArgs),
+	}, opts)
+	return err == nil, err
+}
+
+func secretaryAllowedUpdates(cfg config.Config, opts agent.Options) bot.AllowedUpdates {
+	updates := make(bot.AllowedUpdates, 0, secretaryUpdateCount)
+	updates = append(updates,
+		models.AllowedUpdateMessage, models.AllowedUpdateEditedMessage,
+		models.AllowedUpdateCallbackQuery,
+	)
+	available, _ := secretaryAvailability(cfg, opts)
+	if !available {
+		return updates
+	}
+	return append(updates, models.AllowedUpdateBusinessConnection,
+		models.AllowedUpdateBusinessMessage, models.AllowedUpdateEditedBusinessMessage,
+		models.AllowedUpdateDeletedBusinessMessages)
+}
+
+func secretaryBotOptions(cfg config.Config, opts agent.Options) []bot.Option {
+	return []bot.Option{bot.WithAllowedUpdates(secretaryAllowedUpdates(cfg, opts))}
+}
+
+func wireSecretary(
+	ctx context.Context, cfg config.Config, b *bot.Bot, logger *slog.Logger, runner agent.Runner, opts agent.Options,
+) error {
+	available, reason := secretaryAvailability(cfg, opts)
+	if !available {
+		if reason != nil {
+			logger.Warn("telegram secretary disabled", "reason", reason)
+		}
 		return nil
 	}
 	secretary, err := newSecretaryManager(cfg, runner, opts)
@@ -131,6 +155,10 @@ func wireSecretary(cfg config.Config, b *bot.Bot, logger *slog.Logger, runner ag
 		func(ctx context.Context, b *bot.Bot, u *models.Update) {
 			secretary.handleCallback(ctx, b, u)
 		})
+	go func() {
+		<-ctx.Done()
+		_ = os.RemoveAll(secretary.opts.Workdir)
+	}()
 	logger.Info("telegram secretary enabled", "mode", cfg.SecretaryModeName())
 	return nil
 }
@@ -143,6 +171,12 @@ func newSecretaryManager(cfg config.Config, runner agent.Runner, opts agent.Opti
 	if err != nil {
 		return nil, fmt.Errorf("create secretary workspace: %w", err)
 	}
+	created := false
+	defer func() {
+		if !created {
+			_ = os.RemoveAll(secretaryWorkdir)
+		}
+	}()
 	opts.SessionID = ""
 	opts.Workdir = secretaryWorkdir
 	opts.MCPConfig = ""
@@ -181,6 +215,7 @@ func newSecretaryManager(cfg config.Config, runner agent.Runner, opts agent.Opti
 	if m.state.Pending == nil {
 		m.state.Pending = map[string]secretaryPending{}
 	}
+	created = true
 	return m, nil
 }
 
