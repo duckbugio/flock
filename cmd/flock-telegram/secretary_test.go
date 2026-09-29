@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,18 +105,34 @@ func incomingSecretaryMessage() *models.Message {
 
 func TestSecretaryUsesSelectedProviderWithRestrictedOptions(t *testing.T) {
 	runner := &secretaryFakeRunner{}
+	approved := t.TempDir()
 	m, err := newSecretaryManager(config.Config{
-		SecretaryMode: config.SecretaryModeAuto, ApprovedDirectory: t.TempDir(),
+		SecretaryMode: config.SecretaryModeAuto, ApprovedDirectory: approved,
 	}, runner, agent.Options{
 		Model: "selected-model", MCPConfig: "/workspace/mcp.json", SessionID: "old-session",
-		Workdir: "/workspace/project", MaxTurns: 40,
+		Workdir: "/workspace/project", MaxTurns: 40, Effort: "ultracode",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if m.runner != runner || m.opts.Model != "selected-model" || !m.opts.AnswerOnly || m.opts.MaxTurns != 1 ||
-		m.opts.MCPConfig != "" || m.opts.SessionID != "" || m.opts.Workdir == "/workspace/project" {
+		m.opts.MCPConfig != "" || m.opts.SessionID != "" || m.opts.Effort != "" ||
+		strings.HasPrefix(m.opts.Workdir, approved+string(os.PathSeparator)) {
 		t.Fatalf("secretary runner/options = %T %+v", m.runner, m.opts)
+	}
+}
+
+func TestSecretarySkipsCodexSubscriptionWithoutStoppingBot(t *testing.T) {
+	approved := t.TempDir()
+	cfg := config.Config{
+		AIBackend: config.AIBackendCodex, CodexAuthMode: config.CodexAuthSubscription,
+		SecretaryMode: config.SecretaryModeApproval, ApprovedDirectory: approved,
+	}
+	if err := wireSecretary(cfg, nil, slog.Default(), &secretaryFakeRunner{}, agent.Options{}); err != nil {
+		t.Fatalf("Codex subscription disabled the entire bot: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(approved, "secretary-state.json")); !os.IsNotExist(err) {
+		t.Fatalf("Codex subscription initialized secretary state: %v", err)
 	}
 }
 

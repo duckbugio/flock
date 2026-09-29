@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	secretaryMaxOutputTokens = 2048
+	secretaryMaxOutputTokens = 4096
 	secretaryHTTPTimeout     = 2 * time.Minute
 	secretaryMaxResponseSize = 1 << 20
 )
@@ -52,13 +52,21 @@ func (r *runner) streamAnswer(ctx context.Context, prompt, model, key string, ou
 	defer close(out)
 	//nolint:tagliatelle // OpenAI Responses API uses snake_case request fields.
 	requestBody, err := json.Marshal(struct {
-		Model           string `json:"model"`
-		Input           string `json:"input"`
-		ToolChoice      string `json:"tool_choice"`
-		Tools           []any  `json:"tools"`
-		Store           bool   `json:"store"`
-		MaxOutputTokens int    `json:"max_output_tokens"`
-	}{Model: model, Input: prompt, ToolChoice: "none", Tools: []any{}, Store: false, MaxOutputTokens: secretaryMaxOutputTokens})
+		Model     string `json:"model"`
+		Input     string `json:"input"`
+		Tools     []any  `json:"tools"`
+		Reasoning struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning"`
+		Store           bool `json:"store"`
+		MaxOutputTokens int  `json:"max_output_tokens"`
+	}{
+		Model: model, Input: prompt, Tools: []any{}, Store: false,
+		Reasoning: struct {
+			Effort string `json:"effort"`
+		}{Effort: "low"},
+		MaxOutputTokens: secretaryMaxOutputTokens,
+	})
 	if err != nil {
 		out <- agent.Event{Type: agent.RunError, Err: err}
 		return

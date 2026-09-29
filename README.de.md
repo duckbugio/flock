@@ -44,6 +44,8 @@ Alles Übrige in [`.env.example`](adapters/telegram/.env.example) hat sinnvolle 
 
 Aktiviere den Modus für den Bot in @BotFather und wähle die zugänglichen privaten Chats in Telegram. Der Kontoinhaber muss in `ALLOWED_USERS` eingetragen sein. `SECRETARY_MODE=approval` sendet dem Kontoinhaber einen Entwurf mit Senden/Verwerfen; `SECRETARY_MODE=auto` antwortet sofort. Für Antworten nutzt der Bot den separat gewählten KI-Anbieter und dessen Modell (`AI_BACKEND`); Telegram wählt kein eigenes KI-Modell. Der Bot erhält nur die aktuelle Nachricht, keinen Chatverlauf. Setze vor automatischen Antworten ein Ausgabenlimit beim Anbieter. [Weitere Einzelheiten auf Englisch](README.md#telegram-secretary-mode).
 
+Für Codex als Sekretär sind `CODEX_AUTH_MODE=billing` und `CODEX_API_KEY` erforderlich. Bei einer Codex-Subscription bleibt der Bot online, aber der Sekretärmodus wird deaktiviert.
+
 > **Region:** Hoste in einer **von Anthropic unterstützten Region** (einige Länder, z. B. RU/CN, sind geoblockt) — andernfalls schlagen Claude-Aufrufe fehl.
 
 **VK** folgt demselben Muster unter [`adapters/vk/`](adapters/vk/), auf demselben Core aufgebaut und veröffentlicht als `ghcr.io/duckbugio/flock-vk`. Es liefert nur ein Env-Template (keine Compose-Datei): `cp .env.example .env`, dann `docker run --env-file .env ghcr.io/duckbugio/flock-vk`. Die Claude-Authentifizierung und die Core-Einstellungen sind identisch mit Telegram; nur die drei Transport-Variablen ändern sich:

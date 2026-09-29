@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,10 +73,6 @@ var (
 	ErrCodexBillingAPIKeyRequired = errors.New("CODEX_API_KEY is required when CODEX_AUTH_MODE=billing")
 	// ErrCodexUnknownAuthMode is returned for unsupported Codex auth modes.
 	ErrCodexUnknownAuthMode = errors.New("unknown CODEX_AUTH_MODE")
-	// ErrCodexSecretaryRequiresBilling prevents silently enabling secretary
-	// drafts with the Codex subscription CLI, whose managed MCP tools cannot be
-	// disabled for an untrusted business message.
-	ErrCodexSecretaryRequiresBilling = errors.New("SECRETARY_MODE with AI_BACKEND=codex requires CODEX_AUTH_MODE=billing")
 
 	// ErrOpenAICompatBaseURLRequired is returned when the OpenAI-compatible
 	// provider is enabled without a base URL.
@@ -532,6 +530,12 @@ func (c Config) ValidateOpenAICompat() error {
 	if strings.TrimSpace(c.OpenAICompatBaseURL) == "" {
 		return ErrOpenAICompatBaseURLRequired
 	}
+	u, err := url.Parse(c.OpenAICompatBaseURL)
+	internalHost := u != nil && openAICompatInternalHost(u.Hostname())
+	if err != nil || (u.Scheme != "https" && (u.Scheme != "http" || !internalHost)) || u.Hostname() == "" ||
+		u.User != nil || u.RawQuery != "" || u.ForceQuery || strings.Contains(c.OpenAICompatBaseURL, "#") {
+		return errors.New("OPENAI_COMPAT_BASE_URL requires HTTPS for public hosts and no credentials, query or fragment")
+	}
 	if strings.TrimSpace(c.OpenAICompatModel) == "" {
 		return ErrOpenAICompatModelRequired
 	}
@@ -547,6 +551,18 @@ func (c Config) ValidateOpenAICompat() error {
 	default:
 		return ErrOpenAICompatUnknownAuthMode
 	}
+}
+
+func openAICompatInternalHost(host string) bool {
+	if host == "host.docker.internal" || (host != "" && !strings.Contains(host, ".") && !strings.Contains(host, ":")) {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	return addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast()
 }
 
 // SlogLevel maps the configured LOG_LEVEL word (case-insensitive) to a
@@ -841,10 +857,6 @@ func (c Config) ValidateTelegram() error {
 	case SecretaryModeOff:
 		return nil
 	case SecretaryModeApproval, SecretaryModeAuto:
-		backend, _ := c.AIBackendName()
-		if backend == AIBackendCodex && c.CodexAuthModeName() != CodexAuthBilling {
-			return ErrCodexSecretaryRequiresBilling
-		}
 		return nil
 	default:
 		return errors.New("SECRETARY_MODE must be off, approval, or auto")

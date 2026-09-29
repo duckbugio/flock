@@ -109,6 +109,11 @@ func wireSecretary(cfg config.Config, b *bot.Bot, logger *slog.Logger, runner ag
 	if cfg.SecretaryModeName() == config.SecretaryModeOff {
 		return nil
 	}
+	backend, _ := cfg.AIBackendName()
+	if backend == config.AIBackendCodex && cfg.CodexAuthModeName() != config.CodexAuthBilling {
+		logger.Warn("telegram secretary disabled: codex subscription auth cannot run tool-free drafts")
+		return nil
+	}
 	secretary, err := newSecretaryManager(cfg, runner, opts)
 	if err != nil {
 		return err
@@ -134,10 +139,14 @@ func newSecretaryManager(cfg config.Config, runner agent.Runner, opts agent.Opti
 	if runner == nil {
 		return nil, errors.New("secretary AI runner is required")
 	}
-	secretaryWorkdir := filepath.Join(cfg.ApprovedDirectory, "secretary")
+	secretaryWorkdir, err := os.MkdirTemp("", "flock-secretary-")
+	if err != nil {
+		return nil, fmt.Errorf("create secretary workspace: %w", err)
+	}
 	opts.SessionID = ""
 	opts.Workdir = secretaryWorkdir
 	opts.MCPConfig = ""
+	opts.Effort = ""
 	opts.MaxTurns = 1
 	opts.AnswerOnly = true
 	m := &secretaryManager{
@@ -153,9 +162,6 @@ func newSecretaryManager(cfg config.Config, runner agent.Runner, opts agent.Opti
 	}
 	if err := os.MkdirAll(filepath.Dir(m.path), secretaryDirPerm); err != nil {
 		return nil, fmt.Errorf("create secretary state directory: %w", err)
-	}
-	if err := os.MkdirAll(secretaryWorkdir, secretaryDirPerm); err != nil {
-		return nil, fmt.Errorf("create secretary workspace: %w", err)
 	}
 	data, err := os.ReadFile(m.path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {

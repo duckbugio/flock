@@ -903,6 +903,34 @@ func TestValidateOpenAICompatBillingRequiresAckAndKey(t *testing.T) {
 	}
 }
 
+func TestValidateOpenAICompatRejectsInsecurePublicURL(t *testing.T) {
+	base := Config{
+		AIBackend: AIBackendOpenAICompat, OpenAICompatModel: "model",
+		OpenAICompatAPIKey: "test-key", OpenAICompatBillingAck: true,
+	}
+	for _, value := range []string{
+		"not-a-url", "http://api.example.test/v1", "https://api.example.test/v1?",
+		"https://api.example.test/v1#", "https://user:pass@api.example.test/v1",
+	} {
+		c := base
+		c.OpenAICompatBaseURL = value
+		if err := c.ValidateOpenAICompat(); err == nil {
+			t.Errorf("accepted insecure URL %q", value)
+		}
+	}
+	for _, value := range []string{
+		"http://localhost:8080/v1", "http://127.0.0.1:8080/v1", "http://[::1]:8080/v1",
+		"http://vllm:8000/v1", "http://host.docker.internal:8000/v1",
+		"http://10.0.0.5:8000/v1", "http://[fd00::5]:8000/v1",
+	} {
+		c := base
+		c.OpenAICompatBaseURL = value
+		if err := c.ValidateOpenAICompat(); err != nil {
+			t.Errorf("rejected internal URL %q: %v", value, err)
+		}
+	}
+}
+
 //nolint:gosec // fake credential env var is required for auth validation coverage.
 func TestValidateOpenAICompatAcceptsAPIKeyFromNamedEnv(t *testing.T) {
 	t.Setenv("DASHSCOPE_API_KEY", "dashscope-key")
@@ -1006,16 +1034,6 @@ func TestTelegramSecretaryModeUsesSelectedProvider(t *testing.T) {
 	invalid.SecretaryMode = "unknown"
 	if err := invalid.ValidateTelegram(); err == nil {
 		t.Fatal("Secretary Mode accepted unknown mode")
-	}
-	codexSubscription := base
-	codexSubscription.AIBackend = AIBackendCodex
-	if err := codexSubscription.ValidateTelegram(); !errors.Is(err, ErrCodexSecretaryRequiresBilling) {
-		t.Fatalf("Codex subscription secretary error = %v", err)
-	}
-	codexBilling := codexSubscription
-	codexBilling.CodexAuthMode = CodexAuthBilling
-	if err := codexBilling.ValidateTelegram(); err != nil {
-		t.Fatalf("Codex billing secretary: %v", err)
 	}
 }
 

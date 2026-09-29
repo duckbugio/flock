@@ -199,17 +199,20 @@ func TestAnswerOnlyUsesSelectedModelWithoutTools(t *testing.T) {
 		}
 		//nolint:tagliatelle // OpenAI Responses API uses snake_case request fields.
 		var body struct {
-			Model      string `json:"model"`
-			Input      string `json:"input"`
-			ToolChoice string `json:"tool_choice"`
-			Tools      []any  `json:"tools"`
-			Store      bool   `json:"store"`
+			Model     string `json:"model"`
+			Input     string `json:"input"`
+			Tools     []any  `json:"tools"`
+			Reasoning struct {
+				Effort string `json:"effort"`
+			} `json:"reasoning"`
+			MaxOutputTokens int  `json:"max_output_tokens"`
+			Store           bool `json:"store"`
 		}
 		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 			t.Error(err)
 		}
-		if body.Model != "gpt-selected" || body.Input != "reply" || body.ToolChoice != "none" ||
-			body.Tools == nil || len(body.Tools) != 0 || body.Store {
+		if body.Model != "gpt-selected" || body.Input != "reply" || body.Reasoning.Effort != "low" ||
+			body.MaxOutputTokens != secretaryMaxOutputTokens || body.Tools == nil || len(body.Tools) != 0 || body.Store {
 			t.Errorf("unsafe answer request: %+v", body)
 		}
 		_, _ = w.Write([]byte(`{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Hello"}]}]}`))

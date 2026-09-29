@@ -56,8 +56,9 @@ OpenAI-compatible provider). Telegram settings control access and reply mode;
 they do not choose an AI provider. Claude drafts run in a separate workspace
 with tools and MCP disabled. Codex drafts use the tool-free Responses API with
 the selected `CODEX_MODEL`; this requires `CODEX_AUTH_MODE=billing` and the
-existing `CODEX_API_KEY`. Codex subscription login cannot safely run secretary
-drafts because managed Codex CLI configuration may expose MCP tools.
+existing `CODEX_API_KEY`. With Codex subscription login, the Telegram bot stays
+online but Secretary Mode is disabled because managed Codex CLI configuration
+may expose MCP tools.
 Set a spending limit with your provider before enabling automatic replies; the
 bot caps requests per minute but does not track provider costs. Each reply uses
 only the current incoming text or caption, without earlier chat history.
