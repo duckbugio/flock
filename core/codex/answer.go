@@ -80,7 +80,7 @@ func ValidateAnswerOnly(cfg Config, o agent.Options) error {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read Codex config for secretary: %w", err)
 	}
-	if strings.Contains(string(data), "model_provider") {
+	if selectsCustomModelProvider(data) {
 		return errors.New("codex secretary cannot use a custom Codex model provider with the direct Responses API")
 	}
 	if envValue(o.Env, "CODEX_API_KEY") == "" {
@@ -90,6 +90,20 @@ func ValidateAnswerOnly(cfg Config, o agent.Options) error {
 		return errors.New("codex secretary requires the selected CODEX_MODEL")
 	}
 	return nil
+}
+
+func selectsCustomModelProvider(data []byte) bool {
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, _, found := strings.Cut(line, "=")
+		if found && strings.TrimSpace(key) == "model_provider" {
+			return true
+		}
+	}
+	return false
 }
 
 func envValue(env []string, key string) string {

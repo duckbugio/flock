@@ -116,9 +116,10 @@ func TestSecretaryUsesSelectedProviderWithRestrictedOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(m.opts.Workdir) })
 	if m.runner != runner || m.opts.Model != "selected-model" || !m.opts.AnswerOnly || m.opts.MaxTurns != 1 ||
 		m.opts.MCPConfig != "" || m.opts.SessionID != "" || m.opts.Effort != "" ||
-		strings.HasPrefix(m.opts.Workdir, approved+string(os.PathSeparator)) {
+		m.opts.Workdir == "/workspace/project" || strings.HasPrefix(m.opts.Workdir, approved+string(os.PathSeparator)) {
 		t.Fatalf("secretary runner/options = %T %+v", m.runner, m.opts)
 	}
 }
@@ -129,12 +130,16 @@ func TestSecretarySkipsCodexSubscriptionWithoutStoppingBot(t *testing.T) {
 		AIBackend: config.AIBackendCodex, CodexAuthMode: config.CodexAuthSubscription,
 		SecretaryMode: config.SecretaryModeApproval, ApprovedDirectory: approved,
 	}
-	if got := secretaryAllowedUpdates(cfg, agent.Options{}); slices.Contains(got, models.AllowedUpdateBusinessMessage) {
+	if got := secretaryAllowedUpdates(cfg, agent.Options{}, config.AIBackendCodex); slices.Contains(
+		got, models.AllowedUpdateBusinessMessage,
+	) {
 		t.Fatal("Codex subscription still requested business updates")
 	}
-	if err := wireSecretary(context.Background(), cfg, nil, slog.Default(), &secretaryFakeRunner{}, agent.Options{}); err != nil {
+	cleanup, err := wireSecretary(cfg, nil, slog.Default(), &secretaryFakeRunner{}, agent.Options{}, config.AIBackendCodex)
+	if err != nil || cleanup == nil {
 		t.Fatalf("Codex subscription disabled the entire bot: %v", err)
 	}
+	cleanup()
 	if _, err := os.Stat(filepath.Join(approved, "secretary-state.json")); !os.IsNotExist(err) {
 		t.Fatalf("Codex subscription initialized secretary state: %v", err)
 	}
@@ -143,12 +148,19 @@ func TestSecretarySkipsCodexSubscriptionWithoutStoppingBot(t *testing.T) {
 	opts := agent.Options{Model: "gpt-selected", Env: []string{
 		"CODEX_API_KEY=test-key", "CODEX_HOME=" + t.TempDir(),
 	}}
-	if got := secretaryAllowedUpdates(cfg, opts); slices.Contains(got, models.AllowedUpdateBusinessMessage) {
+	if got := secretaryAllowedUpdates(cfg, opts, config.AIBackendCodex); slices.Contains(got, models.AllowedUpdateBusinessMessage) {
 		t.Fatal("unsupported Codex CLI args still requested business updates")
 	}
 	cfg.CodexExtraArgs = ""
-	if got := secretaryAllowedUpdates(cfg, opts); !slices.Contains(got, models.AllowedUpdateBusinessMessage) {
+	if got := secretaryAllowedUpdates(cfg, opts, config.AIBackendCodex); !slices.Contains(got, models.AllowedUpdateBusinessMessage) {
 		t.Fatal("supported Codex billing setup did not request business updates")
+	}
+	cfg.AIBackend = "codex-cli"
+	cfg.CodexAuthMode = config.CodexAuthSubscription
+	if got := secretaryAllowedUpdates(cfg, agent.Options{}, config.AIBackendCodex); slices.Contains(
+		got, models.AllowedUpdateBusinessMessage,
+	) {
+		t.Fatal("Codex alias bypassed secretary availability check")
 	}
 }
 

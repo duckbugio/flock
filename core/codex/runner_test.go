@@ -258,6 +258,13 @@ func TestAnswerOnlyReasoningIsModelSpecific(t *testing.T) {
 	}
 }
 
+func TestCustomModelProviderDetectionIgnoresDeclarations(t *testing.T) {
+	config := []byte("# model_provider = 'old'\n[model_providers.gateway]\nname = 'gateway'\n")
+	if selectsCustomModelProvider(config) || !selectsCustomModelProvider(append(config, []byte("model_provider = 'gateway'\n")...)) {
+		t.Fatal("custom model provider selection was misclassified")
+	}
+}
+
 func TestRunErrorWhenCodexExitsWithoutTurnCompleted(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "boom.sh")

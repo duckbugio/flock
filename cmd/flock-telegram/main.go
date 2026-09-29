@@ -204,11 +204,15 @@ func run() int {
 			"effective", cfg.ShutdownDrain(),
 		)
 	}
+	var secretaryCleanup func()
 	defer func() {
 		drainCtx, cancelDrain := context.WithTimeout(context.Background(), cfg.ShutdownDrain())
 		defer cancelDrain()
 		if err := disp.Shutdown(drainCtx); err != nil {
 			logger.Warn("dispatcher drain deadline reached; survivors cancelled", "error", err)
+		}
+		if secretaryCleanup != nil {
+			secretaryCleanup()
 		}
 	}()
 
@@ -224,14 +228,15 @@ func run() int {
 
 	opts2 := append([]bot.Option{
 		bot.WithDefaultHandler(textHandler(cfg, &svc, &vt, &up, limiter, costs, guards)),
-	}, secretaryBotOptions(cfg, opts)...)
+	}, secretaryBotOptions(cfg, opts, provider.Name)...)
 
 	b, err := bot.New(cfg.TelegramBotToken, opts2...)
 	if err != nil {
 		logger.Error("create bot", "error", err)
 		return 1
 	}
-	if err := wireSecretary(ctx, cfg, b, logger, runner, opts); err != nil {
+	secretaryCleanup, err = wireSecretary(cfg, b, logger, runner, opts, provider.Name)
+	if err != nil {
 		logger.Error("open secretary state", "error", err)
 		return 1
 	}

@@ -95,12 +95,11 @@ type secretaryManager struct {
 	connections map[string]secretaryConnectionCache
 }
 
-func secretaryAvailability(cfg config.Config, opts agent.Options) (bool, error) {
+func secretaryAvailability(cfg config.Config, opts agent.Options, providerName string) (bool, error) {
 	if cfg.SecretaryModeName() == config.SecretaryModeOff {
 		return false, nil
 	}
-	backend, _ := cfg.AIBackendName()
-	if backend != config.AIBackendCodex {
+	if providerName != config.AIBackendCodex {
 		return true, nil
 	}
 	err := codex.ValidateAnswerOnly(codex.Config{
@@ -109,13 +108,13 @@ func secretaryAvailability(cfg config.Config, opts agent.Options) (bool, error) 
 	return err == nil, err
 }
 
-func secretaryAllowedUpdates(cfg config.Config, opts agent.Options) bot.AllowedUpdates {
+func secretaryAllowedUpdates(cfg config.Config, opts agent.Options, providerName string) bot.AllowedUpdates {
 	updates := make(bot.AllowedUpdates, 0, secretaryUpdateCount)
 	updates = append(updates,
 		models.AllowedUpdateMessage, models.AllowedUpdateEditedMessage,
 		models.AllowedUpdateCallbackQuery,
 	)
-	available, _ := secretaryAvailability(cfg, opts)
+	available, _ := secretaryAvailability(cfg, opts, providerName)
 	if !available {
 		return updates
 	}
@@ -124,23 +123,23 @@ func secretaryAllowedUpdates(cfg config.Config, opts agent.Options) bot.AllowedU
 		models.AllowedUpdateDeletedBusinessMessages)
 }
 
-func secretaryBotOptions(cfg config.Config, opts agent.Options) []bot.Option {
-	return []bot.Option{bot.WithAllowedUpdates(secretaryAllowedUpdates(cfg, opts))}
+func secretaryBotOptions(cfg config.Config, opts agent.Options, providerName string) []bot.Option {
+	return []bot.Option{bot.WithAllowedUpdates(secretaryAllowedUpdates(cfg, opts, providerName))}
 }
 
 func wireSecretary(
-	ctx context.Context, cfg config.Config, b *bot.Bot, logger *slog.Logger, runner agent.Runner, opts agent.Options,
-) error {
-	available, reason := secretaryAvailability(cfg, opts)
+	cfg config.Config, b *bot.Bot, logger *slog.Logger, runner agent.Runner, opts agent.Options, providerName string,
+) (func(), error) {
+	available, reason := secretaryAvailability(cfg, opts, providerName)
 	if !available {
 		if reason != nil {
 			logger.Warn("telegram secretary disabled", "reason", reason)
 		}
-		return nil
+		return func() {}, nil
 	}
 	secretary, err := newSecretaryManager(cfg, runner, opts)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(cfg.AllowedUsers) == 0 {
 		logger.Warn("telegram secretary has no allowed account owner; set ALLOWED_USERS")
@@ -155,12 +154,8 @@ func wireSecretary(
 		func(ctx context.Context, b *bot.Bot, u *models.Update) {
 			secretary.handleCallback(ctx, b, u)
 		})
-	go func() {
-		<-ctx.Done()
-		_ = os.RemoveAll(secretary.opts.Workdir)
-	}()
 	logger.Info("telegram secretary enabled", "mode", cfg.SecretaryModeName())
-	return nil
+	return func() { _ = os.RemoveAll(secretary.opts.Workdir) }, nil
 }
 
 func newSecretaryManager(cfg config.Config, runner agent.Runner, opts agent.Options) (*secretaryManager, error) {
