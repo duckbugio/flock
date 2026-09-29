@@ -146,7 +146,14 @@ func buildArgs(o Options, prompt string, stdinMode bool) []string {
 		args = append(args, "--max-turns", strconv.Itoa(o.MaxTurns))
 	}
 	args = applyEffort(args, o.Effort)
-	args = append(args, "--permission-mode", "bypassPermissions")
+	if o.AnswerOnly {
+		args = append(args, "--safe-mode", "--tools", "", "--strict-mcp-config")
+	}
+	permissionMode := "bypassPermissions"
+	if o.AnswerOnly {
+		permissionMode = "default"
+	}
+	args = append(args, "--permission-mode", permissionMode)
 	if o.SessionID != "" {
 		args = append(args, "--resume", o.SessionID)
 	}

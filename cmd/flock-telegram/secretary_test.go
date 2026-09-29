@@ -16,12 +16,25 @@ import (
 	"github.com/duckbugio/flock/internal/config"
 )
 
-type secretaryFakeRunner struct{ calls int }
+type secretaryFakeRunner struct {
+	calls  int
+	onRun  func()
+	events []agent.Event
+}
 
 func (r *secretaryFakeRunner) Run(_ context.Context, _ string, _ agent.Options) (<-chan agent.Event, error) {
 	r.calls++
-	ch := make(chan agent.Event, 1)
-	ch <- agent.Event{Type: agent.Result, Result: &agent.RunResult{Text: "Draft reply"}}
+	if r.onRun != nil {
+		r.onRun()
+	}
+	events := r.events
+	if events == nil {
+		events = []agent.Event{{Type: agent.Result, Result: &agent.RunResult{Text: "Draft reply"}}}
+	}
+	ch := make(chan agent.Event, len(events))
+	for _, event := range events {
+		ch <- event
+	}
 	close(ch)
 	return ch, nil
 }
@@ -88,16 +101,60 @@ func incomingSecretaryMessage() *models.Message {
 	}
 }
 
-func TestSecretaryModelOverride(t *testing.T) {
+func TestSecretaryUsesSelectedProviderWithRestrictedOptions(t *testing.T) {
+	runner := &secretaryFakeRunner{}
 	m, err := newSecretaryManager(config.Config{
-		SecretaryMode: config.SecretaryModeAuto, SecretaryModel: "reply-model",
-		OpenAICompatModel: "coding-model", ApprovedDirectory: t.TempDir(),
+		SecretaryMode: config.SecretaryModeAuto, ApprovedDirectory: t.TempDir(),
+	}, runner, agent.Options{
+		Model: "selected-model", MCPConfig: "/workspace/mcp.json", SessionID: "old-session",
+		Workdir: "/workspace/project", MaxTurns: 40,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.opts.Model != "reply-model" {
-		t.Fatalf("model=%q, want reply-model", m.opts.Model)
+	if m.runner != runner || m.opts.Model != "selected-model" || !m.opts.AnswerOnly || m.opts.MaxTurns != 1 ||
+		m.opts.MCPConfig != "" || m.opts.SessionID != "" || m.opts.Workdir == "/workspace/project" {
+		t.Fatalf("secretary runner/options = %T %+v", m.runner, m.opts)
+	}
+}
+
+func TestSecretaryRejectsToolUseAndFailedResult(t *testing.T) {
+	for _, event := range []agent.Event{
+		{Type: agent.ToolUse, Tool: "command_execution"},
+		{Type: agent.Result, Result: &agent.RunResult{Text: "unsafe", IsError: true}},
+	} {
+		m, runner, _ := testSecretary(t, config.SecretaryModeAuto)
+		runner.events = []agent.Event{event}
+		if reply, err := m.draft(context.Background(), "hello"); err == nil || reply != "" {
+			t.Fatalf("event %v produced reply %q, error %v", event.Type, reply, err)
+		}
+	}
+}
+
+func TestSecretaryAutoRechecksRevokedConnectionAfterDraft(t *testing.T) {
+	m, runner, api := testSecretary(t, config.SecretaryModeAuto)
+	runner.onRun = func() {
+		api.connection.IsEnabled = false
+	}
+	m.handleUpdate(context.Background(), api, &models.Update{BusinessMessage: incomingSecretaryMessage()})
+	if runner.calls != 1 || len(api.sends) != 0 {
+		t.Fatalf("revoked connection: drafts=%d sends=%d", runner.calls, len(api.sends))
+	}
+}
+
+func TestSecretaryAutoRejectsRevocationDuringFinalLookup(t *testing.T) {
+	m, runner, api := testSecretary(t, config.SecretaryModeAuto)
+	api.onGet = func() {
+		if api.gets != 2 {
+			return
+		}
+		updated := api.connection
+		updated.IsEnabled = false
+		m.handleUpdate(context.Background(), api, &models.Update{BusinessConnection: &updated})
+	}
+	m.handleUpdate(context.Background(), api, &models.Update{BusinessMessage: incomingSecretaryMessage()})
+	if runner.calls != 1 || len(api.sends) != 0 {
+		t.Fatalf("in-flight revocation: drafts=%d sends=%d", runner.calls, len(api.sends))
 	}
 }
 
@@ -177,8 +234,8 @@ func TestSecretaryAutoOnlyRepliesToAllowedInboundMessageOnce(t *testing.T) {
 	msg := incomingSecretaryMessage()
 	m.handleUpdate(ctx, api, &models.Update{BusinessMessage: msg})
 	m.handleUpdate(ctx, api, &models.Update{BusinessMessage: msg})
-	if api.gets != 1 {
-		t.Fatalf("business connection lookups=%d, want one cached lookup", api.gets)
+	if api.gets != 2 {
+		t.Fatalf("business connection lookups=%d, want initial and pre-send checks", api.gets)
 	}
 	if runner.calls != 1 || len(api.sends) != 1 {
 		t.Fatalf("calls=%d sends=%d, want one each", runner.calls, len(api.sends))

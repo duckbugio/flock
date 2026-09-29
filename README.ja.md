@@ -42,7 +42,7 @@ docker compose up -d
 
 ### Telegram の秘書モード
 
-@BotFather でボットの秘書モードを有効にし、Telegram でアクセスを許す個人チャットを選びます。アカウント所有者の ID を `ALLOWED_USERS` に追加してください。`SECRETARY_MODE=approval` は所有者へ送信・破棄ボタン付きの下書きを送り、`SECRETARY_MODE=auto` は直ちに返信します。`OPENAI_COMPAT_BASE_URL`、`OPENAI_COMPAT_MODEL`、`OPENAI_COMPAT_API_KEY`、`OPENAI_COMPAT_BILLING_ACK=true` が必要です。`SECRETARY_MODEL` と `SECRETARY_PROMPT` は任意です。ボットは過去の会話ではなく現在のメッセージだけを受け取ります。自動返信前にプロバイダー側で支出上限を設定してください。[英語の詳細](README.md#telegram-secretary-mode)。
+@BotFather でボットの秘書モードを有効にし、Telegram でアクセスを許す個人チャットを選びます。アカウント所有者の ID を `ALLOWED_USERS` に追加してください。`SECRETARY_MODE=approval` は所有者へ送信・破棄ボタン付きの下書きを送り、`SECRETARY_MODE=auto` は直ちに返信します。返信にはボットで別途選択した AI プロバイダーとモデル（`AI_BACKEND`）を使用します。Telegram 側で別の AI モデルは選びません。ボットは過去の会話ではなく現在のメッセージだけを受け取ります。自動返信前にプロバイダー側で支出上限を設定してください。[英語の詳細](README.md#telegram-secretary-mode)。
 
 > **リージョン:** **Anthropic がサポートするリージョン**でホストしてください（一部の国、例えば RU/CN などはジオブロックされています）。そうでない場合、Claude の呼び出しは失敗します。
 

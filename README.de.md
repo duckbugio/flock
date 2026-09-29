@@ -42,7 +42,7 @@ Alles Übrige in [`.env.example`](adapters/telegram/.env.example) hat sinnvolle 
 
 ### Telegram-Sekretärmodus
 
-Aktiviere den Modus für den Bot in @BotFather und wähle die zugänglichen privaten Chats in Telegram. Der Kontoinhaber muss in `ALLOWED_USERS` eingetragen sein. `SECRETARY_MODE=approval` sendet dem Kontoinhaber einen Entwurf mit Senden/Verwerfen; `SECRETARY_MODE=auto` antwortet sofort. Erforderlich sind `OPENAI_COMPAT_BASE_URL`, `OPENAI_COMPAT_MODEL`, `OPENAI_COMPAT_API_KEY` und `OPENAI_COMPAT_BILLING_ACK=true`; `SECRETARY_MODEL` und `SECRETARY_PROMPT` sind optional. Der Bot erhält nur die aktuelle Nachricht, keinen Chatverlauf. Setze vor automatischen Antworten ein Ausgabenlimit beim Anbieter. [Weitere Einzelheiten auf Englisch](README.md#telegram-secretary-mode).
+Aktiviere den Modus für den Bot in @BotFather und wähle die zugänglichen privaten Chats in Telegram. Der Kontoinhaber muss in `ALLOWED_USERS` eingetragen sein. `SECRETARY_MODE=approval` sendet dem Kontoinhaber einen Entwurf mit Senden/Verwerfen; `SECRETARY_MODE=auto` antwortet sofort. Für Antworten nutzt der Bot den separat gewählten KI-Anbieter und dessen Modell (`AI_BACKEND`); Telegram wählt kein eigenes KI-Modell. Der Bot erhält nur die aktuelle Nachricht, keinen Chatverlauf. Setze vor automatischen Antworten ein Ausgabenlimit beim Anbieter. [Weitere Einzelheiten auf Englisch](README.md#telegram-secretary-mode).
 
 > **Region:** Hoste in einer **von Anthropic unterstützten Region** (einige Länder, z. B. RU/CN, sind geoblockt) — andernfalls schlagen Claude-Aufrufe fehl.
 

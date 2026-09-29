@@ -403,6 +403,24 @@ func TestBuildArgs_MCPConfig(t *testing.T) {
 	}
 }
 
+func TestBuildArgs_AnswerOnlyDisablesToolsAndBypass(t *testing.T) {
+	args := buildArgs(Options{Model: "claude-test", AnswerOnly: true}, "reply", false)
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--safe-mode", "--strict-mcp-config", "--tools", "--permission-mode default"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("answer-only args missing %q: %q", want, args)
+		}
+	}
+	if strings.Contains(joined, "bypassPermissions") {
+		t.Fatalf("answer-only args bypass permissions: %q", args)
+	}
+	for i, arg := range args {
+		if arg == "--tools" && (i+1 >= len(args) || args[i+1] != "") {
+			t.Fatalf("answer-only tools must be empty: %q", args)
+		}
+	}
+}
+
 // TestBuildArgs_Effort covers the CLAUDE_EFFORT mapping in buildArgs: empty emits
 // nothing, a standard level (max) becomes "--effort max", "ultracode" takes the
 // --settings '{"ultracode":true}' path (NOT --effort, since ultracode is not a

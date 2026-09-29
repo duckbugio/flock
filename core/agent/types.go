@@ -70,6 +70,8 @@ type Options struct {
 	Effort    string
 	Env       []string
 	Images    []ImageInput
+	// AnswerOnly disables agent tools for untrusted delegated chat messages.
+	AnswerOnly bool
 }
 
 // Runner runs prompts through a provider.

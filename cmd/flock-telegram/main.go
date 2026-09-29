@@ -231,7 +231,7 @@ func run() int {
 		logger.Error("create bot", "error", err)
 		return 1
 	}
-	if err := wireSecretary(cfg, b, logger); err != nil {
+	if err := wireSecretary(cfg, b, logger, runner, opts); err != nil {
 		logger.Error("open secretary state", "error", err)
 		return 1
 	}

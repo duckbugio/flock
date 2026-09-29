@@ -4,6 +4,8 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,6 +189,49 @@ func TestRunResumeUsesCodexExecResume(t *testing.T) {
 		!strings.Contains(args, "thr_existing continue") ||
 		strings.Contains(args, "--cd ") {
 		t.Fatalf("resume args = %q, want exec resume options before session and no --cd", args)
+	}
+}
+
+func TestAnswerOnlyUsesSelectedModelWithoutTools(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Header.Get("Authorization") != "Bearer selected-key" {
+			t.Errorf("wrong authorization header")
+		}
+		//nolint:tagliatelle // OpenAI Responses API uses snake_case request fields.
+		var body struct {
+			Model      string `json:"model"`
+			Input      string `json:"input"`
+			ToolChoice string `json:"tool_choice"`
+			Tools      []any  `json:"tools"`
+			Store      bool   `json:"store"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if body.Model != "gpt-selected" || body.Input != "reply" || body.ToolChoice != "none" ||
+			body.Tools == nil || len(body.Tools) != 0 || body.Store {
+			t.Errorf("unsafe answer request: %+v", body)
+		}
+		_, _ = w.Write([]byte(`{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Hello"}]}]}`))
+	}))
+	defer server.Close()
+	r := New(Config{AuthMode: AuthBilling, AnswerAPIURL: server.URL})
+	ch, err := r.Run(context.Background(), "reply", agent.Options{
+		Model: "gpt-selected", AnswerOnly: true, Env: []string{"CODEX_API_KEY=selected-key"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := collect(t, ch)
+	if len(events) != 1 || events[0].Type != agent.Result || events[0].Result.Text != "Hello" {
+		t.Fatalf("answer events: %+v", events)
+	}
+}
+
+func TestAnswerOnlyRejectsSubscriptionCLI(t *testing.T) {
+	r := New(Config{AuthMode: AuthSubscription})
+	if _, err := r.Run(context.Background(), "reply", agent.Options{AnswerOnly: true, Model: "gpt-selected"}); err == nil {
+		t.Fatal("subscription Codex CLI was allowed for a business message")
 	}
 }
 

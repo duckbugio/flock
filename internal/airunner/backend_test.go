@@ -23,12 +23,12 @@ func TestCodingRunnersDoNotInheritSecretaryAPIKey(t *testing.T) {
 	}
 }
 
-func TestCodingRunnersPreserveCustomProviderKeyWhenSecretaryOff(t *testing.T) {
+func TestCodingRunnersNeverInheritCustomProviderKey(t *testing.T) {
 	t.Setenv("SECRETARY_CUSTOM_KEY", "shared-key")
 	cfg := config.Config{OpenAICompatAPIKeyEnv: "SECRETARY_CUSTOM_KEY"}
 	for _, env := range [][]string{ClaudeEnv(cfg), CodexEnv(cfg)} {
-		if !slices.Contains(env, "SECRETARY_CUSTOM_KEY=shared-key") {
-			t.Fatal("disabled Secretary Mode removed an unrelated provider key")
+		if slices.Contains(env, "SECRETARY_CUSTOM_KEY=shared-key") {
+			t.Fatal("CLI runner inherited an OpenAI-compatible provider key")
 		}
 	}
 }

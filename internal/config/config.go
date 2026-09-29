@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/netip"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,6 +71,10 @@ var (
 	ErrCodexBillingAPIKeyRequired = errors.New("CODEX_API_KEY is required when CODEX_AUTH_MODE=billing")
 	// ErrCodexUnknownAuthMode is returned for unsupported Codex auth modes.
 	ErrCodexUnknownAuthMode = errors.New("unknown CODEX_AUTH_MODE")
+	// ErrCodexSecretaryRequiresBilling prevents silently enabling secretary
+	// drafts with the Codex subscription CLI, whose managed MCP tools cannot be
+	// disabled for an untrusted business message.
+	ErrCodexSecretaryRequiresBilling = errors.New("SECRETARY_MODE with AI_BACKEND=codex requires CODEX_AUTH_MODE=billing")
 
 	// ErrOpenAICompatBaseURLRequired is returned when the OpenAI-compatible
 	// provider is enabled without a base URL.
@@ -113,11 +115,9 @@ type Config struct {
 	// Telegram (cmd/flock-telegram). Validated by ValidateTelegram, not env-required.
 	TelegramBotToken    string `env:"TELEGRAM_BOT_TOKEN"`
 	TelegramBotUsername string `env:"TELEGRAM_BOT_USERNAME"`
-	// SecretaryMode handles Telegram Business messages through a separate,
-	// answer-only provider. Supported values: off, approval, auto.
-	SecretaryMode   string `env:"SECRETARY_MODE" envDefault:"off"`
-	SecretaryModel  string `env:"SECRETARY_MODEL"`
-	SecretaryPrompt string `env:"SECRETARY_PROMPT"`
+	// SecretaryMode controls Telegram Business message handling. The selected
+	// AI_BACKEND and its model generate replies. Supported: off, approval, auto.
+	SecretaryMode string `env:"SECRETARY_MODE" envDefault:"off"`
 
 	// Telegram user IDs allowed to use the bot (comma-separated).
 	AllowedUsers []int64 `env:"ALLOWED_USERS" envSeparator:","`
@@ -841,33 +841,14 @@ func (c Config) ValidateTelegram() error {
 	case SecretaryModeOff:
 		return nil
 	case SecretaryModeApproval, SecretaryModeAuto:
-		answerOnly := c
-		answerOnly.AIBackend = AIBackendOpenAICompat
-		if err := answerOnly.ValidateOpenAICompat(); err != nil {
-			return err
-		}
-		u, err := url.Parse(c.OpenAICompatBaseURL)
-		internalHost := u != nil && secretaryInternalHost(u.Hostname())
-		if err != nil || (u.Scheme != "https" && (u.Scheme != "http" || !internalHost)) || u.Hostname() == "" ||
-			u.User != nil || u.RawQuery != "" || u.ForceQuery || strings.Contains(c.OpenAICompatBaseURL, "#") {
-			return errors.New("OPENAI_COMPAT_BASE_URL requires HTTPS for public hosts and no credentials, query or fragment")
+		backend, _ := c.AIBackendName()
+		if backend == AIBackendCodex && c.CodexAuthModeName() != CodexAuthBilling {
+			return ErrCodexSecretaryRequiresBilling
 		}
 		return nil
 	default:
 		return errors.New("SECRETARY_MODE must be off, approval, or auto")
 	}
-}
-
-func secretaryInternalHost(host string) bool {
-	if host == "host.docker.internal" || (host != "" && !strings.Contains(host, ".") && !strings.Contains(host, ":")) {
-		return true
-	}
-	addr, err := netip.ParseAddr(host)
-	if err != nil {
-		return false
-	}
-	addr = addr.Unmap()
-	return addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast()
 }
 
 // SecretaryModeName normalizes the opt-in business-message behavior.
