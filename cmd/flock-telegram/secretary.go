@@ -43,6 +43,8 @@ const (
 	secretaryStateLifetime    = 48 * time.Hour
 	secretaryApprovalLifetime = 24 * time.Hour
 	secretaryConnectionTTL    = 5 * time.Minute
+	secretaryMaxInvalidKeys   = 10000
+	secretaryMaxConnections   = 1024
 )
 
 // secretaryAPI is intentionally smaller than bot.Bot: business messages never
@@ -258,10 +260,7 @@ func (m *secretaryManager) connection(ctx context.Context, api secretaryAPI, id 
 		if current, ok := m.connections[id]; ok && time.Now().Before(current.expiresAt) {
 			result = current.connection
 		} else {
-			if m.connections == nil {
-				m.connections = make(map[string]secretaryConnectionCache)
-			}
-			m.connections[id] = secretaryConnectionCache{connection: result, expiresAt: time.Now().Add(secretaryConnectionTTL)}
+			m.putConnectionLocked(result, time.Now())
 		}
 		m.mu.Unlock()
 		return &result, nil
@@ -279,11 +278,29 @@ func (m *secretaryManager) cacheConnection(connection *models.BusinessConnection
 		entry.Rights = &rights
 	}
 	m.mu.Lock()
+	m.putConnectionLocked(entry, time.Now())
+	m.mu.Unlock()
+}
+
+func (m *secretaryManager) putConnectionLocked(entry models.BusinessConnection, now time.Time) {
 	if m.connections == nil {
 		m.connections = make(map[string]secretaryConnectionCache)
 	}
-	m.connections[entry.ID] = secretaryConnectionCache{connection: entry, expiresAt: time.Now().Add(secretaryConnectionTTL)}
-	m.mu.Unlock()
+	var oldestID string
+	var oldestExpiry time.Time
+	for id, cached := range m.connections {
+		if !now.Before(cached.expiresAt) {
+			delete(m.connections, id)
+			continue
+		}
+		if oldestID == "" || cached.expiresAt.Before(oldestExpiry) {
+			oldestID, oldestExpiry = id, cached.expiresAt
+		}
+	}
+	if _, exists := m.connections[entry.ID]; !exists && len(m.connections) >= secretaryMaxConnections {
+		delete(m.connections, oldestID)
+	}
+	m.connections[entry.ID] = secretaryConnectionCache{connection: entry, expiresAt: now.Add(secretaryConnectionTTL)}
 }
 
 func (m *secretaryManager) handleUpdate(ctx context.Context, api secretaryAPI, update *models.Update) {
@@ -494,6 +511,7 @@ func (m *secretaryManager) removePending(token string) {
 func (m *secretaryManager) invalidate(connectionID string, chatID int64, ids []int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.pruneLocked(time.Now())
 	changed := false
 	for _, id := range ids {
 		key := secretaryKey(connectionID, chatID, id)
@@ -515,11 +533,25 @@ func (m *secretaryManager) invalidate(connectionID string, chatID int64, ids []i
 			}
 		}
 	}
+	m.trimInvalidLocked()
 	if !changed {
 		return
 	}
 	if err := m.saveLocked(); err != nil {
 		slog.Error("invalidate secretary approval", "error", err)
+	}
+}
+
+func (m *secretaryManager) trimInvalidLocked() {
+	for len(m.state.Invalid) > secretaryMaxInvalidKeys {
+		var oldestKey string
+		var oldestAt int64
+		for key, at := range m.state.Invalid {
+			if oldestKey == "" || at < oldestAt {
+				oldestKey, oldestAt = key, at
+			}
+		}
+		delete(m.state.Invalid, oldestKey)
 	}
 }
 

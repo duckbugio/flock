@@ -59,8 +59,11 @@ answer-only runner has no coding tools or workspace access, but shares the
 Set a spending limit with your provider before enabling automatic replies; the
 bot caps requests per minute but does not track provider costs. Each reply uses
 only the current incoming text or caption, without earlier chat history.
-Incoming business messages never enter the coding-agent conversation. Edited or
-deleted messages cancel unsent approval drafts. Approval buttons expire after
+Incoming business messages do not enter the coding-agent conversation. Approval
+draft replies and routing metadata are stored in `secretary-state.json` under
+`APPROVED_DIRECTORY`, which the coding agent can read. Edited or deleted messages
+cancel unsent approval drafts; the bot does not generate a replacement reply for
+an edit. Approval buttons expire after
 24 hours; Telegram may reject a reply earlier if its business reply window has
 closed.
 

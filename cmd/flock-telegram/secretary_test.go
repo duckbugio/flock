@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -140,6 +141,33 @@ func TestSecretaryEditBeforeMessagePreventsAutoReply(t *testing.T) {
 	m.handleUpdate(context.Background(), api, &models.Update{BusinessMessage: incomingSecretaryMessage()})
 	if runner.calls != 0 || len(api.sends) != 0 {
 		t.Fatal("reordered edit allowed an auto reply to stale message text")
+	}
+}
+
+func TestSecretaryUntrustedStateIsBounded(t *testing.T) {
+	m, _, api := testSecretary(t, config.SecretaryModeAuto)
+	now := time.Now().Unix()
+	for i := range secretaryMaxInvalidKeys {
+		m.state.Invalid[fmt.Sprintf("old:%d", i)] = now - 1
+	}
+	m.invalidate("conn", 200, []int{5})
+	if len(m.state.Invalid) != secretaryMaxInvalidKeys {
+		t.Fatalf("invalid keys=%d, want cap %d", len(m.state.Invalid), secretaryMaxInvalidKeys)
+	}
+	if _, ok := m.state.Invalid[secretaryKey("conn", 200, 5)]; !ok {
+		t.Fatal("new cancellation was evicted")
+	}
+	for i := range secretaryMaxConnections {
+		c := api.connection
+		c.ID = fmt.Sprintf("conn-%d", i)
+		m.cacheConnection(&c)
+	}
+	m.cacheConnection(&api.connection)
+	if len(m.connections) != secretaryMaxConnections {
+		t.Fatalf("cached connections=%d, want cap %d", len(m.connections), secretaryMaxConnections)
+	}
+	if _, ok := m.connections[api.connection.ID]; !ok {
+		t.Fatal("new business connection was evicted")
 	}
 }
 
