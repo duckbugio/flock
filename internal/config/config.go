@@ -113,11 +113,9 @@ type Config struct {
 	// Telegram (cmd/flock-telegram). Validated by ValidateTelegram, not env-required.
 	TelegramBotToken    string `env:"TELEGRAM_BOT_TOKEN"`
 	TelegramBotUsername string `env:"TELEGRAM_BOT_USERNAME"`
-	// SecretaryMode handles Telegram Business messages through a separate,
-	// answer-only provider. Supported values: off, approval, auto.
-	SecretaryMode   string `env:"SECRETARY_MODE" envDefault:"off"`
-	SecretaryModel  string `env:"SECRETARY_MODEL"`
-	SecretaryPrompt string `env:"SECRETARY_PROMPT"`
+	// SecretaryMode controls Telegram Business message handling. The selected
+	// AI_BACKEND and its model generate replies. Supported: off, approval, auto.
+	SecretaryMode string `env:"SECRETARY_MODE" envDefault:"off"`
 
 	// Telegram user IDs allowed to use the bot (comma-separated).
 	AllowedUsers []int64 `env:"ALLOWED_USERS" envSeparator:","`
@@ -532,6 +530,12 @@ func (c Config) ValidateOpenAICompat() error {
 	if strings.TrimSpace(c.OpenAICompatBaseURL) == "" {
 		return ErrOpenAICompatBaseURLRequired
 	}
+	u, err := url.Parse(c.OpenAICompatBaseURL)
+	internalHost := u != nil && openAICompatInternalHost(u.Hostname())
+	if err != nil || (u.Scheme != "https" && (u.Scheme != "http" || !internalHost)) || u.Hostname() == "" ||
+		u.User != nil || u.RawQuery != "" || u.ForceQuery || strings.Contains(c.OpenAICompatBaseURL, "#") {
+		return errors.New("OPENAI_COMPAT_BASE_URL requires HTTPS for public hosts and no credentials, query or fragment")
+	}
 	if strings.TrimSpace(c.OpenAICompatModel) == "" {
 		return ErrOpenAICompatModelRequired
 	}
@@ -547,6 +551,23 @@ func (c Config) ValidateOpenAICompat() error {
 	default:
 		return ErrOpenAICompatUnknownAuthMode
 	}
+}
+
+func openAICompatInternalHost(host string) bool {
+	if host == "host.docker.internal" || (host != "" && !strings.Contains(host, ".") && !strings.Contains(host, ":")) {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	if err == nil {
+		addr = addr.Unmap()
+		return addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast()
+	}
+	for _, suffix := range []string{".internal", ".local", ".localdomain", ".svc"} {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // SlogLevel maps the configured LOG_LEVEL word (case-insensitive) to a
@@ -841,33 +862,10 @@ func (c Config) ValidateTelegram() error {
 	case SecretaryModeOff:
 		return nil
 	case SecretaryModeApproval, SecretaryModeAuto:
-		answerOnly := c
-		answerOnly.AIBackend = AIBackendOpenAICompat
-		if err := answerOnly.ValidateOpenAICompat(); err != nil {
-			return err
-		}
-		u, err := url.Parse(c.OpenAICompatBaseURL)
-		internalHost := u != nil && secretaryInternalHost(u.Hostname())
-		if err != nil || (u.Scheme != "https" && (u.Scheme != "http" || !internalHost)) || u.Hostname() == "" ||
-			u.User != nil || u.RawQuery != "" || u.ForceQuery || strings.Contains(c.OpenAICompatBaseURL, "#") {
-			return errors.New("OPENAI_COMPAT_BASE_URL requires HTTPS for public hosts and no credentials, query or fragment")
-		}
 		return nil
 	default:
 		return errors.New("SECRETARY_MODE must be off, approval, or auto")
 	}
-}
-
-func secretaryInternalHost(host string) bool {
-	if host == "host.docker.internal" || (host != "" && !strings.Contains(host, ".") && !strings.Contains(host, ":")) {
-		return true
-	}
-	addr, err := netip.ParseAddr(host)
-	if err != nil {
-		return false
-	}
-	addr = addr.Unmap()
-	return addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast()
 }
 
 // SecretaryModeName normalizes the opt-in business-message behavior.

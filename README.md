@@ -51,11 +51,20 @@ The Telegram account owner must be listed in `ALLOWED_USERS`.
 Set `SECRETARY_MODE=approval` to receive an AI draft in your private chat with
 the bot and choose **Send** or **Discard**. Set `SECRETARY_MODE=auto` to send the
 draft automatically. The default is `off`. Both modes need
-`OPENAI_COMPAT_BASE_URL`, `OPENAI_COMPAT_MODEL`, `OPENAI_COMPAT_API_KEY`, and
-`OPENAI_COMPAT_BILLING_ACK=true`; `SECRETARY_MODEL` optionally selects a different
-model on the same endpoint, and `SECRETARY_PROMPT` sets your reply style. This
-answer-only runner has no coding tools or workspace access, but shares the
-`OPENAI_COMPAT_*` endpoint and API key with an openai-compatible coding backend.
+the bot's selected `AI_BACKEND` and model (Claude, Codex, or a configured
+OpenAI-compatible provider). Telegram settings control access and reply mode;
+they do not choose an AI provider. Claude drafts run in a separate workspace
+with tools and MCP disabled. Codex drafts use the tool-free Responses API with
+the selected `CODEX_MODEL`; this requires `CODEX_AUTH_MODE=billing` and the
+existing `CODEX_API_KEY`. With Codex subscription login, the Telegram bot stays
+online but Secretary Mode is disabled because managed Codex CLI configuration
+may expose MCP tools.
+Codex setups that override the model provider or CLI arguments are also
+unsupported for secretary drafts; no private message is sent to the default
+OpenAI endpoint in those configurations.
+For the standalone OpenAI-compatible backend, public base URLs require HTTPS;
+HTTP remains available for loopback, private IPs, and local service names such
+as `.internal`, `.local`, `.localdomain`, and `.svc`.
 Set a spending limit with your provider before enabling automatic replies; the
 bot caps requests per minute but does not track provider costs. Each reply uses
 only the current incoming text or caption, without earlier chat history.

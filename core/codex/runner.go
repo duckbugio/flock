@@ -28,6 +28,7 @@ const (
 // Config is the per-process Codex runner configuration.
 type Config struct {
 	Bin              string
+	AnswerAPIURL     string // test override; empty uses OpenAI Responses API
 	Sandbox          string
 	ApprovalPolicy   string
 	AuthMode         string
@@ -60,6 +61,9 @@ const initScanBuf = 64 * 1024
 const stderrTailBytes = 4096
 
 func (r *runner) Run(ctx context.Context, prompt string, o agent.Options) (<-chan agent.Event, error) {
+	if o.AnswerOnly {
+		return r.answerOnly(ctx, prompt, o)
+	}
 	args := r.buildArgs(prompt, o)
 
 	//nolint:gosec,noctx // bin+args are operator config; ctx drives process-group kill in stream.

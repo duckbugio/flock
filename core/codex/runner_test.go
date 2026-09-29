@@ -4,6 +4,8 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,6 +189,83 @@ func TestRunResumeUsesCodexExecResume(t *testing.T) {
 		!strings.Contains(args, "thr_existing continue") ||
 		strings.Contains(args, "--cd ") {
 		t.Fatalf("resume args = %q, want exec resume options before session and no --cd", args)
+	}
+}
+
+func TestAnswerOnlyUsesSelectedModelWithoutTools(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Header.Get("Authorization") != "Bearer selected-key" {
+			t.Errorf("wrong authorization header")
+		}
+		//nolint:tagliatelle // OpenAI Responses API uses snake_case request fields.
+		var body struct {
+			Model     string `json:"model"`
+			Input     string `json:"input"`
+			Tools     []any  `json:"tools"`
+			Reasoning struct {
+				Effort string `json:"effort"`
+			} `json:"reasoning"`
+			MaxOutputTokens int  `json:"max_output_tokens"`
+			Store           bool `json:"store"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if body.Model != "gpt-5.5" || body.Input != "reply" || body.Reasoning.Effort != "low" ||
+			body.MaxOutputTokens != secretaryMaxOutputTokens || body.Tools == nil || len(body.Tools) != 0 || body.Store {
+			t.Errorf("unsafe answer request: %+v", body)
+		}
+		_, _ = w.Write([]byte(`{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Hello"}]}]}`))
+	}))
+	defer server.Close()
+	r := New(Config{AuthMode: AuthBilling, AnswerAPIURL: server.URL})
+	ch, err := r.Run(context.Background(), "reply", agent.Options{
+		Model: "gpt-5.5", AnswerOnly: true,
+		Env: []string{"CODEX_API_KEY=selected-key", "CODEX_HOME=" + t.TempDir()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := collect(t, ch)
+	if len(events) != 1 || events[0].Type != agent.Result || events[0].Result.Text != "Hello" {
+		t.Fatalf("answer events: %+v", events)
+	}
+}
+
+func TestAnswerOnlyRejectsSubscriptionCLI(t *testing.T) {
+	r := New(Config{AuthMode: AuthSubscription})
+	if _, err := r.Run(context.Background(), "reply", agent.Options{AnswerOnly: true, Model: "gpt-selected"}); err == nil {
+		t.Fatal("subscription Codex CLI was allowed for a business message")
+	}
+}
+
+func TestAnswerOnlyRejectsCustomCodexModelProvider(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("model_provider = 'gateway'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := New(Config{AuthMode: AuthBilling})
+	if _, err := r.Run(context.Background(), "reply", agent.Options{
+		AnswerOnly: true, Model: "gpt-selected", Env: []string{"CODEX_HOME=" + home, "CODEX_API_KEY=test-key"},
+	}); err == nil {
+		t.Fatal("custom model provider sent private message to default OpenAI endpoint")
+	}
+}
+
+func TestAnswerOnlyReasoningIsModelSpecific(t *testing.T) {
+	if !supportsLowReasoning("gpt-5.5") || supportsLowReasoning("gpt-4.1") {
+		t.Fatal("reasoning effort must be omitted for non-reasoning models")
+	}
+}
+
+func TestCustomModelProviderDetectionIgnoresDeclarations(t *testing.T) {
+	config := []byte("# model_provider = 'old'\n[model_providers.gateway]\nname = 'gateway'\n")
+	if selectsCustomModelProvider(config) ||
+		!selectsCustomModelProvider(append(config, []byte("model_provider = 'gateway'\n")...)) ||
+		!selectsCustomModelProvider([]byte(`"model_provider" = "gateway"`)) ||
+		!selectsCustomModelProvider([]byte(`profiles.dev.model_provider = "gateway"`)) ||
+		!selectsCustomModelProvider([]byte(`profile = { model_provider = "gateway" }`)) {
+		t.Fatal("custom model provider selection was misclassified")
 	}
 }
 

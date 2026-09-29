@@ -903,6 +903,36 @@ func TestValidateOpenAICompatBillingRequiresAckAndKey(t *testing.T) {
 	}
 }
 
+func TestValidateOpenAICompatRejectsInsecurePublicURL(t *testing.T) {
+	base := Config{
+		AIBackend: AIBackendOpenAICompat, OpenAICompatModel: "model",
+		OpenAICompatAPIKey: "test-key", OpenAICompatBillingAck: true,
+	}
+	for _, value := range []string{
+		"not-a-url", "http://api.example.test/v1", "https://api.example.test/v1?",
+		"https://api.example.test/v1#", "https://user:pass@api.example.test/v1",
+	} {
+		c := base
+		c.OpenAICompatBaseURL = value
+		if err := c.ValidateOpenAICompat(); err == nil {
+			t.Errorf("accepted insecure URL %q", value)
+		}
+	}
+	for _, value := range []string{
+		"http://localhost:8080/v1", "http://127.0.0.1:8080/v1", "http://[::1]:8080/v1",
+		"http://vllm:8000/v1", "http://host.docker.internal:8000/v1",
+		"http://10.0.0.5:8000/v1", "http://[fd00::5]:8000/v1",
+		"http://vllm.default.svc.cluster.local:8000/v1", "http://gateway.internal:8000/v1",
+		"http://model.localdomain:8000/v1", "http://model.local:8000/v1",
+	} {
+		c := base
+		c.OpenAICompatBaseURL = value
+		if err := c.ValidateOpenAICompat(); err != nil {
+			t.Errorf("rejected internal URL %q: %v", value, err)
+		}
+	}
+}
+
 //nolint:gosec // fake credential env var is required for auth validation coverage.
 func TestValidateOpenAICompatAcceptsAPIKeyFromNamedEnv(t *testing.T) {
 	t.Setenv("DASHSCOPE_API_KEY", "dashscope-key")
@@ -993,12 +1023,8 @@ func TestAutonomyStoreFileDefaults(t *testing.T) {
 	}
 }
 
-func TestTelegramSecretaryModeRequiresAnswerOnlyProvider(t *testing.T) {
-	base := Config{
-		TelegramBotToken: "123:token", SecretaryMode: "approval",
-		OpenAICompatBaseURL: "https://api.example.test/v1", OpenAICompatModel: "reply-model",
-		OpenAICompatAPIKey: "secret", OpenAICompatBillingAck: true,
-	}
+func TestTelegramSecretaryModeUsesSelectedProvider(t *testing.T) {
+	base := Config{TelegramBotToken: "123:token", SecretaryMode: "approval"}
 	for _, mode := range []string{"approval", "auto"} {
 		c := base
 		c.SecretaryMode = mode
@@ -1007,34 +1033,6 @@ func TestTelegramSecretaryModeRequiresAnswerOnlyProvider(t *testing.T) {
 		}
 	}
 	invalid := base
-	invalid.OpenAICompatBaseURL = "not-a-url"
-	if err := invalid.ValidateTelegram(); err == nil {
-		t.Fatal("Secretary Mode accepted invalid API URL")
-	}
-	for _, value := range []string{"http://api.example.test/v1", "https://api.example.test/v1?", "https://api.example.test/v1#"} {
-		invalid = base
-		invalid.OpenAICompatBaseURL = value
-		if err := invalid.ValidateTelegram(); err == nil {
-			t.Errorf("Secretary Mode accepted insecure or malformed API URL %q", value)
-		}
-	}
-	for _, value := range []string{
-		"http://localhost:8080/v1", "http://127.0.0.1:8080/v1", "http://[::1]:8080/v1",
-		"http://vllm:8000/v1", "http://host.docker.internal:8000/v1",
-		"http://10.0.0.5:8000/v1", "http://[fd00::5]:8000/v1",
-	} {
-		local := base
-		local.OpenAICompatBaseURL = value
-		if err := local.ValidateTelegram(); err != nil {
-			t.Errorf("Secretary Mode rejected loopback API URL %q: %v", value, err)
-		}
-	}
-	invalid = base
-	invalid.OpenAICompatAPIKey = ""
-	if err := invalid.ValidateTelegram(); err == nil {
-		t.Fatal("Secretary Mode accepted missing API key")
-	}
-	invalid = base
 	invalid.SecretaryMode = "unknown"
 	if err := invalid.ValidateTelegram(); err == nil {
 		t.Fatal("Secretary Mode accepted unknown mode")
