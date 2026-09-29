@@ -59,6 +59,9 @@ the selected `CODEX_MODEL`; this requires `CODEX_AUTH_MODE=billing` and the
 existing `CODEX_API_KEY`. With Codex subscription login, the Telegram bot stays
 online but Secretary Mode is disabled because managed Codex CLI configuration
 may expose MCP tools.
+Codex setups that override the model provider or CLI arguments are also
+unsupported for secretary drafts; no private message is sent to the default
+OpenAI endpoint in those configurations.
 Set a spending limit with your provider before enabling automatic replies; the
 bot caps requests per minute but does not track provider costs. Each reply uses
 only the current incoming text or caption, without earlier chat history.

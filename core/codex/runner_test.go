@@ -238,6 +238,19 @@ func TestAnswerOnlyRejectsSubscriptionCLI(t *testing.T) {
 	}
 }
 
+func TestAnswerOnlyRejectsCustomCodexModelProvider(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("model_provider = 'gateway'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := New(Config{AuthMode: AuthBilling})
+	if _, err := r.Run(context.Background(), "reply", agent.Options{
+		AnswerOnly: true, Model: "gpt-selected", Env: []string{"CODEX_HOME=" + home, "CODEX_API_KEY=test-key"},
+	}); err == nil {
+		t.Fatal("custom model provider sent private message to default OpenAI endpoint")
+	}
+}
+
 func TestRunErrorWhenCodexExitsWithoutTurnCompleted(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "boom.sh")

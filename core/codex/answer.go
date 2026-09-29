@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -25,6 +27,25 @@ const (
 func (r *runner) answerOnly(ctx context.Context, prompt string, o agent.Options) (<-chan agent.Event, error) {
 	if r.authMode() != AuthBilling {
 		return nil, errors.New("codex secretary requires CODEX_AUTH_MODE=billing for a tool-free Responses API request")
+	}
+	if len(r.cfg.ExtraArgs) > 0 {
+		return nil, errors.New("codex secretary cannot use custom Codex CLI arguments with the direct Responses API")
+	}
+	for _, key := range []string{"OPENAI_BASE_URL", "CODEX_BASE_URL", "CODEX_API_BASE_URL"} {
+		if envValue(o.Env, key) != "" {
+			return nil, fmt.Errorf("codex secretary cannot use %s with the direct Responses API", key)
+		}
+	}
+	home := envValue(o.Env, "CODEX_HOME")
+	if home != "" {
+		//nolint:gosec // CODEX_HOME is operator config; only its fixed config.toml is read.
+		data, err := os.ReadFile(filepath.Join(home, "config.toml"))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("read Codex config for secretary: %w", err)
+		}
+		if strings.Contains(string(data), "model_provider") {
+			return nil, errors.New("codex secretary cannot use a custom Codex model provider with the direct Responses API")
+		}
 	}
 	key := envValue(r.childEnv(o.Env), "CODEX_API_KEY")
 	if key == "" {
