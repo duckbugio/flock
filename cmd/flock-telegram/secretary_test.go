@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -58,6 +59,8 @@ type secretaryFakeAPI struct {
 	callbacks  []*bot.AnswerCallbackQueryParams
 	onSend     func(*bot.SendMessageParams)
 	onGet      func()
+	failSendAt int
+	sendCalls  int
 }
 
 func (f *secretaryFakeAPI) GetBusinessConnection(
@@ -72,6 +75,10 @@ func (f *secretaryFakeAPI) GetBusinessConnection(
 }
 
 func (f *secretaryFakeAPI) SendMessage(_ context.Context, p *bot.SendMessageParams) (*models.Message, error) {
+	f.sendCalls++
+	if f.sendCalls == f.failSendAt {
+		return nil, errors.New("simulated send failure")
+	}
 	f.sends = append(f.sends, p)
 	if f.onSend != nil {
 		f.onSend(p)
@@ -111,11 +118,8 @@ func testSecretary(t *testing.T, mode string) (*secretaryManager, *secretaryFake
 		sessions:  sessions,
 		allow:     func(id int64) bool { return id == 10 },
 		limit:     ratelimit.New(30, time.Minute), dispatcher: dispatch.New(4),
-		queueTimeout: secretaryQueueTimeout,
-		slots:        make(chan struct{}, secretaryQueueCapacity),
-		state:        secretaryState{Seen: map[string]int64{}, Invalid: map[string]int64{}, Pending: map[string]secretaryPending{}},
-		lanes:        make(map[string]*secretaryLane),
-		active:       make(map[string]secretaryActiveRun),
+		state:  secretaryState{Seen: map[string]int64{}, Invalid: map[string]int64{}, Pending: map[string]secretaryPending{}},
+		active: make(map[string]secretaryActiveRun),
 	}
 	api := &secretaryFakeAPI{connection: models.BusinessConnection{
 		ID: "conn", User: models.User{ID: 10}, UserChatID: 100, IsEnabled: true,
@@ -257,7 +261,7 @@ func TestSecretaryLongAnswerIsDeliveredWithoutTruncation(t *testing.T) {
 		if len([]rune(notice.Text)) > secretaryMaxNoticeRunes {
 			t.Fatalf("notice %d exceeds Telegram limit", i)
 		}
-		if (notice.ReplyMarkup != nil) != (i == len(api.sends)-1) {
+		if (notice.ReplyMarkup != nil) != (i == 0) {
 			t.Fatalf("approval buttons on notice %d", i)
 		}
 	}
@@ -282,6 +286,28 @@ func TestSecretaryLongAnswerIsDeliveredWithoutTruncation(t *testing.T) {
 	delivered := strings.Join(parts, " ")
 	if strings.Join(strings.Fields(delivered), " ") != strings.Join(strings.Fields(reply), " ") {
 		t.Fatalf("delivered %d runes, want %d", len([]rune(delivered)), len([]rune(reply)))
+	}
+}
+
+func TestSecretaryApprovalKeepsButtonsAfterLaterChunkFails(t *testing.T) {
+	m, _, api := testSecretary(t, config.SecretaryModeApproval)
+	api.failSendAt = 2
+	msg := incomingSecretaryMessage()
+	reply := strings.Repeat("Detailed answer. ", 650)
+	m.queueApproval(context.Background(), api, &api.connection, msg, msg.Text, reply)
+	if len(api.sends) < 2 || api.sends[0].ReplyMarkup == nil {
+		t.Fatalf("first preview must retain approval buttons: %+v", api.sends)
+	}
+	if !strings.Contains(api.sends[len(api.sends)-1].Text, "Draft preview was truncated") {
+		t.Fatalf("owner did not receive truncated preview notice: %+v", api.sends)
+	}
+	if len(m.state.Pending) != 1 {
+		t.Fatalf("approval draft was discarded after later chunk failure: %+v", m.state.Pending)
+	}
+	for _, pending := range m.state.Pending {
+		if pending.NoticeID != 1 || pending.Reply != reply {
+			t.Fatalf("approval draft lost buttons or full answer: %+v", pending)
+		}
 	}
 }
 
@@ -438,7 +464,7 @@ func TestSecretaryAutoOnlyRepliesToAllowedInboundMessageOnce(t *testing.T) {
 	if runner.calls != 1 || len(api.sends) != 1 {
 		t.Fatalf("calls=%d sends=%d, want one each", runner.calls, len(api.sends))
 	}
-	if api.sends[0].BusinessConnectionID != "conn" || api.sends[0].ChatID != int64(200) {
+	if api.sends[0].BusinessConnectionID != msg.BusinessConnectionID || api.sends[0].ChatID != int64(200) {
 		t.Fatalf("wrong business send: %+v", api.sends[0])
 	}
 	ownerMessage := *msg
@@ -603,16 +629,94 @@ func TestSecretaryBotHandlerRemainsResponsiveDuringBusinessRun(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("edit did not cancel the Business run")
 	}
-	deadline := time.After(3 * time.Second)
-	for len(m.slots) != 0 {
-		select {
-		case <-deadline:
-			t.Fatal("cancelled Business run did not release its slot")
-		case <-time.After(time.Millisecond):
-		}
+	drainCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := m.dispatcher.Shutdown(drainCtx); err != nil {
+		t.Fatalf("cancelled Business run did not finish: %v", err)
 	}
 	if len(api.sends) != 0 {
 		t.Fatal("edited Business message received an auto reply")
+	}
+}
+
+func TestSecretaryBusinessRunSurvivesUpdateCancellationUntilDrain(t *testing.T) {
+	m, _, api := testSecretary(t, config.SecretaryModeAuto)
+	runner := &secretaryBlockingRunner{started: make(chan struct{}), release: make(chan struct{}), canceled: make(chan struct{})}
+	m.runner = runner
+	updateCtx, cancelUpdate := context.WithCancel(context.Background())
+	m.handleBotUpdate(updateCtx, api, &models.Update{BusinessMessage: incomingSecretaryMessage()})
+	select {
+	case <-runner.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Business run did not start")
+	}
+	cancelUpdate()
+	select {
+	case <-runner.canceled:
+		t.Fatal("update cancellation interrupted the Business run before drain")
+	default:
+	}
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelDrain()
+	drained := make(chan error, 1)
+	go func() { drained <- m.dispatcher.Shutdown(drainCtx) }()
+	select {
+	case err := <-drained:
+		t.Fatalf("drain returned before active Business run finished: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(runner.release)
+	if err := <-drained; err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if len(api.sends) != 1 || api.sends[0].BusinessConnectionID != incomingSecretaryMessage().BusinessConnectionID {
+		t.Fatalf("Business reply after drain = %+v", api.sends)
+	}
+}
+
+func TestSecretaryBusinessMessagesStayInDispatchOrder(t *testing.T) {
+	m, runner, api := testSecretary(t, config.SecretaryModeAuto)
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	replies := make(chan struct{}, 2)
+	runner.onRun = func() {
+		if runner.calls == 1 {
+			close(firstStarted)
+			<-releaseFirst
+		}
+	}
+	api.onSend = func(p *bot.SendMessageParams) {
+		if p.BusinessConnectionID != "" {
+			replies <- struct{}{}
+		}
+	}
+	first := incomingSecretaryMessage()
+	second := *first
+	second.ID++
+	second.Text = "Second message"
+	m.handleBotUpdate(context.Background(), api, &models.Update{BusinessMessage: first})
+	select {
+	case <-firstStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first Business run did not start")
+	}
+	m.handleBotUpdate(context.Background(), api, &models.Update{BusinessMessage: &second})
+	close(releaseFirst)
+	for range 2 {
+		select {
+		case <-replies:
+		case <-time.After(3 * time.Second):
+			t.Fatal("queued Business message did not get a reply")
+		}
+	}
+	drainCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := m.dispatcher.Shutdown(drainCtx); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if runner.calls != 2 || !strings.Contains(runner.prompts[0], strconv.Quote("Hello")) ||
+		!strings.Contains(runner.prompts[1], strconv.Quote("Second message")) {
+		t.Fatalf("Business prompts ran out of order: %q", runner.prompts)
 	}
 }
 

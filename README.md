@@ -157,6 +157,7 @@ The **poller** is the recommended way to react to review comments — it reaches
 
 ## Other options
 
+- **OpenAI-compatible backend:** public `OPENAI_COMPAT_BASE_URL` values require HTTPS; HTTP remains available for loopback, private IPs, and local service names such as `.internal`, `.local`, `.localdomain`, and `.svc`.
 - **Voice messages:** `ENABLE_VOICE_MESSAGES=true`, `VOICE_PROVIDER=mistral|openai|local`, plus `MISTRAL_API_KEY` (or `OPENAI_API_KEY`). Transcribed and run as commands.
 - **dind sidecar:** `docker compose --profile dind up -d` gives the team dockerized linters/tests (set `DOCKER_HOST=tcp://dind:2375`). Ansible deploys enable dind by default and inject `DOCKER_HOST` automatically.
 - **Per-chat isolation:** each chat gets `/workspace/chat_<id>` (1:1 → private; group → one shared workspace); chats are fully isolated and run in parallel, capped by `MAX_CONCURRENT_CHAT_RUNS`. In groups, set `REQUIRE_GROUP_MENTION=true` to respond only when @mentioned or replied to.

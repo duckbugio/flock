@@ -42,15 +42,12 @@ const (
 	secretaryApprovalChunkRunes             = 2800
 	secretaryTokenBytes                     = 12
 	secretaryRequestsPerMinute              = 30
-	secretaryConcurrency                    = 4
-	secretaryQueueCapacity                  = 32
 	secretaryDirPerm            os.FileMode = 0o700
 	// Deduplication and cancellation outlive the approval window.
 	secretaryStateLifetime    = 48 * time.Hour
 	secretaryApprovalLifetime = 24 * time.Hour
 	secretaryConnectionTTL    = 5 * time.Minute
 	secretaryRunTimeout       = 10 * time.Minute
-	secretaryQueueTimeout     = 30 * time.Minute
 	secretaryMaxInvalidKeys   = 10000
 	secretaryMaxConnections   = 1024
 	secretaryUpdateCount      = 7
@@ -87,32 +84,24 @@ type secretaryConnectionCache struct {
 }
 
 type secretaryManager struct {
-	mode         string
-	runner       agent.Runner
-	opts         agent.Options
-	workspace    *workspace.Renderer
-	sessions     session.Store
-	costs        *cost.Store
-	costCapUSD   float64
-	timeout      time.Duration
-	queueTimeout time.Duration
-	path         string
-	allow        func(int64) bool
-	limit        *ratelimit.Limiter
-	dispatcher   *dispatch.Dispatcher
-	slots        chan struct{}
-	lookup       singleflight.Group
+	mode       string
+	runner     agent.Runner
+	opts       agent.Options
+	workspace  *workspace.Renderer
+	sessions   session.Store
+	costs      *cost.Store
+	costCapUSD float64
+	timeout    time.Duration
+	path       string
+	allow      func(int64) bool
+	limit      *ratelimit.Limiter
+	dispatcher *dispatch.Dispatcher
+	lookup     singleflight.Group
 
 	mu          sync.Mutex
 	state       secretaryState
 	connections map[string]secretaryConnectionCache
-	lanes       map[string]*secretaryLane
 	active      map[string]secretaryActiveRun
-}
-
-type secretaryLane struct {
-	token chan struct{}
-	users int
 }
 
 type secretaryActiveRun struct {
@@ -193,12 +182,20 @@ func wireSecretary(cfg config.Config, b *bot.Bot, logger *slog.Logger, runtime s
 	return secretary.cancelActive, nil
 }
 
-// Keep Business runs off the Telegram update handler so edits, deletes,
-// revocations, approval callbacks and ordinary chats can still be processed.
-// Connection changes and invalidations stay synchronous to preserve their order.
+// Enqueue Business messages synchronously at the handler boundary. The normal
+// dispatcher gives them a per-chat FIFO lane, the shared concurrency cap and a
+// run context that survives Telegram update cancellation until shutdown drain.
+// Connection changes and invalidations run immediately to cancel active work.
 func (m *secretaryManager) handleBotUpdate(ctx context.Context, api secretaryAPI, update *models.Update) {
 	if update != nil && update.BusinessMessage != nil {
-		go m.handleUpdate(ctx, api, update)
+		msg := update.BusinessMessage
+		lane := "business_connection_" + msg.BusinessConnectionID + "_" + strconv.FormatInt(msg.Chat.ID, 10)
+		//nolint:contextcheck // the dispatcher owns the run context so drain can outlive the update.
+		if !m.dispatcher.TrySubmit(lane, func(runCtx context.Context) {
+			m.handleUpdate(runCtx, api, update)
+		}) {
+			slog.Warn("secretary queue full or shutting down", "chat_id", msg.Chat.ID)
+		}
 		return
 	}
 	m.handleUpdate(ctx, api, update)
@@ -275,27 +272,24 @@ func newSecretaryManager(cfg config.Config, runtime secretaryRuntime) (*secretar
 		runTimeout = configured
 	}
 	m := &secretaryManager{
-		mode:         cfg.SecretaryModeName(),
-		runner:       runner,
-		opts:         opts,
-		workspace:    runtime.workspace,
-		sessions:     runtime.sessions,
-		costs:        runtime.costs,
-		dispatcher:   runtime.dispatcher,
-		costCapUSD:   cfg.EffectiveCostCapUSD(),
-		timeout:      runTimeout,
-		queueTimeout: secretaryQueueTimeout,
-		path:         filepath.Join(cfg.ApprovedDirectory, "secretary-state.json"),
-		allow:        cfg.IsAllowed,
-		limit:        ratelimit.New(secretaryRequestsPerMinute, time.Minute),
-		slots:        make(chan struct{}, secretaryQueueCapacity),
-		state:        secretaryState{Seen: map[string]int64{}, Invalid: map[string]int64{}, Pending: map[string]secretaryPending{}},
-		connections:  make(map[string]secretaryConnectionCache),
-		lanes:        make(map[string]*secretaryLane),
-		active:       make(map[string]secretaryActiveRun),
+		mode:        cfg.SecretaryModeName(),
+		runner:      runner,
+		opts:        opts,
+		workspace:   runtime.workspace,
+		sessions:    runtime.sessions,
+		costs:       runtime.costs,
+		dispatcher:  runtime.dispatcher,
+		costCapUSD:  cfg.EffectiveCostCapUSD(),
+		timeout:     runTimeout,
+		path:        filepath.Join(cfg.ApprovedDirectory, "secretary-state.json"),
+		allow:       cfg.IsAllowed,
+		limit:       ratelimit.New(secretaryRequestsPerMinute, time.Minute),
+		state:       secretaryState{Seen: map[string]int64{}, Invalid: map[string]int64{}, Pending: map[string]secretaryPending{}},
+		connections: make(map[string]secretaryConnectionCache),
+		active:      make(map[string]secretaryActiveRun),
 	}
 	if m.dispatcher == nil {
-		m.dispatcher = dispatch.New(secretaryConcurrency)
+		m.dispatcher = dispatch.New(cfg.MaxConcurrentChatRuns)
 	}
 	if err := os.MkdirAll(filepath.Dir(m.path), secretaryDirPerm); err != nil {
 		return nil, fmt.Errorf("create secretary state directory: %w", err)
@@ -551,13 +545,6 @@ func (m *secretaryManager) handleUpdate(ctx context.Context, api secretaryAPI, u
 	if !m.limit.Allow(connection.User.ID, time.Now()) {
 		return
 	}
-	select {
-	case m.slots <- struct{}{}:
-		defer func() { <-m.slots }()
-	default:
-		m.ownerNotice(ctx, api, connection.UserChatID, "Secretary is busy; a Business message was not processed.")
-		return
-	}
 	if !m.claim(msg) {
 		return
 	}
@@ -568,23 +555,7 @@ func (m *secretaryManager) respond(
 	ctx context.Context, api secretaryAPI, connection *models.BusinessConnection, msg *models.Message, incoming string,
 ) {
 	chatKey := secretaryChatKey(connection.User.ID, msg.Chat.ID)
-	queueCtx, cancelQueue := context.WithTimeout(ctx, m.queueTimeout)
-	defer cancelQueue()
-	unlock, ok := m.lockChat(queueCtx, chatKey)
-	if !ok {
-		m.releaseClaim(msg)
-		m.ownerNotice(ctx, api, connection.UserChatID, "Secretary could not process a queued Business message in time.")
-		return
-	}
-	defer unlock()
-	deadline, _ := queueCtx.Deadline()
-	err := m.dispatcher.RunExternal(ctx, time.Until(deadline), func(runCtx context.Context) {
-		m.respondRun(runCtx, api, connection, msg, incoming, chatKey)
-	})
-	if err != nil {
-		m.releaseClaim(msg)
-		m.ownerNotice(ctx, api, connection.UserChatID, "Secretary could not process this Business message.")
-	}
+	m.respondRun(ctx, api, connection, msg, incoming, chatKey)
 }
 
 func (m *secretaryManager) respondRun(
@@ -635,38 +606,6 @@ func (m *secretaryManager) respondRun(
 // Business conversations use a separate path-safe workspace and session key.
 func secretaryChatKey(ownerID, chatID int64) string {
 	return "business_" + strconv.FormatInt(ownerID, 10) + "_" + strconv.FormatInt(chatID, 10)
-}
-
-func (m *secretaryManager) lockChat(ctx context.Context, key string) (func(), bool) {
-	m.mu.Lock()
-	lane := m.lanes[key]
-	if lane == nil {
-		lane = &secretaryLane{token: make(chan struct{}, 1)}
-		lane.token <- struct{}{}
-		m.lanes[key] = lane
-	}
-	lane.users++
-	m.mu.Unlock()
-	select {
-	case <-lane.token:
-	case <-ctx.Done():
-		m.mu.Lock()
-		lane.users--
-		if lane.users == 0 {
-			delete(m.lanes, key)
-		}
-		m.mu.Unlock()
-		return nil, false
-	}
-	return func() {
-		lane.token <- struct{}{}
-		m.mu.Lock()
-		lane.users--
-		if lane.users == 0 {
-			delete(m.lanes, key)
-		}
-		m.mu.Unlock()
-	}, true
 }
 
 // releaseClaim permits a redelivery after a definite pre-send model failure.
@@ -845,7 +784,6 @@ func (m *secretaryManager) queueApproval(
 		preview = string([]rune(preview)[:secretaryMaxPreviewRunes]) + "…"
 	}
 	chunks := chat.ChunkFencedSize(reply, secretaryApprovalChunkRunes)
-	var sent *models.Message
 	for i, chunk := range chunks {
 		notice := chunk
 		if i == 0 {
@@ -857,28 +795,34 @@ func (m *secretaryManager) queueApproval(
 			return
 		}
 		params := &bot.SendMessageParams{ChatID: connection.UserChatID, Text: notice}
-		if i == len(chunks)-1 {
+		if i == 0 {
 			params.ReplyMarkup = &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{
 				{Text: "Send", CallbackData: secretaryCallbackPrefix + secretaryActionSend + ":" + token},
 				{Text: "Discard", CallbackData: secretaryCallbackPrefix + secretaryActionDiscard + ":" + token},
 			}}}
 		}
-		sent, err = api.SendMessage(ctx, params)
+		sent, err := api.SendMessage(ctx, params)
 		if err != nil {
-			m.removePending(token)
 			slog.Warn("send secretary approval notice", "error", err)
+			if i == 0 {
+				m.removePending(token)
+			} else {
+				m.ownerNotice(ctx, api, connection.UserChatID, "Draft preview was truncated; use the buttons above to send or discard.")
+			}
 			return
 		}
-	}
-	m.mu.Lock()
-	if current, exists := m.state.Pending[token]; exists {
-		current.NoticeID = sent.ID
-		m.state.Pending[token] = current
-		if err := m.saveLocked(); err != nil {
-			slog.Error("save secretary notice ID", "error", err)
+		if i == 0 {
+			m.mu.Lock()
+			if current, exists := m.state.Pending[token]; exists {
+				current.NoticeID = sent.ID
+				m.state.Pending[token] = current
+				if err := m.saveLocked(); err != nil {
+					slog.Error("save secretary notice ID", "error", err)
+				}
+			}
+			m.mu.Unlock()
 		}
 	}
-	m.mu.Unlock()
 }
 
 func (m *secretaryManager) removePending(token string) {
