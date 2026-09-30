@@ -265,6 +265,8 @@ func run() int {
 			logger.Info("voice transcription enabled", "provider", cfg.VoiceProvider)
 		}
 	}
+	// Keep the interface nil when voice is disabled; wrapping a nil pointer
+	// would make the secretary treat it as an available transcriber.
 	var secretaryTranscriber secretaryVoice
 	if vt != nil {
 		secretaryTranscriber = vt

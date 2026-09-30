@@ -540,10 +540,9 @@ func (m *secretaryManager) handleUpdate(ctx context.Context, api secretaryAPI, u
 	if incoming == "" {
 		incoming = strings.TrimSpace(msg.Caption)
 	}
-	if incoming == "" {
-		if msg.Voice == nil || m.voice == nil {
-			return
-		}
+	needsVoice := incoming == "" && msg.Voice != nil && m.voice != nil
+	if incoming == "" && !needsVoice {
+		return
 	}
 	connection, err := m.connection(ctx, api, msg.BusinessConnectionID)
 	if err != nil || connection == nil {
@@ -563,7 +562,7 @@ func (m *secretaryManager) handleUpdate(ctx context.Context, api secretaryAPI, u
 	if !m.claim(msg) {
 		return
 	}
-	if incoming == "" {
+	if needsVoice {
 		var ok bool
 		incoming, ok = m.transcribeVoice(ctx, api, connection, msg)
 		if !ok {
@@ -582,8 +581,14 @@ func (m *secretaryManager) transcribeVoice(
 		m.releaseClaim(msg)
 		return "", false
 	}
+	if allowed, reason := chat.CheckGuards(nil, m.costs, chat.GuardConfig{CostCapUSD: m.costCapUSD}, connection.User.ID); !allowed {
+		m.releaseClaim(msg)
+		m.ownerNotice(ctx, api, connection.UserChatID, reason)
+		return "", false
+	}
 	transcript, err := m.voice.Transcribe(ctx, msg.Voice.FileID)
 	if err != nil {
+		m.releaseClaim(msg)
 		slog.Warn("transcribe secretary voice", "chat_id", msg.Chat.ID, "error", err)
 		m.ownerNotice(ctx, api, connection.UserChatID, "Secretary could not transcribe a Business voice message.")
 		return "", false
