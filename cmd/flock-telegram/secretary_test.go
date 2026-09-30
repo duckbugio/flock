@@ -16,17 +16,23 @@ import (
 
 	"github.com/duckbugio/flock/core/agent"
 	"github.com/duckbugio/flock/core/ratelimit"
+	"github.com/duckbugio/flock/core/session"
+	"github.com/duckbugio/flock/core/workspace"
 	"github.com/duckbugio/flock/internal/config"
 )
 
 type secretaryFakeRunner struct {
-	calls  int
-	onRun  func()
-	events []agent.Event
+	calls   int
+	onRun   func()
+	events  []agent.Event
+	prompts []string
+	options []agent.Options
 }
 
-func (r *secretaryFakeRunner) Run(_ context.Context, _ string, _ agent.Options) (<-chan agent.Event, error) {
+func (r *secretaryFakeRunner) Run(_ context.Context, prompt string, opts agent.Options) (<-chan agent.Event, error) {
 	r.calls++
+	r.prompts = append(r.prompts, prompt)
+	r.options = append(r.options, opts)
 	if r.onRun != nil {
 		r.onRun()
 	}
@@ -84,11 +90,29 @@ func (f *secretaryFakeAPI) AnswerCallbackQuery(_ context.Context, p *bot.AnswerC
 func testSecretary(t *testing.T, mode string) (*secretaryManager, *secretaryFakeRunner, *secretaryFakeAPI) {
 	t.Helper()
 	runner := &secretaryFakeRunner{}
+	base := t.TempDir()
+	template := filepath.Join(base, "template.md")
+	if err := os.WriteFile(template, []byte("# Flock agent\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agents := filepath.Join(base, "agents")
+	if err := os.MkdirAll(agents, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := session.Open(filepath.Join(base, "sessions.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	m := &secretaryManager{
-		mode: mode, runner: runner, path: filepath.Join(t.TempDir(), "secretary.json"),
-		allow: func(id int64) bool { return id == 10 },
-		limit: ratelimit.New(30, time.Minute), sem: make(chan struct{}, 4),
-		state: secretaryState{Seen: map[string]int64{}, Invalid: map[string]int64{}, Pending: map[string]secretaryPending{}},
+		mode: mode, runner: runner, path: filepath.Join(base, "secretary.json"),
+		workspace: &workspace.Renderer{BaseDir: base, TemplatePath: template, AgentsDir: agents},
+		sessions:  sessions,
+		allow:     func(id int64) bool { return id == 10 },
+		limit:     ratelimit.New(30, time.Minute), sem: make(chan struct{}, 4),
+		slots:  make(chan struct{}, secretaryQueueCapacity),
+		state:  secretaryState{Seen: map[string]int64{}, Invalid: map[string]int64{}, Pending: map[string]secretaryPending{}},
+		lanes:  make(map[string]*secretaryLane),
+		active: make(map[string]secretaryActiveRun),
 	}
 	api := &secretaryFakeAPI{connection: models.BusinessConnection{
 		ID: "conn", User: models.User{ID: 10}, UserChatID: 100, IsEnabled: true,
@@ -104,27 +128,129 @@ func incomingSecretaryMessage() *models.Message {
 	}
 }
 
-func TestSecretaryUsesSelectedProviderWithRestrictedOptions(t *testing.T) {
+func TestSecretaryOtherProviderIsUnavailable(t *testing.T) {
 	runner := &secretaryFakeRunner{}
 	approved := t.TempDir()
 	m, err := newSecretaryManager(config.Config{
 		SecretaryMode: config.SecretaryModeAuto, ApprovedDirectory: approved,
-	}, runner, agent.Options{
+	}, secretaryRuntime{runner: runner, opts: agent.Options{
 		Model: "selected-model", MCPConfig: "/workspace/mcp.json", SessionID: "old-session",
 		Workdir: "/workspace/project", MaxTurns: 40, Effort: "ultracode",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(m.opts.Workdir) })
-	if m.runner != runner || m.opts.Model != "selected-model" || !m.opts.AnswerOnly || m.opts.MaxTurns != 1 ||
-		m.opts.MCPConfig != "" || m.opts.SessionID != "" || m.opts.Effort != "" ||
-		m.opts.Workdir == "/workspace/project" || strings.HasPrefix(m.opts.Workdir, approved+string(os.PathSeparator)) {
-		t.Fatalf("secretary runner/options = %T %+v", m.runner, m.opts)
+	}, providerName: config.AIBackendCodex})
+	if err == nil || m != nil {
+		t.Fatalf("non-Claude secretary should be unavailable: manager=%v error=%v", m, err)
 	}
 }
 
-func TestSecretarySkipsCodexSubscriptionWithoutStoppingBot(t *testing.T) {
+func TestClaudeSecretaryUsesFullFlockAgentAndResumesBusinessChat(t *testing.T) {
+	base := t.TempDir()
+	template := filepath.Join(base, "template.md")
+	if err := os.WriteFile(template, []byte("# Flock agent\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agents := filepath.Join(base, "agents")
+	if err := os.MkdirAll(agents, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	ws := &workspace.Renderer{BaseDir: base, TemplatePath: template, AgentsDir: agents}
+	sessions, err := session.Open(filepath.Join(base, "sessions.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &secretaryFakeRunner{events: []agent.Event{
+		{Type: agent.SystemInit, SessionID: "business-session"},
+		{Type: agent.ToolUse, Tool: "mcp__duckbug__search"},
+		{Type: agent.ToolResult, Tool: "mcp__duckbug__search"},
+		{Type: agent.Result, Result: &agent.RunResult{Text: "Full Flock answer", SessionID: "business-session"}},
+	}}
+	m, err := newSecretaryManager(config.Config{
+		SecretaryMode: config.SecretaryModeAuto, ApprovedDirectory: base, AllowedUsers: []int64{10},
+	}, secretaryRuntime{runner: runner, opts: agent.Options{
+		Model: "selected-model", MCPConfig: filepath.Join(base, "mcp.json"),
+		MaxTurns: 40, Effort: "ultracode", Env: []string{"FLOCK_TEST=1"},
+	}, providerName: config.AIBackendClaude, workspace: ws, sessions: sessions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &secretaryFakeAPI{connection: models.BusinessConnection{
+		ID: "conn", User: models.User{ID: 10}, UserChatID: 100, IsEnabled: true,
+		Rights: &models.BusinessBotRights{CanReply: true},
+	}}
+	msg := incomingSecretaryMessage()
+	m.handleUpdate(context.Background(), api, &models.Update{BusinessMessage: msg})
+	if len(api.sends) != 1 || api.sends[0].Text != "Full Flock answer" {
+		t.Fatalf("business reply = %+v", api.sends)
+	}
+	if runner.calls != 1 || runner.prompts[0] != "Hello" {
+		t.Fatalf("runner calls/prompts = %d/%q", runner.calls, runner.prompts)
+	}
+	first := runner.options[0]
+	wantWorkdir := filepath.Join(base, "chat_"+secretaryChatKey("conn", 200))
+	if first.AnswerOnly || first.MCPConfig != filepath.Join(base, "mcp.json") ||
+		first.MaxTurns != 40 || first.Effort != "ultracode" || first.Model != "selected-model" ||
+		first.Workdir != wantWorkdir || first.SessionID != "" || len(first.Env) != 1 {
+		t.Fatalf("secretary did not inherit full agent options: %+v", first)
+	}
+	if _, err := os.Stat(filepath.Join(wantWorkdir, "CLAUDE.md")); err != nil {
+		t.Fatalf("Flock workspace missing: %v", err)
+	}
+	msg.ID++
+	msg.Text = "Follow up"
+	m.handleUpdate(context.Background(), api, &models.Update{BusinessMessage: msg})
+	if runner.calls != 2 || runner.prompts[1] != "Follow up" || runner.options[1].SessionID != "business-session" {
+		t.Fatalf("business chat did not resume: calls=%d prompts=%q session=%q",
+			runner.calls, runner.prompts, runner.options[1].SessionID)
+	}
+	msg.Chat.ID = 201
+	msg.ID = 5
+	m.handleUpdate(context.Background(), api, &models.Update{BusinessMessage: msg})
+	if runner.calls != 3 || runner.options[2].SessionID != "" || runner.options[2].Workdir == first.Workdir {
+		t.Fatalf("different business chat reused first session/workspace: %+v", runner.options[2])
+	}
+}
+
+func TestSecretaryLongAnswerIsDeliveredWithoutTruncation(t *testing.T) {
+	const connectionID = "conn"
+	m, _, api := testSecretary(t, config.SecretaryModeApproval)
+	msg := incomingSecretaryMessage()
+	reply := strings.Repeat("Detailed answer. ", 650)
+	m.queueApproval(context.Background(), api, &api.connection, msg, msg.Text, reply)
+	if len(api.sends) < 2 {
+		t.Fatalf("approval notices = %d, want multiple", len(api.sends))
+	}
+	for i, notice := range api.sends {
+		if len([]rune(notice.Text)) > secretaryMaxNoticeRunes {
+			t.Fatalf("notice %d exceeds Telegram limit", i)
+		}
+		if (notice.ReplyMarkup != nil) != (i == len(api.sends)-1) {
+			t.Fatalf("approval buttons on notice %d", i)
+		}
+	}
+	var pending secretaryPending
+	for _, p := range m.state.Pending {
+		pending = p
+	}
+	if pending.Reply != reply {
+		t.Fatal("full answer was not stored for approval")
+	}
+	api.sends = nil
+	if status := m.sendApproved(context.Background(), api, pending); status != "Sent." {
+		t.Fatalf("sendApproved = %q", status)
+	}
+	parts := make([]string, 0, len(api.sends))
+	for i, sent := range api.sends {
+		if sent.BusinessConnectionID != connectionID || len([]rune(sent.Text)) > 4096 {
+			t.Fatalf("business chunk %d invalid: %+v", i, sent)
+		}
+		parts = append(parts, sent.Text)
+	}
+	delivered := strings.Join(parts, " ")
+	if strings.Join(strings.Fields(delivered), " ") != strings.Join(strings.Fields(reply), " ") {
+		t.Fatalf("delivered %d runes, want %d", len([]rune(delivered)), len([]rune(reply)))
+	}
+}
+
+func TestSecretarySkipsNonClaudeProviderWithoutStoppingBot(t *testing.T) {
 	approved := t.TempDir()
 	cfg := config.Config{
 		AIBackend: config.AIBackendCodex, CodexAuthMode: config.CodexAuthSubscription,
@@ -135,7 +261,9 @@ func TestSecretarySkipsCodexSubscriptionWithoutStoppingBot(t *testing.T) {
 	) {
 		t.Fatal("Codex subscription still requested business updates")
 	}
-	cleanup, err := wireSecretary(cfg, nil, slog.Default(), &secretaryFakeRunner{}, agent.Options{}, config.AIBackendCodex)
+	cleanup, err := wireSecretary(cfg, nil, slog.Default(), secretaryRuntime{
+		runner: &secretaryFakeRunner{}, providerName: config.AIBackendCodex,
+	})
 	if err != nil || cleanup == nil {
 		t.Fatalf("Codex subscription disabled the entire bot: %v", err)
 	}
@@ -144,16 +272,10 @@ func TestSecretarySkipsCodexSubscriptionWithoutStoppingBot(t *testing.T) {
 		t.Fatalf("Codex subscription initialized secretary state: %v", err)
 	}
 	cfg.CodexAuthMode = config.CodexAuthBilling
-	cfg.CodexExtraArgs = "--profile gateway"
-	opts := agent.Options{Model: "gpt-selected", Env: []string{
-		"CODEX_API_KEY=test-key", "CODEX_HOME=" + t.TempDir(),
-	}}
-	if got := secretaryAllowedUpdates(cfg, opts, config.AIBackendCodex); slices.Contains(got, models.AllowedUpdateBusinessMessage) {
-		t.Fatal("unsupported Codex CLI args still requested business updates")
-	}
-	cfg.CodexExtraArgs = ""
-	if got := secretaryAllowedUpdates(cfg, opts, config.AIBackendCodex); !slices.Contains(got, models.AllowedUpdateBusinessMessage) {
-		t.Fatal("supported Codex billing setup did not request business updates")
+	if got := secretaryAllowedUpdates(cfg, agent.Options{}, config.AIBackendCodex); slices.Contains(
+		got, models.AllowedUpdateBusinessMessage,
+	) {
+		t.Fatal("Codex billing requested business updates despite Claude-only support")
 	}
 	cfg.AIBackend = "codex-cli"
 	cfg.CodexAuthMode = config.CodexAuthSubscription
@@ -164,16 +286,11 @@ func TestSecretarySkipsCodexSubscriptionWithoutStoppingBot(t *testing.T) {
 	}
 }
 
-func TestSecretaryRejectsToolUseAndFailedResult(t *testing.T) {
-	for _, event := range []agent.Event{
-		{Type: agent.ToolUse, Tool: "command_execution"},
-		{Type: agent.Result, Result: &agent.RunResult{Text: "unsafe", IsError: true}},
-	} {
-		m, runner, _ := testSecretary(t, config.SecretaryModeAuto)
-		runner.events = []agent.Event{event}
-		if reply, err := m.draft(context.Background(), "hello"); err == nil || reply != "" {
-			t.Fatalf("event %v produced reply %q, error %v", event.Type, reply, err)
-		}
+func TestSecretaryRejectsFailedResult(t *testing.T) {
+	m, runner, _ := testSecretary(t, config.SecretaryModeAuto)
+	runner.events = []agent.Event{{Type: agent.Result, Result: &agent.RunResult{Text: "failed", IsError: true}}}
+	if reply, err := m.draft(context.Background(), "chat", 10, "hello"); err == nil || reply != "" {
+		t.Fatalf("failed result produced reply %q, error %v", reply, err)
 	}
 }
 
@@ -191,7 +308,7 @@ func TestSecretaryAutoRechecksRevokedConnectionAfterDraft(t *testing.T) {
 func TestSecretaryAutoRejectsRevocationDuringFinalLookup(t *testing.T) {
 	m, runner, api := testSecretary(t, config.SecretaryModeAuto)
 	api.onGet = func() {
-		if api.gets != 2 {
+		if api.gets != 3 {
 			return
 		}
 		updated := api.connection
@@ -280,8 +397,8 @@ func TestSecretaryAutoOnlyRepliesToAllowedInboundMessageOnce(t *testing.T) {
 	msg := incomingSecretaryMessage()
 	m.handleUpdate(ctx, api, &models.Update{BusinessMessage: msg})
 	m.handleUpdate(ctx, api, &models.Update{BusinessMessage: msg})
-	if api.gets != 2 {
-		t.Fatalf("business connection lookups=%d, want initial and pre-send checks", api.gets)
+	if api.gets != 3 {
+		t.Fatalf("business connection lookups=%d, want initial, pre-run, and pre-send checks", api.gets)
 	}
 	if runner.calls != 1 || len(api.sends) != 1 {
 		t.Fatalf("calls=%d sends=%d, want one each", runner.calls, len(api.sends))
@@ -376,16 +493,23 @@ func TestSecretaryApprovalDoesNotRestoreConsumedOrInvalidatedDraft(t *testing.T)
 }
 
 type secretaryBlockingRunner struct {
-	started chan struct{}
-	release chan struct{}
+	started  chan struct{}
+	release  chan struct{}
+	canceled chan struct{}
 }
 
-func (r *secretaryBlockingRunner) Run(_ context.Context, _ string, _ agent.Options) (<-chan agent.Event, error) {
+func (r *secretaryBlockingRunner) Run(ctx context.Context, _ string, _ agent.Options) (<-chan agent.Event, error) {
 	out := make(chan agent.Event, 1)
 	close(r.started)
 	go func() {
-		<-r.release
-		out <- agent.Event{Type: agent.Result, Result: &agent.RunResult{Text: "Draft reply"}}
+		select {
+		case <-r.release:
+			out <- agent.Event{Type: agent.Result, Result: &agent.RunResult{Text: "Draft reply"}}
+		case <-ctx.Done():
+			if r.canceled != nil {
+				close(r.canceled)
+			}
+		}
 		close(out)
 	}()
 	return out, nil
@@ -393,7 +517,7 @@ func (r *secretaryBlockingRunner) Run(_ context.Context, _ string, _ agent.Optio
 
 func TestSecretaryEditWhileDraftingPreventsAutoSend(t *testing.T) {
 	m, _, api := testSecretary(t, "auto")
-	runner := &secretaryBlockingRunner{started: make(chan struct{}), release: make(chan struct{})}
+	runner := &secretaryBlockingRunner{started: make(chan struct{}), release: make(chan struct{}), canceled: make(chan struct{})}
 	m.runner = runner
 	msg := incomingSecretaryMessage()
 	done := make(chan struct{})
@@ -407,10 +531,43 @@ func TestSecretaryEditWhileDraftingPreventsAutoSend(t *testing.T) {
 		t.Fatal("draft did not start")
 	}
 	m.handleUpdate(context.Background(), api, &models.Update{EditedBusinessMessage: msg})
-	close(runner.release)
+	select {
+	case <-runner.canceled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("edit did not cancel the active agent")
+	}
 	<-done
 	if len(api.sends) != 0 {
 		t.Fatal("auto replied to an edited message")
+	}
+}
+
+func TestSecretaryRevocationCancelsActiveAgent(t *testing.T) {
+	m, _, api := testSecretary(t, config.SecretaryModeAuto)
+	runner := &secretaryBlockingRunner{started: make(chan struct{}), release: make(chan struct{}), canceled: make(chan struct{})}
+	m.runner = runner
+	msg := incomingSecretaryMessage()
+	done := make(chan struct{})
+	go func() {
+		m.handleUpdate(context.Background(), api, &models.Update{BusinessMessage: msg})
+		close(done)
+	}()
+	select {
+	case <-runner.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("agent did not start")
+	}
+	revoked := api.connection
+	revoked.IsEnabled = false
+	m.handleUpdate(context.Background(), api, &models.Update{BusinessConnection: &revoked})
+	select {
+	case <-runner.canceled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("revocation did not cancel the active agent")
+	}
+	<-done
+	if len(api.sends) != 0 {
+		t.Fatal("revoked agent replied")
 	}
 }
 

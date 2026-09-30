@@ -235,7 +235,10 @@ func run() int {
 		logger.Error("create bot", "error", err)
 		return 1
 	}
-	secretaryCleanup, err = wireSecretary(cfg, b, logger, runner, opts, provider.Name)
+	secretaryCleanup, err = wireSecretary(cfg, b, logger, secretaryRuntime{
+		runner: runner, opts: opts, providerName: provider.Name,
+		workspace: ws, sessions: sessions, costs: costs,
+	})
 	if err != nil {
 		logger.Error("open secretary state", "error", err)
 		return 1
