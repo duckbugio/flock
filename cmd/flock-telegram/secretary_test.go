@@ -17,6 +17,7 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"github.com/duckbugio/flock/core/agent"
+	"github.com/duckbugio/flock/core/cost"
 	"github.com/duckbugio/flock/core/dispatch"
 	"github.com/duckbugio/flock/core/ratelimit"
 	"github.com/duckbugio/flock/core/session"
@@ -30,6 +31,17 @@ type secretaryFakeRunner struct {
 	events  []agent.Event
 	prompts []string
 	options []agent.Options
+}
+
+type secretaryFakeVoice struct {
+	fileIDs []string
+	text    string
+	err     error
+}
+
+func (v *secretaryFakeVoice) Transcribe(_ context.Context, fileID string) (string, error) {
+	v.fileIDs = append(v.fileIDs, fileID)
+	return v.text, v.err
 }
 
 func (r *secretaryFakeRunner) Run(_ context.Context, prompt string, opts agent.Options) (<-chan agent.Event, error) {
@@ -132,6 +144,128 @@ func incomingSecretaryMessage() *models.Message {
 	return &models.Message{
 		ID: 5, BusinessConnectionID: "conn", From: &models.User{ID: 20, FirstName: "Alex"},
 		Chat: models.Chat{ID: 200, Type: models.ChatTypePrivate}, Text: "Hello",
+	}
+}
+
+func TestSecretaryVoiceUsesNormalTranscription(t *testing.T) {
+	for _, mode := range []string{config.SecretaryModeAuto, config.SecretaryModeApproval} {
+		t.Run(mode, func(t *testing.T) {
+			m, runner, api := testSecretary(t, mode)
+			voice := &secretaryFakeVoice{text: "Please review the changes"}
+			m.voice = voice
+			msg := incomingSecretaryMessage()
+			msg.Text = ""
+			msg.Voice = &models.Voice{FileID: "voice-file"}
+			update := &models.Update{BusinessMessage: msg}
+			m.handleUpdate(t.Context(), api, update)
+			m.handleUpdate(t.Context(), api, update)
+			if len(voice.fileIDs) != 1 || voice.fileIDs[0] != "voice-file" || runner.calls != 1 ||
+				!strings.Contains(runner.prompts[0], strconv.Quote(voice.text)) {
+				t.Fatalf("voice was not transcribed once into the Flock run: voice=%v runs=%d prompts=%v",
+					voice.fileIDs, runner.calls, runner.prompts)
+			}
+			if mode == config.SecretaryModeAuto {
+				if len(api.sends) != 1 || api.sends[0].BusinessConnectionID != api.connection.ID {
+					t.Fatalf("automatic Business reply = %+v", api.sends)
+				}
+			} else if len(m.state.Pending) != 1 || len(api.sends) != 1 ||
+				!strings.Contains(api.sends[0].Text, voice.text) {
+				t.Fatalf("approval draft did not include transcript: pending=%v sends=%+v", m.state.Pending, api.sends)
+			}
+		})
+	}
+}
+
+func TestSecretaryVoiceRequiresConfiguredTranscriberAndBusinessRights(t *testing.T) {
+	m, runner, api := testSecretary(t, config.SecretaryModeAuto)
+	msg := incomingSecretaryMessage()
+	msg.Text = ""
+	msg.Voice = &models.Voice{FileID: "voice-file"}
+	update := &models.Update{BusinessMessage: msg}
+	m.handleUpdate(t.Context(), api, update)
+	if api.gets != 0 || runner.calls != 0 {
+		t.Fatalf("disabled voice made an API or model call: gets=%d runs=%d", api.gets, runner.calls)
+	}
+	voice := &secretaryFakeVoice{text: "transcript"}
+	m.voice = voice
+	api.connection.Rights.CanReply = false
+	m.handleUpdate(t.Context(), api, update)
+	if len(voice.fileIDs) != 0 || runner.calls != 0 {
+		t.Fatalf("unauthorized voice was transcribed or submitted: voice=%v runs=%d", voice.fileIDs, runner.calls)
+	}
+}
+
+func TestSecretaryVoiceFailureNotifiesOwner(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+		err  error
+		want string
+	}{
+		{name: "provider error", err: errors.New("speech service failed"), want: "could not transcribe"},
+		{name: "empty transcript", text: "  ", want: "could not make out"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, runner, api := testSecretary(t, config.SecretaryModeAuto)
+			m.voice = &secretaryFakeVoice{text: tc.text, err: tc.err}
+			msg := incomingSecretaryMessage()
+			msg.Text = ""
+			msg.Voice = &models.Voice{FileID: "voice-file"}
+			m.handleUpdate(t.Context(), api, &models.Update{BusinessMessage: msg})
+			if runner.calls != 0 || len(api.sends) != 1 || api.sends[0].ChatID != int64(100) ||
+				!strings.Contains(api.sends[0].Text, tc.want) {
+				t.Fatalf("voice failure not reported to owner: runs=%d sends=%+v", runner.calls, api.sends)
+			}
+		})
+	}
+}
+
+func TestSecretaryVoiceTranscriptionErrorAllowsRetry(t *testing.T) {
+	m, runner, api := testSecretary(t, config.SecretaryModeAuto)
+	voice := &secretaryFakeVoice{err: errors.New("temporary speech service failure")}
+	m.voice = voice
+	msg := incomingSecretaryMessage()
+	msg.Text = ""
+	msg.Voice = &models.Voice{FileID: "voice-file"}
+	update := &models.Update{BusinessMessage: msg}
+	m.handleUpdate(t.Context(), api, update)
+	if _, seen := m.state.Seen[secretaryMessageKey(msg)]; seen {
+		t.Fatal("temporary transcription failure kept the message claimed")
+	}
+	voice.err = nil
+	voice.text = "Retry this request"
+	m.handleUpdate(t.Context(), api, update)
+	if len(voice.fileIDs) != 2 || runner.calls != 1 || len(api.sends) != 2 ||
+		api.sends[1].BusinessConnectionID != api.connection.ID {
+		t.Fatalf("redelivery did not reach the agent: voice=%v runs=%d sends=%+v",
+			voice.fileIDs, runner.calls, api.sends)
+	}
+}
+
+func TestSecretaryVoiceChecksCostCapBeforeTranscription(t *testing.T) {
+	m, runner, api := testSecretary(t, config.SecretaryModeAuto)
+	voice := &secretaryFakeVoice{text: "Should not transcribe"}
+	m.voice = voice
+	costs, err := cost.Open(filepath.Join(t.TempDir(), "costs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := costs.Add(10, 1); err != nil {
+		t.Fatal(err)
+	}
+	m.costs = costs
+	m.costCapUSD = 1
+	msg := incomingSecretaryMessage()
+	msg.Text = ""
+	msg.Voice = &models.Voice{FileID: "voice-file"}
+	m.handleUpdate(t.Context(), api, &models.Update{BusinessMessage: msg})
+	if len(voice.fileIDs) != 0 || runner.calls != 0 || len(api.sends) != 1 ||
+		api.sends[0].ChatID != int64(100) || !strings.Contains(api.sends[0].Text, "cost limit") {
+		t.Fatalf("cost-capped voice was transcribed or not reported: voice=%v runs=%d sends=%+v",
+			voice.fileIDs, runner.calls, api.sends)
+	}
+	if _, seen := m.state.Seen[secretaryMessageKey(msg)]; seen {
+		t.Fatal("cost-capped voice kept the message claimed")
 	}
 }
 

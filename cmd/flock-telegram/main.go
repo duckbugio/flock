@@ -235,15 +235,6 @@ func run() int {
 		logger.Error("create bot", "error", err)
 		return 1
 	}
-	secretaryCleanup, err = wireSecretary(cfg, b, logger, secretaryRuntime{
-		runner: runner, opts: opts, providerName: provider.Name,
-		workspace: ws, sessions: sessions, costs: costs, dispatcher: disp,
-	})
-	if err != nil {
-		logger.Error("open secretary state", "error", err)
-		return 1
-	}
-
 	// Voice transcription is optional and OFF by default. A provider
 	// misconfiguration (unknown VOICE_PROVIDER, missing key/command) is non-fatal:
 	// log a warning and run with voice disabled so text handling is unaffected.
@@ -273,6 +264,20 @@ func run() int {
 			)
 			logger.Info("voice transcription enabled", "provider", cfg.VoiceProvider)
 		}
+	}
+	// Keep the interface nil when voice is disabled; wrapping a nil pointer
+	// would make the secretary treat it as an available transcriber.
+	var secretaryTranscriber secretaryVoice
+	if vt != nil {
+		secretaryTranscriber = vt
+	}
+	secretaryCleanup, err = wireSecretary(cfg, b, logger, secretaryRuntime{
+		runner: runner, voice: secretaryTranscriber, opts: opts, providerName: provider.Name,
+		workspace: ws, sessions: sessions, costs: costs, dispatcher: disp,
+	})
+	if err != nil {
+		logger.Error("open secretary state", "error", err)
+		return 1
 	}
 
 	// Inbound document/photo uploads. Always enabled: the uploader saves files to
