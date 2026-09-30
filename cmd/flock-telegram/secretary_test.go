@@ -746,6 +746,19 @@ func TestSecretaryQueueOverflowNotifiesOwner(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("first Business run was not cancelled on close")
 	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		m.mu.Lock()
+		active := len(m.active)
+		m.mu.Unlock()
+		if active == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("cancelled Business run did not finish before test cleanup")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestSecretaryRevocationCancelsActiveAgent(t *testing.T) {
