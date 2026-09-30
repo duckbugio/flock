@@ -50,25 +50,26 @@ The Telegram account owner must be listed in `ALLOWED_USERS`.
 
 Set `SECRETARY_MODE=approval` to receive an AI draft in your private chat with
 the bot and choose **Send** or **Discard**. Set `SECRETARY_MODE=auto` to send the
-draft automatically. The default is `off`. Both modes need
-the bot's selected `AI_BACKEND` and model (Claude, Codex, or a configured
-OpenAI-compatible provider). Telegram settings control access and reply mode;
-they do not choose an AI provider. Claude drafts run in a separate workspace
-with tools and MCP disabled. Codex drafts use the tool-free Responses API with
-the selected `CODEX_MODEL`; this requires `CODEX_AUTH_MODE=billing` and the
-existing `CODEX_API_KEY`. With Codex subscription login, the Telegram bot stays
-online but Secretary Mode is disabled because managed Codex CLI configuration
-may expose MCP tools.
-Codex setups that override the model provider or CLI arguments are also
-unsupported for secretary drafts; no private message is sent to the default
-OpenAI endpoint in those configurations.
-For the standalone OpenAI-compatible backend, public base URLs require HTTPS;
-HTTP remains available for loopback, private IPs, and local service names such
-as `.internal`, `.local`, `.localdomain`, and `.svc`.
-Set a spending limit with your provider before enabling automatic replies; the
-bot caps requests per minute but does not track provider costs. Each reply uses
-only the current incoming text or caption, without earlier chat history.
-Incoming business messages do not enter the coding-agent conversation. Approval
+draft automatically. The default is `off`. Telegram settings control chat access;
+for Ansible deployments set `secretary_mode` in the inventory variables.
+`SECRETARY_MODE` controls reply approval, while the bot's `AI_BACKEND` and model
+remain separately configured. For now, Secretary Mode is available only when
+`AI_BACKEND=claude`; other providers leave the Telegram bot running without
+Business message handling. Business messages run through the normal Flock agent
+with its selected model, tools, MCP servers, skills, and rendered
+workspace. Each Business chat has its own durable workspace and session.
+People in chats granted to the bot can request actions through Flock's tools.
+In `approval` mode the owner approves the outgoing Telegram reply; agent tool
+actions happen during drafting and are not deferred by that approval.
+Grant access only to people you trust with Flock's normal tools and MCP. A
+Business message can trigger tool actions before you approve its reply, and
+canceling a run cannot undo completed actions. Business workspaces default to
+`SECRETARY_WORKSPACE_DIR=/workspace-business` and should be mounted persistently;
+the separate directory reduces accidental cross-chat access but is not a
+security boundary for an agent with shell tools.
+Set a spending limit with your provider before enabling automatic replies. The
+bot caps requests per minute and applies its configured cost cap to Business
+runs. Flock resumes each Business chat's earlier conversation. Approval
 draft replies and routing metadata are stored in `secretary-state.json` under
 `APPROVED_DIRECTORY`, which the coding agent can read. Edited or deleted messages
 cancel unsent approval drafts; the bot does not generate a replacement reply for
@@ -157,6 +158,7 @@ The **poller** is the recommended way to react to review comments — it reaches
 
 ## Other options
 
+- **OpenAI-compatible backend:** public `OPENAI_COMPAT_BASE_URL` values require HTTPS; HTTP remains available for loopback, private IPs, and local service names such as `.internal`, `.local`, `.localdomain`, and `.svc`.
 - **Voice messages:** `ENABLE_VOICE_MESSAGES=true`, `VOICE_PROVIDER=mistral|openai|local`, plus `MISTRAL_API_KEY` (or `OPENAI_API_KEY`). Transcribed and run as commands.
 - **dind sidecar:** `docker compose --profile dind up -d` gives the team dockerized linters/tests (set `DOCKER_HOST=tcp://dind:2375`). Ansible deploys enable dind by default and inject `DOCKER_HOST` automatically.
 - **Per-chat isolation:** each chat gets `/workspace/chat_<id>` (1:1 → private; group → one shared workspace); chats are fully isolated and run in parallel, capped by `MAX_CONCURRENT_CHAT_RUNS`. In groups, set `REQUIRE_GROUP_MENTION=true` to respond only when @mentioned or replied to.

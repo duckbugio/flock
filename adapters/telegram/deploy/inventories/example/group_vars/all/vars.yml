@@ -32,6 +32,9 @@ openai_compat_billing_ack: false
 # Directory Claude works in INSIDE the container (a Docker volume).
 approved_directory: /workspace
 
+# Telegram Business secretary. Keep off until BotFather and chat access are set.
+secretary_mode: "off"       # off | approval | auto; Claude backend only for now
+
 # --- Git host (optional) — for cloning repos and opening PRs from chat. ---
 # Leave gitea_host empty to skip git auth entirely (the bot still works).
 # Despite the name, this works for ANY HTTPS git host: Gitea, GitHub, GitLab.

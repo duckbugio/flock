@@ -70,7 +70,8 @@ type Options struct {
 	Effort    string
 	Env       []string
 	Images    []ImageInput
-	// AnswerOnly disables agent tools for untrusted delegated chat messages.
+	// AnswerOnly disables agent tools for delegated chat messages. No current
+	// adapter uses it; retain the runner capability for future transports.
 	AnswerOnly bool
 }
 
