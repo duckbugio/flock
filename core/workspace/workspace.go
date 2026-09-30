@@ -34,6 +34,8 @@ type Renderer struct {
 	// SkillsDir holds the Agent Skills to copy into .claude/skills/ (each skill is a
 	// <name>/SKILL.md subdirectory). Empty or a missing dir disables skills.
 	SkillsDir string
+	// RolePath is an optional role overlay appended to the rendered template.
+	RolePath string
 
 	// PrePRCycles, PrReviewCycles, EnablePRReview, GitHost and AutoApproveScope
 	// are substituted into the template for the ${PRE_PR_CYCLES}
@@ -54,6 +56,8 @@ type Renderer struct {
 
 	// FileDeliveryDisabled replaces outbox promises on transports without documents.
 	FileDeliveryDisabled bool
+	// FollowupsDisabled omits the follow-up convention when no scheduler is wired.
+	FollowupsDisabled bool
 }
 
 // Ensure creates (or refreshes) the workspace for chatID and returns its path.
@@ -204,7 +208,23 @@ func (r *Renderer) renderClaudeMD(ws string) error {
 		rendered += outboxConvention
 	}
 	rendered += shotConvention
-	rendered += followupConvention
+	if !r.FollowupsDisabled {
+		rendered += followupConvention
+	}
+	if r.RolePath != "" {
+		role, err := os.ReadFile(r.RolePath)
+		if err != nil {
+			return fmt.Errorf("read workspace role: %w", err)
+		}
+		// Agent files may carry YAML frontmatter for the CLI's subagent loader.
+		// The workspace overlay needs only the instruction body.
+		if strings.HasPrefix(string(role), "---\n") {
+			if end := strings.Index(string(role)[4:], "\n---\n"); end >= 0 {
+				role = role[4+end+5:]
+			}
+		}
+		rendered += "\n\n" + string(role)
+	}
 
 	dst := filepath.Join(ws, "CLAUDE.md")
 	// Drop a possibly stale/root-owned stub so the write recreates it fresh,

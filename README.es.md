@@ -46,6 +46,8 @@ Activa el modo para el bot en @BotFather y selecciona los chats privados accesib
 
 Por ahora, el modo secretario solo funciona con `AI_BACKEND=claude`; con otros proveedores, el bot sigue en línea sin procesar mensajes Business.
 
+Concede acceso solo a chats cuyos participantes sean de confianza para usar las herramientas y MCP de Flock. La aprobación solo controla la respuesta enviada: las herramientas pueden actuar antes de tu aprobación y cancelar la ejecución no deshace esas acciones.
+
 > **Región:** aloja en una **región compatible con Anthropic** (algunos países, p. ej. RU/CN, están geobloqueados) — de lo contrario, las llamadas a Claude fallarán.
 
 **VK** sigue el mismo patrón bajo [`adapters/vk/`](adapters/vk/), construido sobre el mismo núcleo y publicado como `ghcr.io/duckbugio/flock-vk`. Incluye solo una plantilla de entorno (sin archivo compose): `cp .env.example .env`, luego `docker run --env-file .env ghcr.io/duckbugio/flock-vk`. La autenticación de Claude y los ajustes del núcleo coinciden con los de Telegram; solo cambian las tres variables de transporte:

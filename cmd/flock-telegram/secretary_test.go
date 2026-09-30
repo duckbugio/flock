@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"github.com/duckbugio/flock/core/agent"
+	"github.com/duckbugio/flock/core/dispatch"
 	"github.com/duckbugio/flock/core/ratelimit"
 	"github.com/duckbugio/flock/core/session"
 	"github.com/duckbugio/flock/core/workspace"
@@ -108,7 +110,7 @@ func testSecretary(t *testing.T, mode string) (*secretaryManager, *secretaryFake
 		workspace: &workspace.Renderer{BaseDir: base, TemplatePath: template, AgentsDir: agents},
 		sessions:  sessions,
 		allow:     func(id int64) bool { return id == 10 },
-		limit:     ratelimit.New(30, time.Minute), sem: make(chan struct{}, 4),
+		limit:     ratelimit.New(30, time.Minute), dispatcher: dispatch.New(4),
 		slots:  make(chan struct{}, secretaryQueueCapacity),
 		state:  secretaryState{Seen: map[string]int64{}, Invalid: map[string]int64{}, Pending: map[string]secretaryPending{}},
 		lanes:  make(map[string]*secretaryLane),
@@ -139,6 +141,33 @@ func TestSecretaryOtherProviderIsUnavailable(t *testing.T) {
 	}, providerName: config.AIBackendCodex})
 	if err == nil || m != nil {
 		t.Fatalf("non-Claude secretary should be unavailable: manager=%v error=%v", m, err)
+	}
+}
+
+func TestPrepareSecretaryRuntimeUsesSeparateWorkspaceAndMCPConfig(t *testing.T) {
+	base := t.TempDir()
+	approved := filepath.Join(base, "ordinary")
+	business := filepath.Join(base, "business")
+	if err := os.MkdirAll(approved, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mcp := filepath.Join(approved, ".flock-mcp.json")
+	if err := os.WriteFile(mcp, []byte(`{"mcpServers":{"example":{}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := prepareSecretaryRuntime(config.Config{
+		ApprovedDirectory: approved, SecretaryWorkspaceDir: business,
+	}, secretaryRuntime{workspace: &workspace.Renderer{BaseDir: approved}, opts: agent.Options{MCPConfig: mcp}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.workspace.BaseDir != business || !runtime.workspace.FileDeliveryDisabled ||
+		!runtime.workspace.FollowupsDisabled || runtime.opts.MCPConfig == mcp {
+		t.Fatalf("business workspace not separated: %+v %+v", runtime.workspace, runtime.opts)
+	}
+	mcpCopy, err := os.ReadFile(runtime.opts.MCPConfig)
+	if err != nil || string(mcpCopy) != `{"mcpServers":{"example":{}}}` {
+		t.Fatalf("business MCP copy = %q, %v", mcpCopy, err)
 	}
 }
 
@@ -181,11 +210,12 @@ func TestClaudeSecretaryUsesFullFlockAgentAndResumesBusinessChat(t *testing.T) {
 	if len(api.sends) != 1 || api.sends[0].Text != "Full Flock answer" {
 		t.Fatalf("business reply = %+v", api.sends)
 	}
-	if runner.calls != 1 || runner.prompts[0] != "Hello" {
+	if runner.calls != 1 || !strings.Contains(runner.prompts[0], strconv.Quote("Hello")) ||
+		!strings.Contains(runner.prompts[0], "untrusted") {
 		t.Fatalf("runner calls/prompts = %d/%q", runner.calls, runner.prompts)
 	}
 	first := runner.options[0]
-	wantWorkdir := filepath.Join(base, "chat_"+secretaryChatKey("conn", 200))
+	wantWorkdir := filepath.Join(base, "chat_"+secretaryChatKey(10, 200))
 	if first.AnswerOnly || first.MCPConfig != filepath.Join(base, "mcp.json") ||
 		first.MaxTurns != 40 || first.Effort != "ultracode" || first.Model != "selected-model" ||
 		first.Workdir != wantWorkdir || first.SessionID != "" || len(first.Env) != 1 {
@@ -197,7 +227,8 @@ func TestClaudeSecretaryUsesFullFlockAgentAndResumesBusinessChat(t *testing.T) {
 	msg.ID++
 	msg.Text = "Follow up"
 	m.handleUpdate(context.Background(), api, &models.Update{BusinessMessage: msg})
-	if runner.calls != 2 || runner.prompts[1] != "Follow up" || runner.options[1].SessionID != "business-session" {
+	if runner.calls != 2 || !strings.Contains(runner.prompts[1], strconv.Quote("Follow up")) ||
+		runner.options[1].SessionID != "business-session" {
 		t.Fatalf("business chat did not resume: calls=%d prompts=%q session=%q",
 			runner.calls, runner.prompts, runner.options[1].SessionID)
 	}
@@ -256,7 +287,7 @@ func TestSecretarySkipsNonClaudeProviderWithoutStoppingBot(t *testing.T) {
 		AIBackend: config.AIBackendCodex, CodexAuthMode: config.CodexAuthSubscription,
 		SecretaryMode: config.SecretaryModeApproval, ApprovedDirectory: approved,
 	}
-	if got := secretaryAllowedUpdates(cfg, agent.Options{}, config.AIBackendCodex); slices.Contains(
+	if got := secretaryAllowedUpdates(cfg, config.AIBackendCodex); slices.Contains(
 		got, models.AllowedUpdateBusinessMessage,
 	) {
 		t.Fatal("Codex subscription still requested business updates")
@@ -272,14 +303,14 @@ func TestSecretarySkipsNonClaudeProviderWithoutStoppingBot(t *testing.T) {
 		t.Fatalf("Codex subscription initialized secretary state: %v", err)
 	}
 	cfg.CodexAuthMode = config.CodexAuthBilling
-	if got := secretaryAllowedUpdates(cfg, agent.Options{}, config.AIBackendCodex); slices.Contains(
+	if got := secretaryAllowedUpdates(cfg, config.AIBackendCodex); slices.Contains(
 		got, models.AllowedUpdateBusinessMessage,
 	) {
 		t.Fatal("Codex billing requested business updates despite Claude-only support")
 	}
 	cfg.AIBackend = "codex-cli"
 	cfg.CodexAuthMode = config.CodexAuthSubscription
-	if got := secretaryAllowedUpdates(cfg, agent.Options{}, config.AIBackendCodex); slices.Contains(
+	if got := secretaryAllowedUpdates(cfg, config.AIBackendCodex); slices.Contains(
 		got, models.AllowedUpdateBusinessMessage,
 	) {
 		t.Fatal("Codex alias bypassed secretary availability check")

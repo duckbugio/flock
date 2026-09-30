@@ -228,7 +228,7 @@ func run() int {
 
 	opts2 := append([]bot.Option{
 		bot.WithDefaultHandler(textHandler(cfg, &svc, &vt, &up, limiter, costs, guards)),
-	}, secretaryBotOptions(cfg, opts, provider.Name)...)
+	}, secretaryBotOptions(cfg, provider.Name)...)
 
 	b, err := bot.New(cfg.TelegramBotToken, opts2...)
 	if err != nil {
@@ -237,7 +237,7 @@ func run() int {
 	}
 	secretaryCleanup, err = wireSecretary(cfg, b, logger, secretaryRuntime{
 		runner: runner, opts: opts, providerName: provider.Name,
-		workspace: ws, sessions: sessions, costs: costs,
+		workspace: ws, sessions: sessions, costs: costs, dispatcher: disp,
 	})
 	if err != nil {
 		logger.Error("open secretary state", "error", err)

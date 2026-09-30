@@ -174,8 +174,8 @@ RUN set -eux; \
 # at the SAME uid 1000 the existing volumes are owned by.
 RUN userdel -r node 2>/dev/null || true; \
     useradd -m -u 1000 -s /bin/bash claude \
- && mkdir -p /workspace /app/data /home/claude/.claude /home/claude/.codex /opt/duck/agents \
- && chown -R claude:claude /workspace /app /home/claude/.claude /home/claude/.codex /opt/duck
+ && mkdir -p /workspace /workspace-business /app/data /home/claude/.claude /home/claude/.codex /opt/duck/agents \
+ && chown -R claude:claude /workspace /workspace-business /app /home/claude/.claude /home/claude/.codex /opt/duck
 
 # The compiled bot.
 COPY --from=build /out/flock-telegram /usr/local/bin/flock-telegram
@@ -184,6 +184,7 @@ COPY --from=build /out/flock-telegram /usr/local/bin/flock-telegram
 COPY --chown=claude:claude core/agents/*.md /opt/duck/agents/
 COPY --chown=claude:claude core/skills /opt/duck/skills
 COPY --chown=claude:claude core/CLAUDE.workspace.md.tmpl /opt/duck/CLAUDE.workspace.md.tmpl
+COPY --chown=claude:claude core/CLAUDE.secretary.md.tmpl /opt/duck/CLAUDE.secretary.md.tmpl
 
 USER claude
 ENV HOME=/home/claude \

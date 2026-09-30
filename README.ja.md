@@ -46,6 +46,8 @@ docker compose up -d
 
 現在、秘書モードは `AI_BACKEND=claude` のみ対応します。他のプロバイダーではボットは動作を続けますが、Business メッセージは処理しません。
 
+Flock のツールと MCP を使わせてもよい相手のチャットだけにアクセスを許可してください。承認の対象は返信の送信だけです。ツールは承認前に動作する場合があり、実行済みの操作は取り消せません。
+
 > **リージョン:** **Anthropic がサポートするリージョン**でホストしてください（一部の国、例えば RU/CN などはジオブロックされています）。そうでない場合、Claude の呼び出しは失敗します。
 
 **VK** も同じパターンで [`adapters/vk/`](adapters/vk/) に用意されており、同じコアの上に構築され、`ghcr.io/duckbugio/flock-vk` として公開されています。配布されるのは env テンプレートのみ（compose ファイルはありません）。`cp .env.example .env` のあと、`docker run --env-file .env ghcr.io/duckbugio/flock-vk` を実行します。Claude の認証とコア設定は Telegram と同じで、トランスポート用の 3 つの変数のみが異なります。

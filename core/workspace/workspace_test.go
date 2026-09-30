@@ -96,6 +96,31 @@ func TestEnsureRendersWorkspace(t *testing.T) {
 	}
 }
 
+func TestBusinessWorkspaceRendersRoleWithoutUnsupportedConventions(t *testing.T) {
+	r := newTestRenderer(t)
+	role := filepath.Join(t.TempDir(), "secretary.md")
+	if err := os.WriteFile(role, []byte("---\nname: secretary\n---\n\nBusiness role instructions.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.RolePath = role
+	r.FileDeliveryDisabled = true
+	r.FollowupsDisabled = true
+	workdir, err := r.Ensure("business_10_20")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(workdir, "CLAUDE.md")) //nolint:gosec // controlled temp workspace
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "Business role instructions.") || strings.Contains(text, "name: secretary") ||
+		strings.Contains(text, "After the run finishes, each regular file") ||
+		strings.Contains(text, "schedule a follow-up instead") {
+		t.Fatalf("business workspace conventions: %q", text)
+	}
+}
+
 // TestEnsureCopiesSkills asserts the skills tree (each <name>/SKILL.md) is mirrored
 // into the workspace's .claude/skills/, preserving the subdirectory layout.
 func TestEnsureCopiesSkills(t *testing.T) {

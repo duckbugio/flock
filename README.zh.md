@@ -46,6 +46,8 @@ docker compose up -d
 
 目前秘书模式仅支持 `AI_BACKEND=claude`；使用其他服务商时，机器人继续运行，但不会处理 Business 消息。
 
+只允许您信任其参与者使用 Flock 工具和 MCP 的聊天接入。审核仅控制回复发送：工具可能在您确认前运行，取消执行也无法撤销已完成的操作。
+
 > **地区：** 请托管在 **Anthropic 支持的地区**（部分国家/地区会被地理封锁，例如 RU/CN）——否则 Claude 调用会失败。
 
 **VK** 在 [`adapters/vk/`](adapters/vk/) 下采用相同的模式，构建于同一套核心之上，并以 `ghcr.io/duckbugio/flock-vk` 形式发布。它只附带一个环境变量模板（没有 compose 文件）：`cp .env.example .env`，然后 `docker run --env-file .env ghcr.io/duckbugio/flock-vk`。Claude 认证与核心设置都与 Telegram 一致；只有三个传输变量不同：

@@ -60,6 +60,12 @@ workspace. Each Business chat has its own durable workspace and session.
 People in chats granted to the bot can request actions through Flock's tools.
 In `approval` mode the owner approves the outgoing Telegram reply; agent tool
 actions happen during drafting and are not deferred by that approval.
+Grant access only to people you trust with Flock's normal tools and MCP. A
+Business message can trigger tool actions before you approve its reply, and
+canceling a run cannot undo completed actions. Business workspaces default to
+`SECRETARY_WORKSPACE_DIR=/workspace-business` and should be mounted persistently;
+the separate directory reduces accidental cross-chat access but is not a
+security boundary for an agent with shell tools.
 Set a spending limit with your provider before enabling automatic replies. The
 bot caps requests per minute and applies its configured cost cap to Business
 runs. Flock resumes each Business chat's earlier conversation. Approval

@@ -153,6 +153,40 @@ func (d *Dispatcher) TrySubmit(chatID string, run func(ctx context.Context)) boo
 	}
 }
 
+// RunExternal runs a transport-owned job under the same global concurrency cap
+// and graceful shutdown window as queued chat jobs. The caller owns its
+// per-chat serialization and keeps the call alive until run returns.
+func (d *Dispatcher) RunExternal(ctx context.Context, run func(context.Context)) error {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return ErrShutdown
+	}
+	d.wg.Add(1)
+	d.mu.Unlock()
+	defer d.wg.Done()
+
+	runCtx, cancel := context.WithCancelCause(ctx)
+	// The dispatcher root cancels this caller-derived context on forced shutdown.
+	//nolint:contextcheck // deliberate cross-context shutdown propagation
+	stopRoot := context.AfterFunc(d.rootCtx, func() { cancel(context.Cause(d.rootCtx)) })
+	defer func() {
+		stopRoot()
+		cancel(nil)
+	}()
+	if err := d.sem.Acquire(runCtx, 1); err != nil {
+		return err
+	}
+	defer d.sem.Release(1)
+	select {
+	case <-d.drain:
+		return ErrShutdown
+	default:
+	}
+	run(runCtx)
+	return nil
+}
+
 // queueFor returns chatID's queue, lazily creating it (and starting its worker) on
 // first use. It returns nil when the dispatcher is closed, so the caller drops the
 // job rather than sending on an abandoned queue. Shared by Submit and TrySubmit so

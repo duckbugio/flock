@@ -19,6 +19,7 @@ services:
       - codex_home:/home/claude/.codex     # Codex sessions + auth state
       - bot_data:/app/data                 # sqlite db + persistence
       - workspace:/workspace               # where the team reads/writes code
+      - business_workspace:/workspace-business # persistent Business chat workspaces
     mem_limit: ${BOT_MEM_LIMIT:-3g}
     logging:
       driver: json-file
@@ -49,4 +50,5 @@ volumes:
   codex_home:
   bot_data:
   workspace:
+  business_workspace:
   dind_storage:

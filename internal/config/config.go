@@ -183,7 +183,10 @@ type Config struct {
 	ClaudeTimeoutSeconds int `env:"CLAUDE_TIMEOUT_SECONDS" envDefault:"32400"`
 
 	// Workspace + behavior.
-	ApprovedDirectory     string `env:"APPROVED_DIRECTORY" envDefault:"/workspace"`
+	ApprovedDirectory string `env:"APPROVED_DIRECTORY" envDefault:"/workspace"`
+	// SecretaryWorkspaceDir is a separate persistent root for Business chat workspaces.
+	SecretaryWorkspaceDir string `env:"SECRETARY_WORKSPACE_DIR" envDefault:"/workspace-business"`
+	SecretaryTemplatePath string `env:"SECRETARY_TEMPLATE_PATH" envDefault:"/opt/duck/CLAUDE.secretary.md.tmpl"`
 	LogLevel              string `env:"LOG_LEVEL" envDefault:"INFO"`
 	MaxConcurrentChatRuns int    `env:"MAX_CONCURRENT_CHAT_RUNS" envDefault:"4"`
 

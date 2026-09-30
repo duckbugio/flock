@@ -46,6 +46,8 @@ Activez ce mode pour le bot dans @BotFather et choisissez les conversations priv
 
 Pour le moment, le mode secrétaire nécessite `AI_BACKEND=claude` ; avec les autres fournisseurs, le bot reste actif sans traiter les messages Business.
 
+N’accordez l’accès qu’aux conversations dont vous faites confiance aux participants pour utiliser les outils et MCP de Flock. La validation ne contrôle que la réponse envoyée : les outils peuvent agir avant votre validation et l’annulation n’efface pas ces actions.
+
 > **Région :** hébergez dans une **région prise en charge par Anthropic** (certains pays, par exemple RU/CN, sont bloqués géographiquement) — sinon les appels à Claude échouent.
 
 **VK** suit le même schéma sous [`adapters/vk/`](adapters/vk/), construit sur le même cœur et publié sous `ghcr.io/duckbugio/flock-vk`. Il ne fournit qu'un modèle d'environnement (pas de fichier compose) : `cp .env.example .env`, puis `docker run --env-file .env ghcr.io/duckbugio/flock-vk`. L'authentification Claude et les paramètres du cœur sont identiques à ceux de Telegram ; seules les trois variables de transport changent :

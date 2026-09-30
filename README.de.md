@@ -46,6 +46,8 @@ Aktiviere den Modus für den Bot in @BotFather und wähle die zugänglichen priv
 
 Der Sekretärmodus unterstützt derzeit nur `AI_BACKEND=claude`; mit anderen Anbietern bleibt der Bot online, verarbeitet aber keine Business-Nachrichten.
 
+Gewähre nur vertrauenswürdigen Chats Zugriff auf Flocks Werkzeuge und MCP. Die Freigabe betrifft nur die gesendete Antwort: Werkzeugaktionen können schon vor deiner Freigabe stattfinden und lassen sich durch Abbruch nicht rückgängig machen.
+
 > **Region:** Hoste in einer **von Anthropic unterstützten Region** (einige Länder, z. B. RU/CN, sind geoblockt) — andernfalls schlagen Claude-Aufrufe fehl.
 
 **VK** folgt demselben Muster unter [`adapters/vk/`](adapters/vk/), auf demselben Core aufgebaut und veröffentlicht als `ghcr.io/duckbugio/flock-vk`. Es liefert nur ein Env-Template (keine Compose-Datei): `cp .env.example .env`, dann `docker run --env-file .env ghcr.io/duckbugio/flock-vk`. Die Claude-Authentifizierung und die Core-Einstellungen sind identisch mit Telegram; nur die drei Transport-Variablen ändern sich:

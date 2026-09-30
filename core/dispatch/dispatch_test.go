@@ -42,6 +42,32 @@ func TestParallelAcrossChats(t *testing.T) {
 	close(release)
 }
 
+func TestExternalRunSharesChatConcurrencyCap(t *testing.T) {
+	d := New(1)
+	defer d.Close()
+	chatEntered := make(chan struct{})
+	releaseChat := make(chan struct{})
+	d.Submit("ordinary", func(context.Context) {
+		close(chatEntered)
+		<-releaseChat
+	})
+	recv(t, chatEntered, "ordinary chat did not start")
+	externalEntered := make(chan struct{})
+	externalDone := make(chan struct{})
+	go func() {
+		_ = d.RunExternal(context.Background(), func(context.Context) { close(externalEntered) })
+		close(externalDone)
+	}()
+	select {
+	case <-externalEntered:
+		t.Fatal("external run bypassed the shared concurrency cap")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseChat)
+	recv(t, externalEntered, "external run did not start after ordinary chat")
+	recv(t, externalDone, "external run did not finish")
+}
+
 // TestSerialWithinChat asserts two jobs for the SAME chat run one after another:
 // the second starts only after the first finishes (AC2b).
 func TestSerialWithinChat(t *testing.T) {
