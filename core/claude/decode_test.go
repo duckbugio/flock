@@ -3,6 +3,22 @@ package claude
 
 import "testing"
 
+func TestDecodeAPIErrorStatus(t *testing.T) {
+	payload := []byte(`{"type":"result","subtype":"error_during_execution",` +
+		`"is_error":true,"terminal_reason":"api_error","api_error_status":529}`)
+	events, ok := decode(payload)
+	if !ok || len(events) != 1 || events[0].Result == nil {
+		t.Fatalf("Claude result was not decoded: events=%+v ok=%v", events, ok)
+	}
+	result := events[0].Result
+	if result.APIErrorStatus == nil || *result.APIErrorStatus != 529 {
+		t.Errorf("API error status = %v, want 529", result.APIErrorStatus)
+	}
+	if result.TerminalReason != "api_error" {
+		t.Errorf("terminal reason = %q, want api_error", result.TerminalReason)
+	}
+}
+
 // TestDecodeAssistantParentAndToolID (AC2) feeds a raw `assistant` stream-json
 // line that carries a top-level "parent_tool_use_id" and a tool_use content block
 // with an "id", and asserts the derived events surface both: every event carries

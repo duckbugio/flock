@@ -53,6 +53,8 @@ const (
 	secretaryUpdateCount      = 7
 )
 
+var errSecretaryAIRunFailed = errors.New("secretary AI run failed")
+
 // secretaryAPI contains the Telegram Business methods used by the secretary.
 type secretaryAPI interface {
 	GetBusinessConnection(ctx context.Context, params *bot.GetBusinessConnectionParams) (*models.BusinessConnection, error)
@@ -639,7 +641,9 @@ func (m *secretaryManager) respondRun(
 	}
 	if err != nil {
 		m.releaseClaim(msg)
-		slog.Warn("generate secretary reply", "error", err)
+		if !errors.Is(err, errSecretaryAIRunFailed) {
+			slog.Warn("generate secretary reply", "error", err)
+		}
 		m.ownerNotice(ctx, api, connection.UserChatID, "Secretary could not prepare a Business reply.")
 		return
 	}
@@ -770,30 +774,35 @@ func (m *secretaryManager) resultText(chatKey string, ownerID int64, resuming bo
 				slog.Error("drop failed secretary session", "error", err)
 			}
 		}
-		return "", secretaryRunFailure(res)
+		logSecretaryRunFailure(res)
+		return "", errSecretaryAIRunFailed
 	}
 	return chat.Final(res), nil
 }
 
-// Keep Claude's structured failure details in the owner's bot logs without
-// copying the result text, which may contain private conversation content.
-func secretaryRunFailure(res *agent.RunResult) error {
-	status := "none"
+// Keep provider failure details in the owner's bot logs without copying the
+// result text, which may contain private conversation content.
+func logSecretaryRunFailure(res *agent.RunResult) {
+	status := 0
 	if res.APIErrorStatus != nil {
-		status = strconv.Itoa(*res.APIErrorStatus)
+		status = *res.APIErrorStatus
 	}
-	return fmt.Errorf("secretary AI run failed: subtype=%s terminal_reason=%s api_status=%s turns=%d duration_ms=%d",
-		secretaryErrorCode(res.Subtype), secretaryErrorCode(res.TerminalReason), status, res.NumTurns, res.DurationMS)
+	slog.Warn("secretary AI run failed",
+		"subtype", secretaryErrorCode(res.Subtype),
+		"terminal_reason", secretaryErrorCode(res.TerminalReason),
+		"api_status", status,
+		"turns", res.NumTurns,
+		"duration_ms", res.DurationMS,
+		"text_len", utf8.RuneCountInString(res.Text))
 }
 
 func secretaryErrorCode(value string) string {
-	if value == "" || len(value) > 64 {
+	if value == "" {
 		return "unknown"
 	}
-	for _, r := range value {
-		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' && r != '-' {
-			return "unknown"
-		}
+	const maxCodeRunes = 64
+	if utf8.RuneCountInString(value) > maxCodeRunes {
+		return string([]rune(value)[:maxCodeRunes])
 	}
 	return value
 }

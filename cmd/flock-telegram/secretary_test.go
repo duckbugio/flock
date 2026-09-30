@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -483,15 +485,36 @@ func TestSecretarySkipsNonClaudeProviderWithoutStoppingBot(t *testing.T) {
 
 func TestSecretaryRejectsFailedResult(t *testing.T) {
 	m, runner, _ := testSecretary(t, config.SecretaryModeAuto)
+	var logOutput bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logOutput, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 	status := 529
 	runner.events = []agent.Event{{Type: agent.Result, Result: &agent.RunResult{
 		Text: "private conversation text", IsError: true, Subtype: "error_during_execution",
 		TerminalReason: "api_error", APIErrorStatus: &status, NumTurns: 2, DurationMS: 500,
 	}}}
-	if reply, err := m.draft(context.Background(), "chat", 10, "hello"); err == nil || reply != "" ||
-		!strings.Contains(err.Error(), "subtype=error_during_execution") ||
-		!strings.Contains(err.Error(), "api_status=529") || strings.Contains(err.Error(), "private conversation text") {
+	if reply, err := m.draft(context.Background(), "chat", 10, "hello"); !errors.Is(err, errSecretaryAIRunFailed) || reply != "" {
 		t.Fatalf("failed result produced reply %q, error %v", reply, err)
+	}
+	var record map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(logOutput.Bytes()), &record); err != nil {
+		t.Fatalf("decode structured failure log: %v", err)
+	}
+	if record["subtype"] != "error_during_execution" || record["terminal_reason"] != "api_error" ||
+		record["api_status"] != float64(529) || record["turns"] != float64(2) ||
+		record["duration_ms"] != float64(500) || record["text_len"] != float64(len("private conversation text")) ||
+		strings.Contains(logOutput.String(), "private conversation text") {
+		t.Fatalf("failure log lost structured diagnostics or exposed private text: %v", record)
+	}
+}
+
+func TestSecretaryErrorCodePreservesNewReasons(t *testing.T) {
+	if got := secretaryErrorCode("api.error: новое"); got != "api.error: новое" {
+		t.Fatalf("new provider reason was discarded: %q", got)
+	}
+	if got := secretaryErrorCode(strings.Repeat("я", 70)); len([]rune(got)) != 64 {
+		t.Fatalf("provider reason was not bounded by runes: %d", len([]rune(got)))
 	}
 }
 

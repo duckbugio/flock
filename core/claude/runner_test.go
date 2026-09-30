@@ -140,16 +140,6 @@ func TestRun_Error(t *testing.T) {
 	}
 }
 
-func TestDecodeAPIErrorStatus(t *testing.T) {
-	payload := []byte(`{"type":"result","subtype":"error_during_execution",` +
-		`"is_error":true,"terminal_reason":"api_error","api_error_status":529}`)
-	events, ok := decode(payload)
-	if !ok || len(events) != 1 || events[0].Result == nil || events[0].Result.APIErrorStatus == nil ||
-		*events[0].Result.APIErrorStatus != 529 || events[0].Result.TerminalReason != "api_error" {
-		t.Fatalf("Claude error status was lost: events=%+v ok=%v", events, ok)
-	}
-}
-
 // TestRun_ForwardCompat verifies the decoder tolerates future additions: an
 // unknown top-level event type, an unknown system subtype, and extra/unexpected
 // fields on known events. The stream must still parse and yield the known events
