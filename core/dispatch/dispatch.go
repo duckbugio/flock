@@ -154,9 +154,9 @@ func (d *Dispatcher) TrySubmit(chatID string, run func(ctx context.Context)) boo
 }
 
 // RunExternal runs a transport-owned job under the same global concurrency cap
-// and graceful shutdown window as queued chat jobs. The caller owns its
-// per-chat serialization and keeps the call alive until run returns.
-func (d *Dispatcher) RunExternal(ctx context.Context, run func(context.Context)) error {
+// and graceful shutdown window as queued chat jobs. waitTimeout bounds only
+// admission; the job itself keeps the caller's context after it acquires a slot.
+func (d *Dispatcher) RunExternal(ctx context.Context, waitTimeout time.Duration, run func(context.Context)) error {
 	d.mu.Lock()
 	if d.closed {
 		d.mu.Unlock()
@@ -174,7 +174,10 @@ func (d *Dispatcher) RunExternal(ctx context.Context, run func(context.Context))
 		stopRoot()
 		cancel(nil)
 	}()
-	if err := d.sem.Acquire(runCtx, 1); err != nil {
+	admitCtx, stopWaiting := context.WithTimeout(runCtx, waitTimeout)
+	err := d.sem.Acquire(admitCtx, 1)
+	stopWaiting()
+	if err != nil {
 		return err
 	}
 	defer d.sem.Release(1)

@@ -50,6 +50,7 @@ const (
 	secretaryApprovalLifetime = 24 * time.Hour
 	secretaryConnectionTTL    = 5 * time.Minute
 	secretaryRunTimeout       = 10 * time.Minute
+	secretaryQueueTimeout     = 30 * time.Minute
 	secretaryMaxInvalidKeys   = 10000
 	secretaryMaxConnections   = 1024
 	secretaryUpdateCount      = 7
@@ -86,20 +87,21 @@ type secretaryConnectionCache struct {
 }
 
 type secretaryManager struct {
-	mode       string
-	runner     agent.Runner
-	opts       agent.Options
-	workspace  *workspace.Renderer
-	sessions   session.Store
-	costs      *cost.Store
-	costCapUSD float64
-	timeout    time.Duration
-	path       string
-	allow      func(int64) bool
-	limit      *ratelimit.Limiter
-	dispatcher *dispatch.Dispatcher
-	slots      chan struct{}
-	lookup     singleflight.Group
+	mode         string
+	runner       agent.Runner
+	opts         agent.Options
+	workspace    *workspace.Renderer
+	sessions     session.Store
+	costs        *cost.Store
+	costCapUSD   float64
+	timeout      time.Duration
+	queueTimeout time.Duration
+	path         string
+	allow        func(int64) bool
+	limit        *ratelimit.Limiter
+	dispatcher   *dispatch.Dispatcher
+	slots        chan struct{}
+	lookup       singleflight.Group
 
 	mu          sync.Mutex
 	state       secretaryState
@@ -262,23 +264,24 @@ func newSecretaryManager(cfg config.Config, runtime secretaryRuntime) (*secretar
 		runTimeout = configured
 	}
 	m := &secretaryManager{
-		mode:        cfg.SecretaryModeName(),
-		runner:      runner,
-		opts:        opts,
-		workspace:   runtime.workspace,
-		sessions:    runtime.sessions,
-		costs:       runtime.costs,
-		dispatcher:  runtime.dispatcher,
-		costCapUSD:  cfg.EffectiveCostCapUSD(),
-		timeout:     runTimeout,
-		path:        filepath.Join(cfg.ApprovedDirectory, "secretary-state.json"),
-		allow:       cfg.IsAllowed,
-		limit:       ratelimit.New(secretaryRequestsPerMinute, time.Minute),
-		slots:       make(chan struct{}, secretaryQueueCapacity),
-		state:       secretaryState{Seen: map[string]int64{}, Invalid: map[string]int64{}, Pending: map[string]secretaryPending{}},
-		connections: make(map[string]secretaryConnectionCache),
-		lanes:       make(map[string]*secretaryLane),
-		active:      make(map[string]secretaryActiveRun),
+		mode:         cfg.SecretaryModeName(),
+		runner:       runner,
+		opts:         opts,
+		workspace:    runtime.workspace,
+		sessions:     runtime.sessions,
+		costs:        runtime.costs,
+		dispatcher:   runtime.dispatcher,
+		costCapUSD:   cfg.EffectiveCostCapUSD(),
+		timeout:      runTimeout,
+		queueTimeout: secretaryQueueTimeout,
+		path:         filepath.Join(cfg.ApprovedDirectory, "secretary-state.json"),
+		allow:        cfg.IsAllowed,
+		limit:        ratelimit.New(secretaryRequestsPerMinute, time.Minute),
+		slots:        make(chan struct{}, secretaryQueueCapacity),
+		state:        secretaryState{Seen: map[string]int64{}, Invalid: map[string]int64{}, Pending: map[string]secretaryPending{}},
+		connections:  make(map[string]secretaryConnectionCache),
+		lanes:        make(map[string]*secretaryLane),
+		active:       make(map[string]secretaryActiveRun),
 	}
 	if m.dispatcher == nil {
 		m.dispatcher = dispatch.New(secretaryConcurrency)
@@ -554,14 +557,17 @@ func (m *secretaryManager) respond(
 	ctx context.Context, api secretaryAPI, connection *models.BusinessConnection, msg *models.Message, incoming string,
 ) {
 	chatKey := secretaryChatKey(connection.User.ID, msg.Chat.ID)
-	unlock, ok := m.lockChat(ctx, chatKey)
+	queueCtx, cancelQueue := context.WithTimeout(ctx, m.queueTimeout)
+	defer cancelQueue()
+	unlock, ok := m.lockChat(queueCtx, chatKey)
 	if !ok {
 		m.releaseClaim(msg)
 		m.ownerNotice(ctx, api, connection.UserChatID, "Secretary could not process a queued Business message in time.")
 		return
 	}
 	defer unlock()
-	err := m.dispatcher.RunExternal(ctx, func(runCtx context.Context) {
+	deadline, _ := queueCtx.Deadline()
+	err := m.dispatcher.RunExternal(ctx, time.Until(deadline), func(runCtx context.Context) {
 		m.respondRun(runCtx, api, connection, msg, incoming, chatKey)
 	})
 	if err != nil {

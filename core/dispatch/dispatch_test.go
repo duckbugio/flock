@@ -55,7 +55,7 @@ func TestExternalRunSharesChatConcurrencyCap(t *testing.T) {
 	externalEntered := make(chan struct{})
 	externalDone := make(chan struct{})
 	go func() {
-		_ = d.RunExternal(context.Background(), func(context.Context) { close(externalEntered) })
+		_ = d.RunExternal(context.Background(), time.Second, func(context.Context) { close(externalEntered) })
 		close(externalDone)
 	}()
 	select {
@@ -66,6 +66,32 @@ func TestExternalRunSharesChatConcurrencyCap(t *testing.T) {
 	close(releaseChat)
 	recv(t, externalEntered, "external run did not start after ordinary chat")
 	recv(t, externalDone, "external run did not finish")
+}
+
+func TestExternalRunBoundsOnlyAdmission(t *testing.T) {
+	d := New(1)
+	defer d.Close()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	d.Submit("ordinary", func(context.Context) {
+		close(entered)
+		<-release
+	})
+	recv(t, entered, "ordinary chat did not start")
+	if err := d.RunExternal(context.Background(), 10*time.Millisecond, func(context.Context) {
+		t.Fatal("timed-out external run started")
+	}); err == nil {
+		t.Fatal("external run did not time out while waiting for the slot")
+	}
+	close(release)
+	started := make(chan struct{})
+	if err := d.RunExternal(context.Background(), time.Second, func(context.Context) {
+		close(started)
+		time.Sleep(20 * time.Millisecond)
+	}); err != nil {
+		t.Fatalf("admitted external run was cut off: %v", err)
+	}
+	recv(t, started, "external run did not start after slot release")
 }
 
 // TestSerialWithinChat asserts two jobs for the SAME chat run one after another:

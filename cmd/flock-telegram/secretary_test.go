@@ -111,10 +111,11 @@ func testSecretary(t *testing.T, mode string) (*secretaryManager, *secretaryFake
 		sessions:  sessions,
 		allow:     func(id int64) bool { return id == 10 },
 		limit:     ratelimit.New(30, time.Minute), dispatcher: dispatch.New(4),
-		slots:  make(chan struct{}, secretaryQueueCapacity),
-		state:  secretaryState{Seen: map[string]int64{}, Invalid: map[string]int64{}, Pending: map[string]secretaryPending{}},
-		lanes:  make(map[string]*secretaryLane),
-		active: make(map[string]secretaryActiveRun),
+		queueTimeout: secretaryQueueTimeout,
+		slots:        make(chan struct{}, secretaryQueueCapacity),
+		state:        secretaryState{Seen: map[string]int64{}, Invalid: map[string]int64{}, Pending: map[string]secretaryPending{}},
+		lanes:        make(map[string]*secretaryLane),
+		active:       make(map[string]secretaryActiveRun),
 	}
 	api := &secretaryFakeAPI{connection: models.BusinessConnection{
 		ID: "conn", User: models.User{ID: 10}, UserChatID: 100, IsEnabled: true,
