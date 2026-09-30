@@ -51,6 +51,10 @@ type RunResult struct {
 	DurationMS int64
 	IsError    bool
 	Subtype    string
+	// TerminalReason and APIErrorStatus carry structured failure details when
+	// the provider exposes them; they contain no conversation text.
+	TerminalReason string
+	APIErrorStatus *int
 }
 
 // ImageInput is a single image attachment for a run.

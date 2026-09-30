@@ -53,6 +53,8 @@ const (
 	secretaryUpdateCount      = 7
 )
 
+var errSecretaryAIRunFailed = errors.New("secretary AI run failed")
+
 // secretaryAPI contains the Telegram Business methods used by the secretary.
 type secretaryAPI interface {
 	GetBusinessConnection(ctx context.Context, params *bot.GetBusinessConnectionParams) (*models.BusinessConnection, error)
@@ -639,7 +641,9 @@ func (m *secretaryManager) respondRun(
 	}
 	if err != nil {
 		m.releaseClaim(msg)
-		slog.Warn("generate secretary reply", "error", err)
+		if !errors.Is(err, errSecretaryAIRunFailed) {
+			slog.Warn("generate secretary reply", "error", err)
+		}
 		m.ownerNotice(ctx, api, connection.UserChatID, "Secretary could not prepare a Business reply.")
 		return
 	}
@@ -770,9 +774,39 @@ func (m *secretaryManager) resultText(chatKey string, ownerID int64, resuming bo
 				slog.Error("drop failed secretary session", "error", err)
 			}
 		}
-		return "", errors.New("secretary AI run failed")
+		logSecretaryRunFailure(chatKey, ownerID, res)
+		return "", errSecretaryAIRunFailed
 	}
 	return chat.Final(res), nil
+}
+
+// Keep provider failure details in the owner's bot logs without copying the
+// result text, which may contain private conversation content.
+func logSecretaryRunFailure(chatKey string, ownerID int64, res *agent.RunResult) {
+	attrs := []any{
+		"owner_id", ownerID,
+		"chat_key", chatKey,
+		"subtype", secretaryErrorCode(res.Subtype),
+		"terminal_reason", secretaryErrorCode(res.TerminalReason),
+		"turns", res.NumTurns,
+		"duration_ms", res.DurationMS,
+		"text_len", utf8.RuneCountInString(res.Text),
+	}
+	if res.APIErrorStatus != nil {
+		attrs = append(attrs, "api_status", *res.APIErrorStatus)
+	}
+	slog.Warn("secretary AI run failed", attrs...)
+}
+
+func secretaryErrorCode(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	const maxCodeRunes = 64
+	if utf8.RuneCountInString(value) > maxCodeRunes {
+		return string([]rune(value)[:maxCodeRunes])
+	}
+	return value
 }
 
 func sendBusinessReply(

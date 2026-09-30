@@ -135,6 +135,9 @@ func TestRun_Error(t *testing.T) {
 	if last.Result.Subtype != "error_max_turns" {
 		t.Errorf("Result.Subtype = %q, want error_max_turns", last.Result.Subtype)
 	}
+	if last.Result.TerminalReason != "max_turns" || last.Result.APIErrorStatus != nil {
+		t.Errorf("structured failure = reason %q, API status %v", last.Result.TerminalReason, last.Result.APIErrorStatus)
+	}
 }
 
 // TestRun_ForwardCompat verifies the decoder tolerates future additions: an

@@ -8,15 +8,17 @@ const roleUser = "user"
 // envelope is the tolerant top-level shape of a stream-json line. Only the
 // fields we act on are decoded; unknown fields and event types are ignored.
 type envelope struct {
-	Type      string       `json:"type"`
-	Subtype   string       `json:"subtype"`
-	SessionID string       `json:"session_id"` //nolint:tagliatelle // Claude CLI emits snake_case.
-	Message   *messageBody `json:"message"`
-	IsError   bool         `json:"is_error"` //nolint:tagliatelle // Claude CLI emits snake_case.
-	Result    string       `json:"result"`
-	NumTurns  int          `json:"num_turns"`      //nolint:tagliatelle // Claude CLI emits snake_case.
-	CostUSD   float64      `json:"total_cost_usd"` //nolint:tagliatelle // Claude CLI emits snake_case.
-	Duration  int64        `json:"duration_ms"`    //nolint:tagliatelle // Claude CLI emits snake_case.
+	Type           string       `json:"type"`
+	Subtype        string       `json:"subtype"`
+	SessionID      string       `json:"session_id"` //nolint:tagliatelle // Claude CLI emits snake_case.
+	Message        *messageBody `json:"message"`
+	IsError        bool         `json:"is_error"` //nolint:tagliatelle // Claude CLI emits snake_case.
+	Result         string       `json:"result"`
+	NumTurns       int          `json:"num_turns"`        //nolint:tagliatelle // Claude CLI emits snake_case.
+	CostUSD        float64      `json:"total_cost_usd"`   //nolint:tagliatelle // Claude CLI emits snake_case.
+	Duration       int64        `json:"duration_ms"`      //nolint:tagliatelle // Claude CLI emits snake_case.
+	TerminalReason string       `json:"terminal_reason"`  //nolint:tagliatelle // Claude CLI emits snake_case.
+	APIErrorStatus *int         `json:"api_error_status"` //nolint:tagliatelle // Claude CLI emits snake_case.
 	// ParentToolUseID links an event to the subagent that produced it: when the
 	// CLI runs a subagent (an Agent/Task tool_use), the subagent's own assistant/
 	// user envelopes carry the launching tool_use's id here. It is empty for
@@ -63,13 +65,15 @@ func decode(line []byte) ([]Event, bool) {
 
 	case "result":
 		res := &RunResult{
-			Text:       env.Result,
-			SessionID:  env.SessionID,
-			NumTurns:   env.NumTurns,
-			CostUSD:    env.CostUSD,
-			DurationMS: env.Duration,
-			IsError:    env.IsError,
-			Subtype:    env.Subtype,
+			Text:           env.Result,
+			SessionID:      env.SessionID,
+			NumTurns:       env.NumTurns,
+			CostUSD:        env.CostUSD,
+			DurationMS:     env.Duration,
+			IsError:        env.IsError,
+			Subtype:        env.Subtype,
+			TerminalReason: env.TerminalReason,
+			APIErrorStatus: env.APIErrorStatus,
 		}
 		return []Event{{Type: Result, Result: res}}, true
 
