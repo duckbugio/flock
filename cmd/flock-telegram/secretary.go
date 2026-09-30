@@ -189,12 +189,18 @@ func wireSecretary(cfg config.Config, b *bot.Bot, logger *slog.Logger, runtime s
 func (m *secretaryManager) handleBotUpdate(ctx context.Context, api secretaryAPI, update *models.Update) {
 	if update != nil && update.BusinessMessage != nil {
 		msg := update.BusinessMessage
-		lane := "business_connection_" + msg.BusinessConnectionID + "_" + strconv.FormatInt(msg.Chat.ID, 10)
+		// Use the peer chat ID so a renewed Business connection cannot race the
+		// previous connection against the same owner/chat session and workspace.
+		lane := "business_chat_" + strconv.FormatInt(msg.Chat.ID, 10)
 		//nolint:contextcheck // the dispatcher owns the run context so drain can outlive the update.
 		if !m.dispatcher.TrySubmit(lane, func(runCtx context.Context) {
 			m.handleUpdate(runCtx, api, update)
 		}) {
 			slog.Warn("secretary queue full or shutting down", "chat_id", msg.Chat.ID)
+			connection, err := m.connection(ctx, api, msg.BusinessConnectionID)
+			if err == nil && connection != nil && connection.IsEnabled && m.allow(connection.User.ID) {
+				m.ownerNotice(ctx, api, connection.UserChatID, "Secretary is busy; a Business message was not processed.")
+			}
 		}
 		return
 	}

@@ -720,6 +720,34 @@ func TestSecretaryBusinessMessagesStayInDispatchOrder(t *testing.T) {
 	}
 }
 
+func TestSecretaryQueueOverflowNotifiesOwner(t *testing.T) {
+	m, _, api := testSecretary(t, config.SecretaryModeAuto)
+	runner := &secretaryBlockingRunner{started: make(chan struct{}), release: make(chan struct{}), canceled: make(chan struct{})}
+	m.runner = runner
+	first := incomingSecretaryMessage()
+	m.handleBotUpdate(context.Background(), api, &models.Update{BusinessMessage: first})
+	select {
+	case <-runner.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first Business run did not start")
+	}
+	// The dispatcher buffers 64 jobs per chat while the first run is active.
+	for i := range 65 {
+		msg := *first
+		msg.ID = first.ID + i + 1
+		m.handleBotUpdate(context.Background(), api, &models.Update{BusinessMessage: &msg})
+	}
+	if len(api.sends) != 1 || !strings.Contains(api.sends[0].Text, "Secretary is busy") {
+		t.Fatalf("queue overflow notice = %+v", api.sends)
+	}
+	m.dispatcher.Close()
+	select {
+	case <-runner.canceled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first Business run was not cancelled on close")
+	}
+}
+
 func TestSecretaryRevocationCancelsActiveAgent(t *testing.T) {
 	m, _, api := testSecretary(t, config.SecretaryModeAuto)
 	runner := &secretaryBlockingRunner{started: make(chan struct{}), release: make(chan struct{}), canceled: make(chan struct{})}

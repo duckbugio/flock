@@ -23,6 +23,8 @@ node_major: 22
 
 # Fallback if not set in group_vars/all/vars.yml
 approved_directory: /workspace
+secretary_workspace_dir: /workspace-business
+secretary_mode: "off"  # off | approval | auto; requires Telegram Business connection
 
 # Bot "environment" string. IMPORTANT: the values development / testing / production
 # trigger HARDCODED overrides inside the bot (production forces $5/user + 5 req/min,

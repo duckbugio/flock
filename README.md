@@ -51,6 +51,7 @@ The Telegram account owner must be listed in `ALLOWED_USERS`.
 Set `SECRETARY_MODE=approval` to receive an AI draft in your private chat with
 the bot and choose **Send** or **Discard**. Set `SECRETARY_MODE=auto` to send the
 draft automatically. The default is `off`. Telegram settings control chat access;
+for Ansible deployments set `secretary_mode` in the inventory variables.
 `SECRETARY_MODE` controls reply approval, while the bot's `AI_BACKEND` and model
 remain separately configured. For now, Secretary Mode is available only when
 `AI_BACKEND=claude`; other providers leave the Telegram bot running without
