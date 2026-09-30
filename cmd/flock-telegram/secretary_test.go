@@ -201,6 +201,9 @@ func TestClaudeSecretaryUsesFullFlockAgentAndResumesBusinessChat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if m.timeout != secretaryRunTimeout {
+		t.Fatalf("secretary run timeout = %v, want %v", m.timeout, secretaryRunTimeout)
+	}
 	api := &secretaryFakeAPI{connection: models.BusinessConnection{
 		ID: "conn", User: models.User{ID: 10}, UserChatID: 100, IsEnabled: true,
 		Rights: &models.BusinessBotRights{CanReply: true},

@@ -257,6 +257,10 @@ func newSecretaryManager(cfg config.Config, runtime secretaryRuntime) (*secretar
 	if runtime.workspace == nil || runtime.sessions == nil {
 		return nil, errors.New("secretary full agent requires workspace and sessions")
 	}
+	runTimeout := secretaryRunTimeout
+	if configured := cfg.ClaudeTimeout(); configured > 0 && configured < runTimeout {
+		runTimeout = configured
+	}
 	m := &secretaryManager{
 		mode:        cfg.SecretaryModeName(),
 		runner:      runner,
@@ -266,7 +270,7 @@ func newSecretaryManager(cfg config.Config, runtime secretaryRuntime) (*secretar
 		costs:       runtime.costs,
 		dispatcher:  runtime.dispatcher,
 		costCapUSD:  cfg.EffectiveCostCapUSD(),
-		timeout:     min(cfg.ClaudeTimeout(), secretaryRunTimeout),
+		timeout:     runTimeout,
 		path:        filepath.Join(cfg.ApprovedDirectory, "secretary-state.json"),
 		allow:       cfg.IsAllowed,
 		limit:       ratelimit.New(secretaryRequestsPerMinute, time.Minute),
