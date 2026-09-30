@@ -908,9 +908,15 @@ func (m *secretaryManager) sendApproved(ctx context.Context, api secretaryAPI, p
 	}
 	m.mu.Lock()
 	_, invalid := m.state.Invalid[secretaryKey(p.ConnectionID, p.ChatID, p.MessageID)]
+	cached, hasCached := m.connections[p.ConnectionID]
 	m.mu.Unlock()
 	if invalid {
 		return "Original message changed; draft was not sent."
+	}
+	if hasCached && time.Now().Before(cached.expiresAt) &&
+		(!cached.connection.IsEnabled || cached.connection.User.ID != p.OwnerID ||
+			cached.connection.Rights == nil || !cached.connection.Rights.CanReply) {
+		return "Connection is unavailable; draft was not sent."
 	}
 	err = sendBusinessReply(ctx, api, p.ConnectionID, p.ChatID, p.MessageID, p.Reply)
 	if err != nil {
