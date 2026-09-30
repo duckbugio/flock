@@ -577,6 +577,45 @@ func TestSecretaryEditWhileDraftingPreventsAutoSend(t *testing.T) {
 	}
 }
 
+func TestSecretaryBotHandlerRemainsResponsiveDuringBusinessRun(t *testing.T) {
+	m, _, api := testSecretary(t, config.SecretaryModeAuto)
+	runner := &secretaryBlockingRunner{started: make(chan struct{}), release: make(chan struct{}), canceled: make(chan struct{})}
+	m.runner = runner
+	msg := incomingSecretaryMessage()
+	returned := make(chan struct{})
+	go func() {
+		m.handleBotUpdate(context.Background(), api, &models.Update{BusinessMessage: msg})
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Business update blocked the Telegram handler")
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Business run did not start")
+	}
+	m.handleBotUpdate(context.Background(), api, &models.Update{EditedBusinessMessage: msg})
+	select {
+	case <-runner.canceled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("edit did not cancel the Business run")
+	}
+	deadline := time.After(3 * time.Second)
+	for len(m.slots) != 0 {
+		select {
+		case <-deadline:
+			t.Fatal("cancelled Business run did not release its slot")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if len(api.sends) != 0 {
+		t.Fatal("edited Business message received an auto reply")
+	}
+}
+
 func TestSecretaryRevocationCancelsActiveAgent(t *testing.T) {
 	m, _, api := testSecretary(t, config.SecretaryModeAuto)
 	runner := &secretaryBlockingRunner{started: make(chan struct{}), release: make(chan struct{}), canceled: make(chan struct{})}

@@ -183,7 +183,7 @@ func wireSecretary(cfg config.Config, b *bot.Bot, logger *slog.Logger, runtime s
 		return u != nil && (u.BusinessConnection != nil || u.BusinessMessage != nil ||
 			u.EditedBusinessMessage != nil || u.DeletedBusinessMessages != nil)
 	}, func(ctx context.Context, b *bot.Bot, u *models.Update) {
-		secretary.handleUpdate(ctx, b, u)
+		secretary.handleBotUpdate(ctx, b, u)
 	})
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, secretaryCallbackPrefix, bot.MatchTypePrefix,
 		func(ctx context.Context, b *bot.Bot, u *models.Update) {
@@ -191,6 +191,17 @@ func wireSecretary(cfg config.Config, b *bot.Bot, logger *slog.Logger, runtime s
 		})
 	logger.Info("telegram secretary enabled", "mode", cfg.SecretaryModeName())
 	return secretary.cancelActive, nil
+}
+
+// Keep Business runs off the Telegram update handler so edits, deletes,
+// revocations, approval callbacks and ordinary chats can still be processed.
+// Connection changes and invalidations stay synchronous to preserve their order.
+func (m *secretaryManager) handleBotUpdate(ctx context.Context, api secretaryAPI, update *models.Update) {
+	if update != nil && update.BusinessMessage != nil {
+		go m.handleUpdate(ctx, api, update)
+		return
+	}
+	m.handleUpdate(ctx, api, update)
 }
 
 func prepareSecretaryRuntime(cfg config.Config, runtime secretaryRuntime) (secretaryRuntime, error) {
