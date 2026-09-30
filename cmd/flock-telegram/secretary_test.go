@@ -501,7 +501,8 @@ func TestSecretaryRejectsFailedResult(t *testing.T) {
 	if err := json.Unmarshal(bytes.TrimSpace(logOutput.Bytes()), &record); err != nil {
 		t.Fatalf("decode structured failure log: %v", err)
 	}
-	if record["subtype"] != "error_during_execution" || record["terminal_reason"] != "api_error" ||
+	if record["owner_id"] != float64(10) || record["chat_key"] != "chat" ||
+		record["subtype"] != "error_during_execution" || record["terminal_reason"] != "api_error" ||
 		record["api_status"] != float64(529) || record["turns"] != float64(2) ||
 		record["duration_ms"] != float64(500) || record["text_len"] != float64(len("private conversation text")) ||
 		strings.Contains(logOutput.String(), "private conversation text") {

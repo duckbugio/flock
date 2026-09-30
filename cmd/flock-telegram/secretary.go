@@ -774,7 +774,7 @@ func (m *secretaryManager) resultText(chatKey string, ownerID int64, resuming bo
 				slog.Error("drop failed secretary session", "error", err)
 			}
 		}
-		logSecretaryRunFailure(res)
+		logSecretaryRunFailure(chatKey, ownerID, res)
 		return "", errSecretaryAIRunFailed
 	}
 	return chat.Final(res), nil
@@ -782,18 +782,20 @@ func (m *secretaryManager) resultText(chatKey string, ownerID int64, resuming bo
 
 // Keep provider failure details in the owner's bot logs without copying the
 // result text, which may contain private conversation content.
-func logSecretaryRunFailure(res *agent.RunResult) {
-	status := 0
-	if res.APIErrorStatus != nil {
-		status = *res.APIErrorStatus
-	}
-	slog.Warn("secretary AI run failed",
+func logSecretaryRunFailure(chatKey string, ownerID int64, res *agent.RunResult) {
+	attrs := []any{
+		"owner_id", ownerID,
+		"chat_key", chatKey,
 		"subtype", secretaryErrorCode(res.Subtype),
 		"terminal_reason", secretaryErrorCode(res.TerminalReason),
-		"api_status", status,
 		"turns", res.NumTurns,
 		"duration_ms", res.DurationMS,
-		"text_len", utf8.RuneCountInString(res.Text))
+		"text_len", utf8.RuneCountInString(res.Text),
+	}
+	if res.APIErrorStatus != nil {
+		attrs = append(attrs, "api_status", *res.APIErrorStatus)
+	}
+	slog.Warn("secretary AI run failed", attrs...)
 }
 
 func secretaryErrorCode(value string) string {
