@@ -483,8 +483,14 @@ func TestSecretarySkipsNonClaudeProviderWithoutStoppingBot(t *testing.T) {
 
 func TestSecretaryRejectsFailedResult(t *testing.T) {
 	m, runner, _ := testSecretary(t, config.SecretaryModeAuto)
-	runner.events = []agent.Event{{Type: agent.Result, Result: &agent.RunResult{Text: "failed", IsError: true}}}
-	if reply, err := m.draft(context.Background(), "chat", 10, "hello"); err == nil || reply != "" {
+	status := 529
+	runner.events = []agent.Event{{Type: agent.Result, Result: &agent.RunResult{
+		Text: "private conversation text", IsError: true, Subtype: "error_during_execution",
+		TerminalReason: "api_error", APIErrorStatus: &status, NumTurns: 2, DurationMS: 500,
+	}}}
+	if reply, err := m.draft(context.Background(), "chat", 10, "hello"); err == nil || reply != "" ||
+		!strings.Contains(err.Error(), "subtype=error_during_execution") ||
+		!strings.Contains(err.Error(), "api_status=529") || strings.Contains(err.Error(), "private conversation text") {
 		t.Fatalf("failed result produced reply %q, error %v", reply, err)
 	}
 }

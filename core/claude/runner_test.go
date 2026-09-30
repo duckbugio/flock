@@ -135,6 +135,19 @@ func TestRun_Error(t *testing.T) {
 	if last.Result.Subtype != "error_max_turns" {
 		t.Errorf("Result.Subtype = %q, want error_max_turns", last.Result.Subtype)
 	}
+	if last.Result.TerminalReason != "max_turns" || last.Result.APIErrorStatus != nil {
+		t.Errorf("structured failure = reason %q, API status %v", last.Result.TerminalReason, last.Result.APIErrorStatus)
+	}
+}
+
+func TestDecodeAPIErrorStatus(t *testing.T) {
+	payload := []byte(`{"type":"result","subtype":"error_during_execution",` +
+		`"is_error":true,"terminal_reason":"api_error","api_error_status":529}`)
+	events, ok := decode(payload)
+	if !ok || len(events) != 1 || events[0].Result == nil || events[0].Result.APIErrorStatus == nil ||
+		*events[0].Result.APIErrorStatus != 529 || events[0].Result.TerminalReason != "api_error" {
+		t.Fatalf("Claude error status was lost: events=%+v ok=%v", events, ok)
+	}
 }
 
 // TestRun_ForwardCompat verifies the decoder tolerates future additions: an

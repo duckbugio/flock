@@ -770,9 +770,32 @@ func (m *secretaryManager) resultText(chatKey string, ownerID int64, resuming bo
 				slog.Error("drop failed secretary session", "error", err)
 			}
 		}
-		return "", errors.New("secretary AI run failed")
+		return "", secretaryRunFailure(res)
 	}
 	return chat.Final(res), nil
+}
+
+// Keep Claude's structured failure details in the owner's bot logs without
+// copying the result text, which may contain private conversation content.
+func secretaryRunFailure(res *agent.RunResult) error {
+	status := "none"
+	if res.APIErrorStatus != nil {
+		status = strconv.Itoa(*res.APIErrorStatus)
+	}
+	return fmt.Errorf("secretary AI run failed: subtype=%s terminal_reason=%s api_status=%s turns=%d duration_ms=%d",
+		secretaryErrorCode(res.Subtype), secretaryErrorCode(res.TerminalReason), status, res.NumTurns, res.DurationMS)
+}
+
+func secretaryErrorCode(value string) string {
+	if value == "" || len(value) > 64 {
+		return "unknown"
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' && r != '-' {
+			return "unknown"
+		}
+	}
+	return value
 }
 
 func sendBusinessReply(
