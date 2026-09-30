@@ -97,6 +97,7 @@ type secretaryManager struct {
 	limit      *ratelimit.Limiter
 	dispatcher *dispatch.Dispatcher
 	lookup     singleflight.Group
+	voice      secretaryVoice
 
 	mu          sync.Mutex
 	state       secretaryState
@@ -111,12 +112,17 @@ type secretaryActiveRun struct {
 
 type secretaryRuntime struct {
 	runner       agent.Runner
+	voice        secretaryVoice
 	opts         agent.Options
 	providerName string
 	workspace    *workspace.Renderer
 	sessions     session.Store
 	costs        *cost.Store
 	dispatcher   *dispatch.Dispatcher
+}
+
+type secretaryVoice interface {
+	Transcribe(ctx context.Context, fileID string) (string, error)
 }
 
 func secretaryAvailability(cfg config.Config, providerName string) (bool, error) {
@@ -284,6 +290,7 @@ func newSecretaryManager(cfg config.Config, runtime secretaryRuntime) (*secretar
 		workspace:   runtime.workspace,
 		sessions:    runtime.sessions,
 		costs:       runtime.costs,
+		voice:       runtime.voice,
 		dispatcher:  runtime.dispatcher,
 		costCapUSD:  cfg.EffectiveCostCapUSD(),
 		timeout:     runTimeout,
@@ -534,7 +541,9 @@ func (m *secretaryManager) handleUpdate(ctx context.Context, api secretaryAPI, u
 		incoming = strings.TrimSpace(msg.Caption)
 	}
 	if incoming == "" {
-		return
+		if msg.Voice == nil || m.voice == nil {
+			return
+		}
 	}
 	connection, err := m.connection(ctx, api, msg.BusinessConnectionID)
 	if err != nil || connection == nil {
@@ -554,7 +563,37 @@ func (m *secretaryManager) handleUpdate(ctx context.Context, api secretaryAPI, u
 	if !m.claim(msg) {
 		return
 	}
+	if incoming == "" {
+		var ok bool
+		incoming, ok = m.transcribeVoice(ctx, api, connection, msg)
+		if !ok {
+			return
+		}
+	}
 	m.respond(ctx, api, connection, msg, incoming)
+}
+
+// transcribeVoice uses the ordinary Flock voice provider after the Business
+// message is authorized and deduplicated. Errors are reported to the owner.
+func (m *secretaryManager) transcribeVoice(
+	ctx context.Context, api secretaryAPI, connection *models.BusinessConnection, msg *models.Message,
+) (string, bool) {
+	if !m.canRun(ctx, api, connection.User.ID, msg) {
+		m.releaseClaim(msg)
+		return "", false
+	}
+	transcript, err := m.voice.Transcribe(ctx, msg.Voice.FileID)
+	if err != nil {
+		slog.Warn("transcribe secretary voice", "chat_id", msg.Chat.ID, "error", err)
+		m.ownerNotice(ctx, api, connection.UserChatID, "Secretary could not transcribe a Business voice message.")
+		return "", false
+	}
+	text := strings.TrimSpace(transcript)
+	if text == "" {
+		m.ownerNotice(ctx, api, connection.UserChatID, "Secretary could not make out a Business voice message.")
+		return "", false
+	}
+	return text, true
 }
 
 func (m *secretaryManager) respond(
