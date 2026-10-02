@@ -42,7 +42,8 @@ type Client struct {
 	// fileHTTP carries file BYTES in BOTH directions — a download's response body and an
 	// upload's request body. A second client rather than a second timeout, because
 	// http.Client.Timeout is per-client and covers the body either way — see fileTimeout.
-	fileHTTP *http.Client
+	fileHTTP         *http.Client
+	secretaryEnabled bool
 }
 
 // NewClient accepts HTTPS endpoints or loopback HTTP for local integration tests.
@@ -303,6 +304,12 @@ func LargestPhoto(sizes []PhotoSize) (PhotoSize, bool) {
 
 // Update is an ordered getUpdates item. Unsupported event kinds are acknowledged and ignored.
 type Update struct {
+	BusinessConnection      *SecretaryConnection
+	BusinessMessage         *SecretaryMessage
+	EditedBusinessMessage   *SecretaryMessage
+	DeletedBusinessMessages *SecretaryDeletion
+	// Delegated prevents malformed native updates from falling back to bot commands.
+	Delegated     bool
 	ID            int64          `json:"update_id"` //nolint:tagliatelle // Bot API wire spelling.
 	Message       *Message       `json:"message"`
 	CallbackQuery *CallbackQuery `json:"callback_query"` //nolint:tagliatelle // Bot API wire spelling.
@@ -346,6 +353,12 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64) ([]Update, error)
 		"offset": offset, "timeout": pollTimeoutSeconds, "limit": pollBatchSize,
 		"allowed_updates": []string{"message", "callback_query"},
 	}
+	if c.secretaryEnabled {
+		body["allowed_updates"] = []string{
+			"message", "callback_query", "business_connection",
+			"business_message", "edited_business_message", "deleted_business_messages",
+		}
+	}
 	if err := c.call(ctx, "getUpdates", body, &raw); err != nil {
 		return nil, err
 	}
@@ -384,6 +397,23 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64) ([]Update, error)
 				update.CallbackQuery = nil
 				slog.Warn("LO sent an unreadable callback query", "update_id", id)
 			}
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(item, &fields); err == nil {
+			for _, key := range []string{
+				"business_connection", "business_message",
+				"edited_business_message", "deleted_business_messages",
+			} {
+				if _, exists := fields[key]; exists {
+					update.Delegated = true
+				}
+			}
+		}
+		if update.Delegated {
+			if err := decodeSecretaryUpdate(item, &update); err != nil {
+				slog.Warn("LO sent an unreadable secretary update", "update_id", id)
+			}
+			update.Message, update.CallbackQuery = nil, nil
 		}
 		updates = append(updates, update)
 	}

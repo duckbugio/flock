@@ -188,7 +188,21 @@ func run() int {
 		}
 		voiceStore = stored
 	}
+	secretary, err := startSecretary(ctx, cfg, api, self.ID, secretaryRuntime{
+		runner: runner, opts: opts, providerName: provider.Name, workspace: ws, sessions: sessions,
+		costs: costs, dispatcher: dispatcher, voice: voiceInput,
+	})
+	if err != nil {
+		logger.Error("configure LO secretary", "error", err)
+		return 1
+	}
+	var handleSecretary func(context.Context, lo.Update) error
+	var secretaryError func() error
+	if secretary != nil {
+		handleSecretary, secretaryError = secretary.Handle, secretary.err
+	}
 	receiver := lo.NewReceiver(lo.ReceiverConfig{
+		Secretary: handleSecretary, SecretaryError: secretaryError,
 		Service:          svc,
 		Callbacks:        svc,
 		Client:           api,

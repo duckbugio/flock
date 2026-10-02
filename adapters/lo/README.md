@@ -194,3 +194,53 @@ confirmation button; account actions are disabled when keyboards are disabled.
 Local HTTP and race tests cover the request lifecycle and callback admission.
 Production acceptance still requires real bot credentials, a deployed compatible
 server, and a compatible native client.
+
+## Native LO secretary
+
+The Go adapter implements the native SDK 0.2 wire contract directly; it does not
+import the TypeScript SDK or reuse Telegram consent flags. Use a deployment with
+`lo_schema_version=1`, policy versions, independent `lo_rights` and delegated
+source contexts. Ordinary bot messages remain a separate path.
+
+Set `SECRETARY_MODE=approval` to propose a `manual_review` draft. The owner opens
+**Secretary → Replies for review** in LO and approves or discards it there. No
+Telegram callback approval buttons are used. Set `SECRETARY_MODE=auto` only when
+the owner wants automatic replies. `off` is the default. Both modes currently
+require the Claude backend, matching Flock's Telegram full-agent secretary.
+
+The connection owner must be in `LO_ALLOWED_USERS` and independently grant both
+`receive_messages` and `send_messages`. The peer is not checked against the bot
+command allow-list. Owner messages and delegated bot echoes never trigger replies.
+Consent and source policy are checked again before transcription, agent execution
+and delivery. Edits, deletion and connection changes cancel pending work. Native
+server guards remain authoritative for races with manual takeover or revocation.
+
+Secretary runs use normal Flock tools and configured MCP servers. Approval gates
+the outgoing reply, not tool actions. Workspaces and sessions are isolated by
+owner, connection, conversation and policy version under
+`<SECRETARY_WORKSPACE_DIR>/lo`, outside `APPROVED_DIRECTORY`. Compose persists
+this root in `secretary_workspace`. Host runs must set
+`LO_SECRETARY_TEMPLATE_PATH` to `core/CLAUDE.secretary-lo.md.tmpl`, plus the usual
+team paths. Changing the configured mode cancels retained work from the old mode.
+
+The private, atomically written `secretary-state.json` records admission before
+poll acknowledgement and stores each completed response before the delegated
+write. Uncertain writes retry the exact body and `lo_request_id`, including after
+restart, without rerunning tools. A crashed agent run is cancelled instead of
+replaying potentially completed tool actions. Queue-full work stays persisted;
+a persistence error stops processing. Run one process per bot token and state
+volume. State retains deduplication/invalidation for 48 hours, with bounded jobs,
+connections and total bytes; operators must not delete it to force a resend.
+
+Text and configured voice recordings are supported. Unsupported/unavailable
+attachments, generation failures, rate/cost rejection and oversized replies are
+cancelled without sending a fabricated answer; inspect structured bot logs.
+Replies must fit one native 4096 UTF-16-unit message. Only terminal agent output
+can be delivered; progress, tool traces, outbox files and scheduled follow-ups are
+not sent to delegated chats. These limits match the current secretary scope and
+are independent of ordinary LO document or streaming flags.
+
+Before live testing: publish the new Flock image, complete the LO secretary
+server/client rollout, enable the pilot owner and bot capability, grant rights in
+LO, then test review, automatic reply, voice, edit/delete and revoke while running.
+Local HTTP contract and race tests do not establish production readiness.

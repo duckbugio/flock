@@ -9,6 +9,7 @@ services:
     mem_limit: ${BOT_MEM_LIMIT:-3g}
     volumes:
       - workspace:/workspace
+      - secretary_workspace:/workspace-business
       - claude_home:/home/claude/.claude
       - codex_home:/home/claude/.codex
     logging:
@@ -16,5 +17,6 @@ services:
       options: { max-size: "10m", max-file: "3" }
 volumes:
   workspace:
+  secretary_workspace:
   claude_home:
   codex_home:
