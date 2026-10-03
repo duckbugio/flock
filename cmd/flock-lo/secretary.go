@@ -344,8 +344,9 @@ func (m *secretaryManager) handleConnectionLocked(conn lo.SecretaryConnection) {
 	}
 	allowed := m.cfg.IsLOAllowed(conn.User.ID)
 	for key, job := range m.state.Jobs {
-		if job.Message.ConnectionID == conn.ID && (!allowed || !conn.CanReply(job.Message.Context) ||
-			(job.OwnerID != 0 && conn.User.ID != job.OwnerID)) {
+		if job.Message.ConnectionID == conn.ID && conn.PolicyVersion >= job.Message.Context.PolicyVersion &&
+			(!allowed || !conn.CanReply(job.Message.Context) ||
+				(job.OwnerID != 0 && conn.User.ID != job.OwnerID)) {
 			m.invalidateLocked(key, job)
 		}
 	}
@@ -382,7 +383,8 @@ func (m *secretaryManager) admitLocked(update lo.Update) {
 		UpdateID: update.ID, Message: *msg, Mode: m.cfg.SecretaryModeName(),
 		Status: secretaryQueued, CreatedAt: time.Now().Unix(),
 	}
-	if conn, exists := m.state.Connections[msg.ConnectionID]; exists && !conn.CanReply(msg.Context) {
+	if conn, exists := m.state.Connections[msg.ConnectionID]; exists &&
+		conn.PolicyVersion >= msg.Context.PolicyVersion && !conn.CanReply(msg.Context) {
 		job.Status = secretaryCancelled
 	}
 	if !m.admissionFitsLocked(job) {
@@ -702,10 +704,12 @@ func (m *secretaryManager) connection(ctx context.Context, key string, job secre
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// A newer poll snapshot can revoke an in-flight lookup; an older one cannot reject a fresh generation.
 	latest, exists := m.state.Connections[conn.ID]
 	current := m.state.Jobs[key]
 	if m.failure != nil || current.Status == secretaryCancelled || current.Status == secretaryDone ||
-		(exists && (!latest.CanReply(job.Message.Context) || latest.User.ID != conn.User.ID)) {
+		(exists && latest.PolicyVersion >= conn.PolicyVersion &&
+			(!latest.CanReply(job.Message.Context) || latest.User.ID != conn.User.ID)) {
 		return conn, errSecretaryConsent
 	}
 	return conn, nil

@@ -253,3 +253,41 @@ func TestSecretaryGuardDenialsAreObservableAndRateWorkCanResume(t *testing.T) {
 		})
 	}
 }
+
+func TestSecretaryNewPolicyDoesNotTrustStaleConsentCache(t *testing.T) {
+	t.Parallel()
+	manager, api, runner := secretaryFixture(t, config.SecretaryModeAuto)
+	stale := api.connection
+	stale.Enabled = false
+	manager.state.Connections[stale.ID] = stale
+	api.connection.PolicyVersion++
+	msg := secretaryMessage()
+	msg.Context.PolicyVersion = api.connection.PolicyVersion
+	key := admitSecretary(t, manager, msg)
+	// An older connection update must not invalidate a newer source generation.
+	if err := manager.Handle(t.Context(), lo.Update{ID: 13, BusinessConnection: &stale}); err != nil {
+		t.Fatal(err)
+	}
+	manager.process(t.Context(), key)
+	if runner.calls != 1 || api.sends != 1 || manager.state.Jobs[key].Status != secretaryDone {
+		t.Fatal("older cached consent blocked a server-authorized newer source")
+	}
+}
+
+func TestSecretaryNewerRevocationStillWinsAgainstFreshLookup(t *testing.T) {
+	t.Parallel()
+	manager, api, runner := secretaryFixture(t, config.SecretaryModeAuto)
+	key := admitSecretary(t, manager, secretaryMessage())
+	api.onLookup = func() {
+		revoked := api.connection
+		revoked.PolicyVersion++
+		revoked.Enabled = false
+		if err := manager.Handle(t.Context(), lo.Update{ID: 13, BusinessConnection: &revoked}); err != nil {
+			t.Error(err)
+		}
+	}
+	manager.process(t.Context(), key)
+	if runner.calls != 0 || api.sends != 0 || manager.state.Jobs[key].Status != secretaryCancelled {
+		t.Fatal("stale in-flight lookup overrode a newer revocation")
+	}
+}
