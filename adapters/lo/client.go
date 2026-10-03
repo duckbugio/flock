@@ -349,15 +349,12 @@ func (c *Client) GetMe(ctx context.Context) (User, error) {
 // until the platform sends another, which is the one stall this cannot remove.
 func (c *Client) GetUpdates(ctx context.Context, offset int64) ([]Update, error) {
 	var raw []json.RawMessage
-	body := map[string]any{
-		"offset": offset, "timeout": pollTimeoutSeconds, "limit": pollBatchSize,
-		"allowed_updates": []string{"message", "callback_query"},
-	}
+	allowed := []string{"message", "callback_query"}
 	if c.secretaryEnabled {
-		body["allowed_updates"] = []string{
-			"message", "callback_query", "business_connection",
-			"business_message", "edited_business_message", "deleted_business_messages",
-		}
+		allowed = append(allowed, "business_connection", "business_message", "edited_business_message", "deleted_business_messages")
+	}
+	body := map[string]any{
+		"offset": offset, "timeout": pollTimeoutSeconds, "limit": pollBatchSize, "allowed_updates": allowed,
 	}
 	if err := c.call(ctx, "getUpdates", body, &raw); err != nil {
 		return nil, err

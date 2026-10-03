@@ -30,20 +30,24 @@ import (
 )
 
 const (
-	secretaryStateVersion      = 1
-	secretaryMaxJobs           = 10000
-	secretaryMaxConnections    = 1024
-	secretaryMaxStateBytes     = 32 << 20
-	secretaryIncomingRunes     = 8000
-	secretaryRequestsPerMinute = 30
-	secretaryLifetime          = 48 * time.Hour
-	secretaryRetryInterval     = 15 * time.Second
-	secretaryRunTimeout        = 10 * time.Minute
-	secretaryQueued            = "queued"
-	secretaryRunning           = "running"
-	secretaryPrepared          = "prepared"
-	secretaryDone              = "done"
-	secretaryCancelled         = "cancelled"
+	secretaryRetryMultiplier      = 2
+	secretaryStateVersion         = 1
+	secretaryMaxJobs              = 10000
+	secretaryMaxConnections       = 1024
+	secretaryMaxStateBytes        = 32 << 20
+	secretaryReplyReserveBytes    = 32 << 10
+	secretaryMetadataReserveBytes = 2 << 20
+	secretaryIncomingRunes        = 8000
+	secretaryRequestsPerMinute    = 30
+	secretaryLifetime             = 48 * time.Hour
+	secretaryRetryInterval        = 15 * time.Second
+	secretaryMaxRetryInterval     = 5 * time.Minute
+	secretaryRunTimeout           = 10 * time.Minute
+	secretaryQueued               = "queued"
+	secretaryRunning              = "running"
+	secretaryPrepared             = "prepared"
+	secretaryDone                 = "done"
+	secretaryCancelled            = "cancelled"
 )
 
 var errSecretaryConsent = errors.New("LO secretary consent or source is no longer valid")
@@ -55,16 +59,19 @@ type secretaryAPI interface {
 }
 
 type secretaryJob struct {
-	UpdateID  int64               `json:"updateId"`
-	Message   lo.SecretaryMessage `json:"message"`
-	OwnerID   int64               `json:"ownerId"`
-	Mode      string              `json:"mode"`
-	Status    string              `json:"status"`
-	Action    lo.SecretaryAction  `json:"action"`
-	CreatedAt int64               `json:"createdAt"`
+	UpdateID      int64               `json:"updateId"`
+	Message       lo.SecretaryMessage `json:"message"`
+	OwnerID       int64               `json:"ownerId"`
+	Mode          string              `json:"mode"`
+	Status        string              `json:"status"`
+	Action        lo.SecretaryAction  `json:"action"`
+	CreatedAt     int64               `json:"createdAt"`
+	Attempts      int                 `json:"attempts,omitempty"`
+	NextAttemptAt int64               `json:"nextAttemptAt,omitempty"`
 }
 
 type secretaryState struct {
+	UpdateFloor int64                             `json:"updateFloor"`
 	Version     int                               `json:"version"`
 	BotID       int64                             `json:"botId"`
 	Jobs        map[string]secretaryJob           `json:"jobs"`
@@ -188,7 +195,7 @@ func (m *secretaryManager) load() error {
 	if err := json.NewDecoder(file).Decode(&m.state); err != nil {
 		return fmt.Errorf("decode LO secretary state: %w", err)
 	}
-	if m.state.Version != secretaryStateVersion || m.state.BotID != m.botID || m.state.Jobs == nil ||
+	if m.state.UpdateFloor < 0 || m.state.Version != secretaryStateVersion || m.state.BotID != m.botID || m.state.Jobs == nil ||
 		m.state.Connections == nil || m.state.Invalid == nil || len(m.state.Invalid) > secretaryMaxJobs ||
 		len(m.state.Jobs) > secretaryMaxJobs || len(m.state.Connections) > secretaryMaxConnections {
 		return errors.New("invalid LO secretary state identity or bounds")
@@ -211,6 +218,11 @@ func (m *secretaryManager) load() error {
 			return errors.New("invalid persisted LO secretary job status")
 		}
 	}
+	for key, job := range m.state.Jobs {
+		if job.Status == secretaryDone || job.Status == secretaryCancelled {
+			m.state.Jobs[key] = compactSecretaryJob(job)
+		}
+	}
 	for id, conn := range m.state.Connections {
 		if !conn.Valid() || id != conn.ID {
 			return errors.New("invalid persisted LO consent")
@@ -221,7 +233,8 @@ func (m *secretaryManager) load() error {
 }
 
 func (m *secretaryManager) validateJob(key string, job secretaryJob) error {
-	if !job.Message.Valid() || job.CreatedAt <= 0 || key != secretaryJobKey(m.botID, job.Message) {
+	if !job.Message.Valid() || job.CreatedAt <= 0 || job.Attempts < 0 || job.NextAttemptAt < 0 ||
+		key != secretaryJobKey(m.botID, job.Message) {
 		return errors.New("invalid persisted LO secretary job")
 	}
 	if job.Mode != config.SecretaryModeApproval && job.Mode != config.SecretaryModeAuto {
@@ -266,97 +279,188 @@ func (m *secretaryManager) err() error {
 	return m.failure
 }
 
-func (m *secretaryManager) pruneLocked() {
+func (m *secretaryManager) pruneLocked() bool {
+	changed := false
 	cutoff := time.Now().Add(-secretaryLifetime).Unix()
 	for key, at := range m.state.Invalid {
 		if at < cutoff {
 			delete(m.state.Invalid, key)
+			changed = true
 		}
 	}
 	for key, job := range m.state.Jobs {
 		if job.CreatedAt < cutoff && !m.scheduled[key] {
 			delete(m.state.Jobs, key)
+			changed = true
 		}
 	}
+	return changed
 }
 
-// Handle persists admission and invalidation before the polling receiver acknowledges the update.
-func (m *secretaryManager) Handle(_ context.Context, update lo.Update) error {
+// Handle persists the native update watermark and changes before polling acknowledgement.
+func (m *secretaryManager) Handle(_ context.Context, update lo.Update) (err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.failure != nil {
+		return m.failure
+	}
+	if update.ID > 0 && update.ID <= m.state.UpdateFloor {
+		return nil
+	}
 	defer func() {
+		if err != nil {
+			return
+		}
+		m.state.UpdateFloor = max(m.state.UpdateFloor, update.ID)
+		err = m.saveLocked()
 		select {
 		case m.wake <- struct{}{}:
 		default:
 		}
 	}()
-	if m.failure != nil {
-		return m.failure
-	}
 	m.pruneLocked()
 	if conn := update.BusinessConnection; conn != nil {
-		previous, exists := m.state.Connections[conn.ID]
-		if exists && conn.PolicyVersion < previous.PolicyVersion {
-			return nil
-		}
-		if !exists && len(m.state.Connections) >= secretaryMaxConnections {
-			return errors.New("LO secretary connection limit reached")
-		}
-		m.state.Connections[conn.ID] = *conn
-		for key, job := range m.state.Jobs {
-			if job.Message.ConnectionID == conn.ID && (!conn.CanReply(job.Message.Context) || (job.OwnerID != 0 &&
-				conn.User.ID != job.OwnerID)) {
-				m.invalidateLocked(key, job)
-			}
-		}
-		return m.saveLocked()
+		m.handleConnectionLocked(*conn)
+		return nil
 	}
 	if edited := update.EditedBusinessMessage; edited != nil {
-		if err := m.invalidateSourceLocked(edited.ConnectionID, edited.Context, []lo.SecretaryNumber{edited.ID}); err != nil {
-			return err
-		}
-		return m.saveLocked()
+		m.invalidateSourceLocked(edited.ConnectionID, edited.Context, []lo.SecretaryNumber{edited.ID})
+		return nil
 	}
 	if deleted := update.DeletedBusinessMessages; deleted != nil {
-		if err := m.invalidateSourceLocked(deleted.ConnectionID, deleted.Context, deleted.MessageIDs); err != nil {
-			return err
-		}
-		return m.saveLocked()
+		m.invalidateSourceLocked(deleted.ConnectionID, deleted.Context, deleted.MessageIDs)
+		return nil
 	}
+	m.admitLocked(update)
+	return nil
+}
+
+func (m *secretaryManager) handleConnectionLocked(conn lo.SecretaryConnection) {
+	// Owner identity is sufficient; unbounded display metadata is not retained.
+	conn.User.Username = ""
+	previous, exists := m.state.Connections[conn.ID]
+	if exists && conn.PolicyVersion < previous.PolicyVersion {
+		return
+	}
+	allowed := m.cfg.IsLOAllowed(conn.User.ID)
+	for key, job := range m.state.Jobs {
+		if job.Message.ConnectionID == conn.ID && (!allowed || !conn.CanReply(job.Message.Context) ||
+			(job.OwnerID != 0 && conn.User.ID != job.OwnerID)) {
+			m.invalidateLocked(key, job)
+		}
+	}
+	if !allowed {
+		delete(m.state.Connections, conn.ID)
+		slog.Warn("LO secretary connection owner is not allowed", "owner_id", conn.User.ID)
+		return
+	}
+	if !exists && len(m.state.Connections) >= secretaryMaxConnections && !m.evictConnectionLocked() {
+		slog.Warn("LO secretary connection capacity reached", "owner_id", conn.User.ID)
+		return
+	}
+	m.state.Connections[conn.ID] = conn
+}
+
+func (m *secretaryManager) admitLocked(update lo.Update) {
 	msg := update.BusinessMessage
 	if msg == nil || !msg.Valid() || msg.BotID != 0 {
-		return nil
+		return
 	}
 	if _, invalid := m.state.Invalid[secretarySourceKey(msg.ConnectionID, msg.Context, msg.ID)]; invalid {
-		return nil
+		return
 	}
 	key := secretaryJobKey(m.botID, *msg)
 	if _, exists := m.state.Jobs[key]; exists {
-		return nil
+		return
 	}
-	if len(m.state.Jobs) >= secretaryMaxJobs {
-		return errors.New("LO secretary job limit reached")
+	if len(m.state.Jobs) >= secretaryMaxJobs && !m.evictTerminalLocked() {
+		// Keep every live prepared action and its idempotency key. Only this incoming message is dropped.
+		slog.Warn("LO secretary live queue capacity reached; message skipped", "update_id", update.ID)
+		return
 	}
-	m.state.Jobs[key] = secretaryJob{
+	job := secretaryJob{
 		UpdateID: update.ID, Message: *msg, Mode: m.cfg.SecretaryModeName(),
 		Status: secretaryQueued, CreatedAt: time.Now().Unix(),
 	}
 	if conn, exists := m.state.Connections[msg.ConnectionID]; exists && !conn.CanReply(msg.Context) {
-		job := m.state.Jobs[key]
 		job.Status = secretaryCancelled
-		m.state.Jobs[key] = job
 	}
-	return m.saveLocked()
+	if !m.admissionFitsLocked(job) {
+		slog.Warn("LO secretary state byte capacity reached; message skipped", "update_id", update.ID)
+		return
+	}
+	m.state.Jobs[key] = job
 }
 
-func (m *secretaryManager) invalidateSourceLocked(connection string, scope lo.SecretaryContext, ids []lo.SecretaryNumber) error {
-	for _, id := range ids {
-		key := secretarySourceKey(connection, scope, id)
-		if _, exists := m.state.Invalid[key]; !exists && len(m.state.Invalid) >= secretaryMaxJobs {
-			return errors.New("LO secretary invalidation limit reached")
-		}
-		m.state.Invalid[key] = time.Now().Unix()
+// Reserve worst-case JSON text bytes for every live job's eventual delegated action.
+// Queue pressure must not become a persistence failure when agents prepare replies.
+func (m *secretaryManager) admissionFitsLocked(job secretaryJob) bool {
+	data, err := json.Marshal(m.state)
+	if err != nil {
+		return false
 	}
+	incoming, err := json.Marshal(job)
+	if err != nil {
+		return false
+	}
+	live := 1
+	for _, existing := range m.state.Jobs {
+		if existing.Status != secretaryDone && existing.Status != secretaryCancelled {
+			live++
+		}
+	}
+	return len(data)+len(incoming)+live*secretaryReplyReserveBytes+secretaryMetadataReserveBytes <= secretaryMaxStateBytes
+}
+
+func compactSecretaryJob(job secretaryJob) secretaryJob {
+	job.Message.Text, job.Message.Caption, job.Message.MediaStatus = "", "", ""
+	job.Message.Attachments = nil
+	job.Action = lo.SecretaryAction{}
+	return job
+}
+
+func (m *secretaryManager) evictTerminalLocked() bool {
+	oldest := ""
+	for key, job := range m.state.Jobs {
+		if m.scheduled[key] || (job.Status != secretaryDone && job.Status != secretaryCancelled) {
+			continue
+		}
+		if oldest == "" || job.CreatedAt < m.state.Jobs[oldest].CreatedAt {
+			oldest = key
+		}
+	}
+	if oldest == "" {
+		return false
+	}
+	// UpdateFloor survives compaction: polling redelivery cannot replay an evicted terminal agent run.
+	delete(m.state.Jobs, oldest)
+	return true
+}
+
+func (m *secretaryManager) evictConnectionLocked() bool {
+	live := make(map[string]bool)
+	for _, job := range m.state.Jobs {
+		if job.Status != secretaryDone && job.Status != secretaryCancelled {
+			live[job.Message.ConnectionID] = true
+		}
+	}
+	oldest := ""
+	for id, conn := range m.state.Connections {
+		if live[id] {
+			continue
+		}
+		if oldest == "" || conn.Date < m.state.Connections[oldest].Date {
+			oldest = id
+		}
+	}
+	if oldest == "" {
+		return false
+	}
+	delete(m.state.Connections, oldest)
+	return true
+}
+
+func (m *secretaryManager) invalidateSourceLocked(connection string, scope lo.SecretaryContext, ids []lo.SecretaryNumber) {
 	for key, job := range m.state.Jobs {
 		if job.Message.ConnectionID != connection || job.Message.Context.ConversationID != scope.ConversationID {
 			continue
@@ -367,7 +471,19 @@ func (m *secretaryManager) invalidateSourceLocked(connection string, scope lo.Se
 			}
 		}
 	}
-	return nil
+	for _, id := range ids {
+		key := secretarySourceKey(connection, scope, id)
+		if _, exists := m.state.Invalid[key]; !exists && len(m.state.Invalid) >= secretaryMaxJobs {
+			oldest := ""
+			for candidate, at := range m.state.Invalid {
+				if oldest == "" || at < m.state.Invalid[oldest] {
+					oldest = candidate
+				}
+			}
+			delete(m.state.Invalid, oldest)
+		}
+		m.state.Invalid[key] = time.Now().Unix()
+	}
 }
 
 func secretarySourceKey(connection string, scope lo.SecretaryContext, id lo.SecretaryNumber) string {
@@ -379,7 +495,7 @@ func (m *secretaryManager) invalidateLocked(key string, job secretaryJob) {
 		return
 	}
 	job.Status = secretaryCancelled
-	m.state.Jobs[key] = job
+	m.state.Jobs[key] = compactSecretaryJob(job)
 	if cancel := m.active[key]; cancel != nil {
 		cancel()
 	}
@@ -410,9 +526,15 @@ func (m *secretaryManager) submit() {
 	if m.failure != nil {
 		return
 	}
+	if m.pruneLocked() {
+		if err := m.saveLocked(); err != nil {
+			return
+		}
+	}
+	now := time.Now().Unix()
 	keys := make([]string, 0, len(m.state.Jobs))
 	for key, job := range m.state.Jobs {
-		if !m.scheduled[key] && (job.Status == secretaryQueued || job.Status == secretaryPrepared) {
+		if !m.scheduled[key] && job.NextAttemptAt <= now && (job.Status == secretaryQueued || job.Status == secretaryPrepared) {
 			keys = append(keys, key)
 		}
 	}
@@ -443,6 +565,8 @@ func (m *secretaryManager) process(ctx context.Context, key string) {
 	if err != nil {
 		if errors.Is(err, errSecretaryConsent) {
 			m.finish(key, secretaryCancelled)
+		} else {
+			m.retry(key, err)
 		}
 		return
 	}
@@ -456,6 +580,8 @@ func (m *secretaryManager) process(ctx context.Context, key string) {
 	if _, err := m.connection(ctx, key, job); err != nil {
 		if errors.Is(err, errSecretaryConsent) {
 			m.finish(key, secretaryCancelled)
+		} else {
+			m.retry(key, err)
 		}
 		return
 	}
@@ -474,18 +600,46 @@ func (m *secretaryManager) process(ctx context.Context, key string) {
 	var apiErr *lo.APIError
 	if errors.As(err, &apiErr) && apiErr.Code >= 400 && apiErr.Code < 500 && apiErr.Code != 429 {
 		m.finish(key, secretaryCancelled)
+	} else {
+		m.retry(key, err)
 	}
 	// An uncertain write remains prepared: retry the identical body and idempotency key, never rerun tools.
 	slog.Warn("LO secretary delivery failed", "update_id", job.UpdateID, "error", err)
 }
 
+func (m *secretaryManager) retry(key string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job, exists := m.state.Jobs[key]
+	if !exists || m.failure != nil || (job.Status != secretaryQueued && job.Status != secretaryPrepared) {
+		return
+	}
+	delay := secretaryRetryInterval
+	for range job.Attempts {
+		delay = min(delay*secretaryRetryMultiplier, secretaryMaxRetryInterval)
+		if delay == secretaryMaxRetryInterval {
+			break
+		}
+	}
+	job.Attempts = min(job.Attempts+1, secretaryMaxJobs)
+	if after, ok := lo.RetryAfter(err); ok && after > delay {
+		delay = min(after, secretaryLifetime)
+	}
+	job.NextAttemptAt = time.Now().Add(delay).Unix()
+	m.state.Jobs[key] = job
+	if saveErr := m.saveLocked(); saveErr != nil {
+		slog.Error("persist LO secretary retry", "error", saveErr)
+	}
+}
+
 func (m *secretaryManager) prepare(ctx context.Context, key string, job secretaryJob, ownerID int64) (secretaryJob, bool) {
 	if !m.limit.Allow(ownerID, time.Now()) {
-		m.finish(key, secretaryCancelled)
+		slog.Warn("LO secretary deferred by rate limit", "update_id", job.UpdateID, "owner_id", ownerID, "reason", "rate_limit")
 		return job, false
 	}
-	if ok, _ := chat.CheckGuards(nil, m.runtime.costs, chat.GuardConfig{CostCapUSD: m.cfg.EffectiveCostCapUSD()},
+	if ok, reason := chat.CheckGuards(nil, m.runtime.costs, chat.GuardConfig{CostCapUSD: m.cfg.EffectiveCostCapUSD()},
 		ownerID); !ok {
+		slog.Warn("LO secretary cancelled by cost cap", "update_id", job.UpdateID, "owner_id", ownerID, "reason", reason)
 		m.finish(key, secretaryCancelled)
 		return job, false
 	}
@@ -576,7 +730,7 @@ func (m *secretaryManager) finish(key, status string) {
 		return
 	}
 	job.Status = status
-	m.state.Jobs[key] = job
+	m.state.Jobs[key] = compactSecretaryJob(job)
 	if err := m.saveLocked(); err != nil {
 		slog.Error("save LO secretary completion", "error", err)
 	}

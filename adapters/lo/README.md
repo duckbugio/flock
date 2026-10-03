@@ -226,15 +226,38 @@ team paths. Changing the configured mode cancels retained work from the old mode
 The private, atomically written `secretary-state.json` records admission before
 poll acknowledgement and stores each completed response before the delegated
 write. Uncertain writes retry the exact body and `lo_request_id`, including after
-restart, without rerunning tools. A crashed agent run is cancelled instead of
-replaying potentially completed tool actions. Queue-full work stays persisted;
-a persistence error stops processing. Run one process per bot token and state
-volume. State retains deduplication/invalidation for 48 hours, with bounded jobs,
-connections and total bytes; operators must not delete it to force a resend.
+restart, without rerunning tools. Retry attempts and deadlines are persisted:
+backoff starts at 15 seconds and doubles to five minutes; a larger server
+`retry_after` is respected up to the 48-hour lifetime. A crashed agent run is
+cancelled instead of replaying potentially completed tool actions.
+
+State is bounded to 10,000 jobs/invalidation keys, 1,024 connection snapshots
+and 32 MiB, including reserved space for eventual replies and metadata. Capacity
+pressure evicts the oldest terminal jobs, invalidations or inactive connections;
+if live jobs or reserved bytes fill the queue, only the incoming message is
+logged and skipped, with polling acknowledgement preserved. Live prepared
+responses and their request IDs are never evicted for new work. Owners outside
+`LO_ALLOWED_USERS` do not occupy connection snapshots. Terminal payloads are
+compacted, and the persisted native update watermark rejects acknowledged update
+redelivery after compaction/restart. Deduplication and invalidation records are
+retained for up to 48 hours, subject to capacity; the pump also prunes them when
+no updates arrive. Run one process per bot token and state volume.
+
+A persistence error, invalid state, unsupported state version or different bot
+identity intentionally stops the entire LO process before polling acknowledgement.
+Separate command routing does not isolate the process from unsafe storage. The
+state must not be silently reset or discarded: prepared writes can be uncertain
+and interrupted tool actions cannot safely be replayed. Stop the process, preserve
+the state/volume and investigate the recorded request IDs before recovery. Restore
+a verified backup or migrate the state with its pending actions reconciled. A
+replacement bot needs a separate state volume; rotating a token for the same bot
+keeps its identity and state. Do not delete state to force a resend.
 
 Text and configured voice recordings are supported. Unsupported/unavailable
-attachments, generation failures, rate/cost rejection and oversized replies are
-cancelled without sending a fabricated answer; inspect structured bot logs.
+attachments, generation failures, cost rejection and oversized replies are
+cancelled without sending a fabricated answer. Rate-limited jobs stay queued
+for a later window. Rate/cost denials log `update_id`, `owner_id` and `reason`;
+inspect structured bot logs.
 Replies must fit one native 4096 UTF-16-unit message. Only terminal agent output
 can be delivered; progress, tool traces, outbox files and scheduled follow-ups are
 not sent to delegated chats. These limits match the current secretary scope and
@@ -244,3 +267,17 @@ Before live testing: publish the new Flock image, complete the LO secretary
 server/client rollout, enable the pilot owner and bot capability, grant rights in
 LO, then test review, automatic reply, voice, edit/delete and revoke while running.
 Local HTTP contract and race tests do not establish production readiness.
+
+Contract regression fixtures in `testdata/secretary-sdk-0.2.json` are generated
+by the actual [SDK 0.2 HTTP adapter](https://github.com/lo-ink/lo-platform-adapters/blob/3cd0095a27467ed4f494b329158a365c44951daa/packages/bot-http-lo/src/secretary.ts).
+The generator validates native receipts with that adapter before writing the
+fixtures. Go tests compare delegated request bodies against those
+fixtures, including IDs above JavaScript's safe integer range. Regenerate after
+building the pinned SDK revision:
+
+```sh
+node adapters/lo/testdata/generate-secretary-sdk.mjs /path/to/packages/bot-http-lo/dist/secretary.js
+```
+
+The merged Bot API also covers lossless string input in
+[`TestBusinessCanonicalStringIDsPreservePrecisionAndUseAuthenticatedGeneration`](https://git.lo.ink/LO/messenger/src/commit/9a667c7b8ff1a2f0655c8bed94b5511ee3c5e90a/bots/bot-api-service/internal/usecase/botmethod/business_test.go).

@@ -11,6 +11,16 @@ import (
 	"strings"
 )
 
+// Native SDK 0.2 bounds (human and bot namespaces differ):
+// https://github.com/lo-ink/lo-platform-adapters/tree/3cd0095a27467ed4f494b329158a365c44951daa
+// See packages/bot-http-lo/src/secretary.ts and the generated fixtures in testdata/.
+const (
+	maxSecretaryConversationID = 2147483647
+	maxSecretaryUserID         = 999999999999999
+	minSecretaryBotID          = 1000000000000000
+	maxSecretarySafeInteger    = 9007199254740991
+)
+
 // SecretaryNumber decodes numeric or string int64 IDs without floating-point conversion.
 type SecretaryNumber int64
 
@@ -47,8 +57,8 @@ type SecretaryContext struct {
 
 // Valid checks the native SDK's ID bounds.
 func (c SecretaryContext) Valid() bool {
-	return c.ConversationID > 0 && c.ConversationID <= 2147483647 &&
-		c.ChatID > 0 && c.ChatID <= 999999999999999 && c.PolicyVersion > 0 &&
+	return c.ConversationID > 0 && c.ConversationID <= maxSecretaryConversationID &&
+		c.ChatID > 0 && c.ChatID <= maxSecretaryUserID && c.PolicyVersion > 0 &&
 		c.SourceMessageID > 0 && c.SourceRevision > 0
 }
 
@@ -96,7 +106,7 @@ func ValidSecretaryConnectionID(id string) bool {
 // Valid rejects Telegram-shaped connections without the native LO consent contract.
 func (c SecretaryConnection) Valid() bool {
 	if !ValidSecretaryConnectionID(c.ID) || c.SchemaVersion != 1 || c.PolicyVersion <= 0 ||
-		c.User.ID <= 0 || c.User.ID > 999999999999999 || c.User.IsBot || c.Date <= 0 || c.Rights == nil {
+		c.User.ID <= 0 || c.User.ID > maxSecretaryUserID || c.User.IsBot || c.Date <= 0 || c.Rights == nil {
 		return false
 	}
 	seen := make(map[string]bool, len(c.Rights))
@@ -168,9 +178,9 @@ func (m *SecretaryMessage) UnmarshalJSON(data []byte) error {
 func (m SecretaryMessage) Valid() bool {
 	return ValidSecretaryConnectionID(m.ConnectionID) && m.Context.Valid() && m.ID == m.Context.SourceMessageID &&
 		m.Chat.ID == m.Context.ChatID && m.Chat.Type == privateChatType && m.From.ID > 0 &&
-		m.From.ID <= 999999999999999 && !m.From.IsBot && m.Date > 0 &&
+		m.From.ID <= maxSecretaryUserID && !m.From.IsBot && m.Date > 0 &&
 		m.EventID != "" && len(m.EventID) <= 512 &&
-		(m.BotID == 0 || (m.BotID >= 1000000000000000 && m.BotID <= 9007199254740991)) &&
+		(m.BotID == 0 || (m.BotID >= minSecretaryBotID && m.BotID <= maxSecretarySafeInteger)) &&
 		((m.MediaStatus == "" && m.Attachments == nil) ||
 			(m.MediaStatus == "available" && len(m.Attachments) > 0 && len(m.Attachments) <= 10) ||
 			((m.MediaStatus == "unavailable" || m.MediaStatus == "unsupported") && m.Attachments == nil))
@@ -253,8 +263,8 @@ func (c *Client) ProposeBusinessDraft(ctx context.Context, action SecretaryActio
 	}
 	if !ValidSecretaryConnectionID(result.ID) || result.ConnectionID != action.ConnectionID ||
 		result.ConversationID != action.Context.ConversationID || result.ChatID != action.ChatID ||
-		result.SourceMessageID != action.Context.SourceMessageID || result.Revision <= 0 || result.BotID < 1000000000000000 ||
-		result.BotID > 9007199254740991 || result.Date <= 0 || result.ExpiresAt <= result.Date ||
+		result.SourceMessageID != action.Context.SourceMessageID || result.Revision <= 0 || result.BotID < minSecretaryBotID ||
+		result.BotID > maxSecretarySafeInteger || result.Date <= 0 || result.ExpiresAt <= result.Date ||
 		(result.State == "sent") != (result.MessageID != nil) ||
 		!slices.Contains([]string{
 			"manual_review", "owner_cancelled", "policy_changed", "source_changed",
@@ -277,7 +287,7 @@ func (c *Client) SendSecretaryText(ctx context.Context, action SecretaryAction, 
 	}
 	if result.ID <= 0 || result.ConnectionID != action.ConnectionID || result.Chat.ID != action.ChatID ||
 		result.Chat.Type != privateChatType || result.From.ID != ownerID || result.From.IsBot ||
-		result.BotID < 1000000000000000 || result.BotID > 9007199254740991 || result.Text != action.Text {
+		result.BotID < minSecretaryBotID || result.BotID > maxSecretarySafeInteger || result.Text != action.Text {
 		return errors.New("invalid LO secretary send response")
 	}
 	return nil

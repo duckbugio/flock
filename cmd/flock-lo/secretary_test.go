@@ -145,7 +145,7 @@ func secretaryMessage() lo.SecretaryMessage {
 
 func admitSecretary(t *testing.T, manager *secretaryManager, msg lo.SecretaryMessage) string {
 	t.Helper()
-	if err := manager.Handle(t.Context(), lo.Update{ID: 1, Delegated: true, BusinessMessage: &msg}); err != nil {
+	if err := manager.Handle(t.Context(), lo.Update{ID: int64(msg.ID), Delegated: true, BusinessMessage: &msg}); err != nil {
 		t.Fatal(err)
 	}
 	return secretaryJobKey(manager.botID, msg)
