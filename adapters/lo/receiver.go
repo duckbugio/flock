@@ -45,12 +45,15 @@ type Service interface {
 
 // ReceiverConfig owns the LO allow-list separately from Telegram/VK identities.
 type ReceiverConfig struct {
-	Callbacks CallbackService
-	Service   Service
-	Client    *Client
-	Transport *Transport
-	Username  string
-	BotID     int64
+	// Secretary persists native updates before the polling offset acknowledges them.
+	Secretary      func(context.Context, Update) error
+	SecretaryError func() error
+	Callbacks      CallbackService
+	Service        Service
+	Client         *Client
+	Transport      *Transport
+	Username       string
+	BotID          int64
 	// ConflictDelay overrides retry timing; nonpositive values use the production default.
 	ConflictDelay  time.Duration
 	IsAllowed      func(int64) bool
@@ -104,6 +107,11 @@ func (r *Receiver) Run(ctx context.Context) error {
 	var offset int64
 	conflicts := 0
 	for ctx.Err() == nil {
+		if r.cfg.SecretaryError != nil {
+			if err := r.cfg.SecretaryError(); err != nil {
+				return err
+			}
+		}
 		updates, err := r.cfg.Client.GetUpdates(ctx, offset)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -132,7 +140,13 @@ func (r *Receiver) Run(ctx context.Context) error {
 			if update.ID == math.MaxInt64 {
 				return errors.New("LO update ID exceeds acknowledgement range")
 			}
-			r.HandleUpdate(ctx, update)
+			if update.Delegated && r.cfg.Secretary != nil {
+				if err := r.cfg.Secretary(ctx, update); err != nil {
+					return err
+				}
+			} else {
+				r.HandleUpdate(ctx, update)
+			}
 			offset = update.ID + 1
 		}
 		// Empty or stale-only immediate responses must not become a busy polling loop.
@@ -195,6 +209,10 @@ func (r *Receiver) admits(msg *Message) (text string, replyToBot, ok bool) {
 
 // HandleUpdate gates every command and message before invoking the shared service.
 func (r *Receiver) HandleUpdate(ctx context.Context, update Update) {
+	if update.Delegated || update.BusinessConnection != nil || update.BusinessMessage != nil ||
+		update.EditedBusinessMessage != nil || update.DeletedBusinessMessages != nil {
+		return
+	}
 	if update.CallbackQuery != nil {
 		r.handleCallback(ctx, update.CallbackQuery)
 		return

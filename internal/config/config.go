@@ -113,7 +113,7 @@ type Config struct {
 	// Telegram (cmd/flock-telegram). Validated by ValidateTelegram, not env-required.
 	TelegramBotToken    string `env:"TELEGRAM_BOT_TOKEN"`
 	TelegramBotUsername string `env:"TELEGRAM_BOT_USERNAME"`
-	// SecretaryMode controls Telegram Business message handling. The selected
+	// SecretaryMode controls Telegram Business and native LO secretary message handling. The selected
 	// AI_BACKEND and its model generate replies. Supported: off, approval, auto.
 	SecretaryMode string `env:"SECRETARY_MODE" envDefault:"off"`
 
@@ -185,10 +185,11 @@ type Config struct {
 	// Workspace + behavior.
 	ApprovedDirectory string `env:"APPROVED_DIRECTORY" envDefault:"/workspace"`
 	// SecretaryWorkspaceDir is a separate persistent root for Business chat workspaces.
-	SecretaryWorkspaceDir string `env:"SECRETARY_WORKSPACE_DIR" envDefault:"/workspace-business"`
-	SecretaryTemplatePath string `env:"SECRETARY_TEMPLATE_PATH" envDefault:"/opt/duck/CLAUDE.secretary.md.tmpl"`
-	LogLevel              string `env:"LOG_LEVEL" envDefault:"INFO"`
-	MaxConcurrentChatRuns int    `env:"MAX_CONCURRENT_CHAT_RUNS" envDefault:"4"`
+	SecretaryWorkspaceDir   string `env:"SECRETARY_WORKSPACE_DIR" envDefault:"/workspace-business"`
+	LOSecretaryTemplatePath string `env:"LO_SECRETARY_TEMPLATE_PATH" envDefault:"/opt/duck/CLAUDE.secretary-lo.md.tmpl"`
+	SecretaryTemplatePath   string `env:"SECRETARY_TEMPLATE_PATH" envDefault:"/opt/duck/CLAUDE.secretary.md.tmpl"`
+	LogLevel                string `env:"LOG_LEVEL" envDefault:"INFO"`
+	MaxConcurrentChatRuns   int    `env:"MAX_CONCURRENT_CHAT_RUNS" envDefault:"4"`
 
 	// ShutdownDrainSeconds bounds the graceful-drain window on SIGTERM: how long
 	// the dispatcher WAITS for in-flight runs to finish on their own before
@@ -1017,6 +1018,11 @@ func (c Config) CIWatchEnabled() bool {
 
 // ValidateLO rejects incomplete transport configuration before contacting any endpoint.
 func (c Config) ValidateLO() error {
+	switch c.SecretaryModeName() {
+	case SecretaryModeOff, SecretaryModeApproval, SecretaryModeAuto:
+	default:
+		return errors.New("SECRETARY_MODE must be off, approval or auto")
+	}
 	if strings.TrimSpace(c.LOBotToken) == "" {
 		return errors.New("LO_BOT_TOKEN is required")
 	}
