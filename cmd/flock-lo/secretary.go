@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -31,7 +32,7 @@ import (
 
 const (
 	secretaryRetryMultiplier      = 2
-	secretaryStateVersion         = 1
+	secretaryStateVersion         = 2
 	secretaryMaxJobs              = 10000
 	secretaryMaxConnections       = 1024
 	secretaryMaxStateBytes        = 32 << 20
@@ -40,34 +41,52 @@ const (
 	secretaryIncomingRunes        = 8000
 	secretaryRequestsPerMinute    = 30
 	secretaryLifetime             = 48 * time.Hour
+	secretaryApprovalLifetime     = 24 * time.Hour // Deduplication outlives owner review.
 	secretaryRetryInterval        = 15 * time.Second
 	secretaryMaxRetryInterval     = 5 * time.Minute
 	secretaryRunTimeout           = 10 * time.Minute
+	secretaryMaxNoticeAttempts    = 3
 	secretaryQueued               = "queued"
 	secretaryRunning              = "running"
 	secretaryPrepared             = "prepared"
+	secretaryAwaiting             = "awaiting_approval"
+	secretaryApproved             = "approved_sending"
+	secretaryUnknown              = "delivery_unknown"
 	secretaryDone                 = "done"
 	secretaryCancelled            = "cancelled"
+	secretaryRejected             = "rejected"
 )
 
 var errSecretaryConsent = errors.New("LO secretary consent or source is no longer valid")
 
 type secretaryAPI interface {
 	GetBusinessConnection(ctx context.Context, id string) (lo.SecretaryConnection, error)
-	ProposeBusinessDraft(ctx context.Context, action lo.SecretaryAction) (lo.SecretaryDraft, error)
+	SendSecretaryReviewContext(ctx context.Context, ownerID, botID int64, incoming string) (int64, error)
+	SendSecretaryReviewNotice(ctx context.Context, ownerID, botID, peerID int64, text, token string) (int64, error)
+	CloseSecretaryReviewNotice(ctx context.Context, ownerID, botID, noticeID int64, status string) error
 	SendSecretaryText(ctx context.Context, action lo.SecretaryAction, ownerID int64) error
 }
 
 type secretaryJob struct {
-	UpdateID      int64               `json:"updateId"`
-	Message       lo.SecretaryMessage `json:"message"`
-	OwnerID       int64               `json:"ownerId"`
-	Mode          string              `json:"mode"`
-	Status        string              `json:"status"`
-	Action        lo.SecretaryAction  `json:"action"`
-	CreatedAt     int64               `json:"createdAt"`
-	Attempts      int                 `json:"attempts,omitempty"`
-	NextAttemptAt int64               `json:"nextAttemptAt,omitempty"`
+	UpdateID          int64               `json:"updateId"`
+	Message           lo.SecretaryMessage `json:"message"`
+	OwnerID           int64               `json:"ownerId"`
+	Mode              string              `json:"mode"`
+	Status            string              `json:"status"`
+	Action            lo.SecretaryAction  `json:"action"`
+	ReviewToken       string              `json:"reviewToken,omitempty"`
+	NoticeID          int64               `json:"noticeId,omitempty"`
+	ReviewContext     string              `json:"reviewContext,omitempty"`
+	ContextAttempted  bool                `json:"contextAttempted,omitempty"`
+	ContextNoticeID   int64               `json:"contextNoticeId,omitempty"`
+	NoticeAttempts    int                 `json:"noticeAttempts,omitempty"`
+	NoticeStatus      string              `json:"noticeStatus,omitempty"`
+	NoticeRetryAt     int64               `json:"noticeRetryAt,omitempty"`
+	DeliveryAttempted bool                `json:"deliveryAttempted,omitempty"`
+	DeliveryRequestID string              `json:"deliveryRequestId,omitempty"`
+	CreatedAt         int64               `json:"createdAt"`
+	Attempts          int                 `json:"attempts,omitempty"`
+	NextAttemptAt     int64               `json:"nextAttemptAt,omitempty"`
 }
 
 type secretaryState struct {
@@ -195,6 +214,18 @@ func (m *secretaryManager) load() error {
 	if err := json.NewDecoder(file).Decode(&m.state); err != nil {
 		return fmt.Errorf("decode LO secretary state: %w", err)
 	}
+	legacy := m.state.Version == 1
+	if legacy {
+		for key, job := range m.state.Jobs {
+			// A v1 prepared review may already have reached the native queue.
+			// Never reinterpret it as an approved bot-owned send on upgrade.
+			if job.Mode == config.SecretaryModeApproval && job.Status == secretaryPrepared {
+				job.Status = secretaryCancelled
+				m.state.Jobs[key] = compactSecretaryJob(job)
+			}
+		}
+		m.state.Version = secretaryStateVersion
+	}
 	if m.state.UpdateFloor < 0 || m.state.Version != secretaryStateVersion || m.state.BotID != m.botID || m.state.Jobs == nil ||
 		m.state.Connections == nil || m.state.Invalid == nil || len(m.state.Invalid) > secretaryMaxJobs ||
 		len(m.state.Jobs) > secretaryMaxJobs || len(m.state.Connections) > secretaryMaxConnections {
@@ -204,22 +235,23 @@ func (m *secretaryManager) load() error {
 		if err := m.validateJob(key, job); err != nil {
 			return err
 		}
-		if job.Mode != m.cfg.SecretaryModeName() {
-			job.Status = secretaryCancelled
+		if job.Mode != m.cfg.SecretaryModeName() && !secretaryTerminal(job.Status) {
+			job.Status = secretaryInvalidStatus(job)
 			m.state.Jobs[key] = job
 		}
 		switch job.Status {
 		case secretaryRunning:
 			// A process crash may have interrupted tool actions. Do not replay the agent blindly.
-			job.Status = secretaryCancelled
+			job.Status = secretaryInvalidStatus(job)
 			m.state.Jobs[key] = job
-		case secretaryQueued, secretaryPrepared, secretaryDone, secretaryCancelled:
+		case secretaryQueued, secretaryPrepared, secretaryAwaiting, secretaryApproved,
+			secretaryUnknown, secretaryDone, secretaryCancelled, secretaryRejected:
 		default:
 			return errors.New("invalid persisted LO secretary job status")
 		}
 	}
 	for key, job := range m.state.Jobs {
-		if job.Status == secretaryDone || job.Status == secretaryCancelled {
+		if secretaryTerminal(job.Status) {
 			m.state.Jobs[key] = compactSecretaryJob(job)
 		}
 	}
@@ -234,16 +266,23 @@ func (m *secretaryManager) load() error {
 
 func (m *secretaryManager) validateJob(key string, job secretaryJob) error {
 	if !job.Message.Valid() || job.CreatedAt <= 0 || job.Attempts < 0 || job.NextAttemptAt < 0 ||
+		job.ContextNoticeID < 0 || job.NoticeAttempts < 0 || job.NoticeAttempts > secretaryMaxNoticeAttempts ||
+		(job.ContextNoticeID > 0 && !job.ContextAttempted) ||
 		key != secretaryJobKey(m.botID, job.Message) {
 		return errors.New("invalid persisted LO secretary job")
+	}
+	if job.Status == secretaryUnknown && (!job.DeliveryAttempted || job.DeliveryRequestID != "flock:"+key) {
+		return errors.New("invalid persisted LO delivery tombstone")
 	}
 	if job.Mode != config.SecretaryModeApproval && job.Mode != config.SecretaryModeAuto {
 		return errors.New("invalid persisted LO secretary mode")
 	}
-	if job.Status == secretaryPrepared && (!job.Action.Valid() || job.Action.Context != job.Message.Context ||
+	prepared := job.Status == secretaryPrepared || job.Status == secretaryAwaiting || job.Status == secretaryApproved
+	if prepared && (!job.Action.Valid() || job.Action.Context != job.Message.Context ||
 		job.Action.ConnectionID != job.Message.ConnectionID || job.Action.RequestID != "flock:"+key || job.OwnerID <= 0 ||
-		(job.Mode == config.SecretaryModeApproval && job.Action.Reason != "manual_review") ||
-		(job.Mode == config.SecretaryModeAuto && job.Action.Reason != "")) {
+		job.Action.Reason != "" ||
+		(job.Mode == config.SecretaryModeApproval && (!lo.ValidSecretaryReviewToken(job.ReviewToken) ||
+			(job.Status != secretaryPrepared && job.NoticeID <= 0)))) {
 		return errors.New("invalid persisted LO secretary action")
 	}
 	return nil
@@ -263,6 +302,9 @@ func (m *secretaryManager) saveLocked() error {
 	}
 	if err == nil {
 		err = atomicfile.Write(m.path, data, ".secretary-state-*.tmp")
+		if err == nil {
+			err = syncSecretaryDirectory(filepath.Dir(m.path))
+		}
 	}
 	if err != nil {
 		m.failure = fmt.Errorf("persist LO secretary state: %w", err)
@@ -271,6 +313,24 @@ func (m *secretaryManager) saveLocked() error {
 		}
 	}
 	return err
+}
+
+// Sync the rename before treating owner consent as durable.
+func syncSecretaryDirectory(path string) error {
+	dir, err := os.Open(path) //nolint:gosec // Fixed parent of the configured private state file; no message/callback paths.
+	if err != nil {
+		return err
+	}
+	err = dir.Sync()
+	closeErr := dir.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
+}
+
+func secretaryRetryable(status string) bool {
+	return status == secretaryQueued || status == secretaryPrepared || status == secretaryApproved
 }
 
 func (m *secretaryManager) err() error {
@@ -289,6 +349,11 @@ func (m *secretaryManager) pruneLocked() bool {
 		}
 	}
 	for key, job := range m.state.Jobs {
+		if job.Mode == config.SecretaryModeApproval && !secretaryTerminal(job.Status) &&
+			job.Message.Date <= time.Now().Add(-secretaryApprovalLifetime).Unix() {
+			m.invalidateLocked(key, job)
+			changed = true
+		}
 		if job.CreatedAt < cutoff && !m.scheduled[key] {
 			delete(m.state.Jobs, key)
 			changed = true
@@ -407,16 +472,28 @@ func (m *secretaryManager) admissionFitsLocked(job secretaryJob) bool {
 	}
 	live := 1
 	for _, existing := range m.state.Jobs {
-		if existing.Status != secretaryDone && existing.Status != secretaryCancelled {
+		if !secretaryTerminal(existing.Status) {
 			live++
 		}
 	}
 	return len(data)+len(incoming)+live*secretaryReplyReserveBytes+secretaryMetadataReserveBytes <= secretaryMaxStateBytes
 }
 
+func secretaryTerminal(status string) bool {
+	return status == secretaryDone || status == secretaryCancelled || status == secretaryUnknown || status == secretaryRejected
+}
+
+func secretaryInvalidStatus(job secretaryJob) string {
+	if job.DeliveryAttempted {
+		return secretaryUnknown
+	}
+	return secretaryCancelled
+}
+
 func compactSecretaryJob(job secretaryJob) secretaryJob {
 	job.Message.Text, job.Message.Caption, job.Message.MediaStatus = "", "", ""
 	job.Message.Attachments = nil
+	job.ReviewContext = ""
 	job.Action = lo.SecretaryAction{}
 	return job
 }
@@ -424,7 +501,7 @@ func compactSecretaryJob(job secretaryJob) secretaryJob {
 func (m *secretaryManager) evictTerminalLocked() bool {
 	oldest := ""
 	for key, job := range m.state.Jobs {
-		if m.scheduled[key] || (job.Status != secretaryDone && job.Status != secretaryCancelled) {
+		if m.scheduled[key] || (!secretaryTerminal(job.Status)) {
 			continue
 		}
 		if oldest == "" || job.CreatedAt < m.state.Jobs[oldest].CreatedAt {
@@ -442,7 +519,7 @@ func (m *secretaryManager) evictTerminalLocked() bool {
 func (m *secretaryManager) evictConnectionLocked() bool {
 	live := make(map[string]bool)
 	for _, job := range m.state.Jobs {
-		if job.Status != secretaryDone && job.Status != secretaryCancelled {
+		if !secretaryTerminal(job.Status) {
 			live[job.Message.ConnectionID] = true
 		}
 	}
@@ -493,10 +570,10 @@ func secretarySourceKey(connection string, scope lo.SecretaryContext, id lo.Secr
 }
 
 func (m *secretaryManager) invalidateLocked(key string, job secretaryJob) {
-	if job.Status == secretaryDone || job.Status == secretaryCancelled {
+	if secretaryTerminal(job.Status) {
 		return
 	}
-	job.Status = secretaryCancelled
+	job.Status = secretaryInvalidStatus(job)
 	m.state.Jobs[key] = compactSecretaryJob(job)
 	if cancel := m.active[key]; cancel != nil {
 		cancel()
@@ -508,6 +585,7 @@ func (m *secretaryManager) invalidateLocked(key string, job secretaryJob) {
 //nolint:contextcheck // The dispatcher owns run contexts; polling cancellation only stops new submissions.
 func (m *secretaryManager) Pump(ctx context.Context) {
 	m.submit()
+	m.syncReviewNotices(ctx)
 	ticker := time.NewTicker(secretaryRetryInterval)
 	defer ticker.Stop()
 	for {
@@ -516,8 +594,10 @@ func (m *secretaryManager) Pump(ctx context.Context) {
 			return
 		case <-ticker.C:
 			m.submit()
+			m.syncReviewNotices(ctx)
 		case <-m.wake:
 			m.submit()
+			m.syncReviewNotices(ctx)
 		}
 	}
 }
@@ -536,7 +616,7 @@ func (m *secretaryManager) submit() {
 	now := time.Now().Unix()
 	keys := make([]string, 0, len(m.state.Jobs))
 	for key, job := range m.state.Jobs {
-		if !m.scheduled[key] && job.NextAttemptAt <= now && (job.Status == secretaryQueued || job.Status == secretaryPrepared) {
+		if !m.scheduled[key] && job.NextAttemptAt <= now && secretaryRetryable(job.Status) {
 			keys = append(keys, key)
 		}
 	}
@@ -566,7 +646,7 @@ func (m *secretaryManager) process(ctx context.Context, key string) {
 	conn, err := m.connection(ctx, key, job)
 	if err != nil {
 		if errors.Is(err, errSecretaryConsent) {
-			m.finish(key, secretaryCancelled)
+			m.finish(key, secretaryInvalidStatus(job))
 		} else {
 			m.retry(key, err)
 		}
@@ -581,7 +661,7 @@ func (m *secretaryManager) process(ctx context.Context, key string) {
 	}
 	if _, err := m.connection(ctx, key, job); err != nil {
 		if errors.Is(err, errSecretaryConsent) {
-			m.finish(key, secretaryCancelled)
+			m.finish(key, secretaryInvalidStatus(job))
 		} else {
 			m.retry(key, err)
 		}
@@ -590,10 +670,19 @@ func (m *secretaryManager) process(ctx context.Context, key string) {
 	if ctx.Err() != nil || !m.live(key) {
 		return
 	}
-	if job.Mode == config.SecretaryModeApproval {
-		_, err = m.api.ProposeBusinessDraft(ctx, job.Action)
-	} else {
+	previousAttempt := job.DeliveryAttempted
+	switch {
+	case job.Mode == config.SecretaryModeApproval && job.Status == secretaryPrepared:
+		m.publishReviewNotice(ctx, key, job)
+		return
+	case job.Mode == config.SecretaryModeAuto || job.Status == secretaryApproved:
+		job.DeliveryAttempted, job.DeliveryRequestID = true, job.Action.RequestID
+		if !m.store(key, job) {
+			return
+		}
 		err = m.api.SendSecretaryText(ctx, job.Action, job.OwnerID)
+	default:
+		return
 	}
 	if err == nil {
 		m.finish(key, secretaryDone)
@@ -601,7 +690,13 @@ func (m *secretaryManager) process(ctx context.Context, key string) {
 	}
 	var apiErr *lo.APIError
 	if errors.As(err, &apiErr) && apiErr.Code >= 400 && apiErr.Code < 500 && apiErr.Code != 429 {
-		m.finish(key, secretaryCancelled)
+		// A first, definitive rejection proves no send happened. A rejection
+		// after an earlier lost response cannot disprove that earlier effect.
+		if previousAttempt {
+			m.finish(key, secretaryUnknown)
+		} else {
+			m.finish(key, secretaryRejected)
+		}
 	} else {
 		m.retry(key, err)
 	}
@@ -613,7 +708,7 @@ func (m *secretaryManager) retry(key string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	job, exists := m.state.Jobs[key]
-	if !exists || m.failure != nil || (job.Status != secretaryQueued && job.Status != secretaryPrepared) {
+	if !exists || m.failure != nil || !secretaryRetryable(job.Status) {
 		return
 	}
 	delay := secretaryRetryInterval
@@ -670,7 +765,13 @@ func (m *secretaryManager) prepare(ctx context.Context, key string, job secretar
 		Context: job.Message.Context, ChatID: job.Message.Chat.ID, Text: reply,
 	}
 	if job.Mode == config.SecretaryModeApproval {
-		job.Action.Reason = "manual_review"
+		job.ReviewToken = rand.Text()
+		if !lo.ValidSecretaryReviewToken(job.ReviewToken) {
+			m.finish(key, secretaryCancelled)
+			slog.Warn("LO secretary review token does not match the wire contract")
+			return job, false
+		}
+		job.ReviewContext = secretaryReviewContext(job.Message, text)
 	}
 	if !job.Action.Valid() {
 		m.finish(key, secretaryCancelled)
@@ -689,7 +790,8 @@ func (m *secretaryManager) live(key string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	job, exists := m.state.Jobs[key]
-	return exists && m.failure == nil && job.Status != secretaryCancelled && job.Status != secretaryDone &&
+	return exists && m.failure == nil && !secretaryTerminal(job.Status) &&
+		(job.Mode != config.SecretaryModeApproval || job.Message.Date > time.Now().Add(-secretaryApprovalLifetime).Unix()) &&
 		job.CreatedAt >= time.Now().Add(-secretaryLifetime).Unix()
 }
 
@@ -707,7 +809,7 @@ func (m *secretaryManager) connection(ctx context.Context, key string, job secre
 	// A newer poll snapshot can revoke an in-flight lookup; an older one cannot reject a fresh generation.
 	latest, exists := m.state.Connections[conn.ID]
 	current := m.state.Jobs[key]
-	if m.failure != nil || current.Status == secretaryCancelled || current.Status == secretaryDone ||
+	if m.failure != nil || secretaryTerminal(current.Status) ||
 		(exists && latest.PolicyVersion >= conn.PolicyVersion &&
 			(!latest.CanReply(job.Message.Context) || latest.User.ID != conn.User.ID)) {
 		return conn, errSecretaryConsent
@@ -719,7 +821,7 @@ func (m *secretaryManager) store(key string, job secretaryJob) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	current, exists := m.state.Jobs[key]
-	if !exists || m.failure != nil || current.Status == secretaryCancelled || current.Status == secretaryDone {
+	if !exists || m.failure != nil || secretaryTerminal(current.Status) {
 		return false
 	}
 	m.state.Jobs[key] = job
@@ -730,13 +832,18 @@ func (m *secretaryManager) finish(key, status string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	job, exists := m.state.Jobs[key]
-	if !exists || m.failure != nil || job.Status == secretaryCancelled || job.Status == secretaryDone {
+	if !exists || m.failure != nil || (secretaryTerminal(job.Status) &&
+		(job.Status != secretaryUnknown || status != secretaryDone)) {
 		return
 	}
 	job.Status = status
 	m.state.Jobs[key] = compactSecretaryJob(job)
 	if err := m.saveLocked(); err != nil {
 		slog.Error("save LO secretary completion", "error", err)
+	}
+	select {
+	case m.wake <- struct{}{}:
+	default:
 	}
 }
 

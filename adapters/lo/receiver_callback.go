@@ -3,6 +3,7 @@ package lo
 import (
 	"context"
 	"strconv"
+	"strings"
 
 	"github.com/duckbugio/flock/core/chat"
 )
@@ -26,6 +27,12 @@ func (r *Receiver) handleCallback(ctx context.Context, query *CallbackQuery) {
 }
 
 func (r *Receiver) callbackToast(ctx context.Context, query *CallbackQuery) string {
+	if strings.HasPrefix(query.Data, SecretaryCallbackPrefix) {
+		if r.cfg.SecretaryCallback != nil {
+			return r.cfg.SecretaryCallback(ctx, query)
+		}
+		return callbackUnavailable
+	}
 	if !r.callbackAllowed(query) {
 		return callbackUnavailable
 	}

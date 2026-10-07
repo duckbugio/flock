@@ -1,6 +1,7 @@
 package lo
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -86,5 +87,24 @@ func TestCallbackAdmissionProtectsRunControl(t *testing.T) {
 				t.Fatal("stop callback triggered account action")
 			}
 		})
+	}
+}
+
+func TestSecretaryCallbackIsIndependentOfProgressKeyboards(t *testing.T) {
+	t.Parallel()
+	called := 0
+	receiver := NewReceiver(ReceiverConfig{SecretaryCallback: func(_ context.Context, q *CallbackQuery) string {
+		called++
+		if q.Data != "lo-secretary:send:token" {
+			t.Error("callback changed")
+		}
+		return "owner decision"
+	}})
+	if got := receiver.callbackToast(t.Context(), &CallbackQuery{Data: "lo-secretary:send:token"}); got != "owner decision" ||
+		called != 1 {
+		t.Fatal("secretary callback required ordinary keyboard state")
+	}
+	if got := receiver.callbackToast(t.Context(), &CallbackQuery{Data: "stop:other"}); got != callbackUnavailable || called != 1 {
+		t.Fatal("ordinary callback escaped admission")
 	}
 }
