@@ -46,14 +46,15 @@ type Service interface {
 // ReceiverConfig owns the LO allow-list separately from Telegram/VK identities.
 type ReceiverConfig struct {
 	// Secretary persists native updates before the polling offset acknowledges them.
-	Secretary      func(context.Context, Update) error
-	SecretaryError func() error
-	Callbacks      CallbackService
-	Service        Service
-	Client         *Client
-	Transport      *Transport
-	Username       string
-	BotID          int64
+	Secretary         func(context.Context, Update) error
+	SecretaryError    func() error
+	SecretaryCallback func(context.Context, *CallbackQuery) string
+	Callbacks         CallbackService
+	Service           Service
+	Client            *Client
+	Transport         *Transport
+	Username          string
+	BotID             int64
 	// ConflictDelay overrides retry timing; nonpositive values use the production default.
 	ConflictDelay  time.Duration
 	IsAllowed      func(int64) bool

@@ -34,6 +34,8 @@ type secretaryFakeAPI struct {
 	sends      int
 	err        error
 	onLookup   func()
+	onNotice   func()
+	onSend     func()
 }
 
 func (api *secretaryFakeAPI) GetBusinessConnection(_ context.Context, _ string) (lo.SecretaryConnection, error) {
@@ -43,14 +45,19 @@ func (api *secretaryFakeAPI) GetBusinessConnection(_ context.Context, _ string) 
 	return api.connection, nil
 }
 
-func (api *secretaryFakeAPI) ProposeBusinessDraft(_ context.Context, action lo.SecretaryAction) (lo.SecretaryDraft, error) {
+func (api *secretaryFakeAPI) SendSecretaryReviewNotice(_ context.Context, _, _, _ int64, _, _ string) (int64, error) {
 	api.drafts++
-	api.actions = append(api.actions, action)
-	return lo.SecretaryDraft{}, api.err
+	if api.onNotice != nil {
+		api.onNotice()
+	}
+	return 99, api.err
 }
 
 func (api *secretaryFakeAPI) SendSecretaryText(_ context.Context, action lo.SecretaryAction, _ int64) error {
 	api.sends++
+	if api.onSend != nil {
+		api.onSend()
+	}
 	api.actions = append(api.actions, action)
 	return api.err
 }
@@ -140,6 +147,7 @@ func secretaryMessage() lo.SecretaryMessage {
 	if err != nil {
 		panic(err)
 	}
+	msg.Date = time.Now().Unix()
 	return msg
 }
 
@@ -151,7 +159,7 @@ func admitSecretary(t *testing.T, manager *secretaryManager, msg lo.SecretaryMes
 	return secretaryJobKey(manager.botID, msg)
 }
 
-func TestSecretaryFullAgentNativeReviewAndAuto(t *testing.T) {
+func TestSecretaryFullAgentBotReviewAndAuto(t *testing.T) {
 	t.Parallel()
 	for _, mode := range []string{config.SecretaryModeApproval, config.SecretaryModeAuto} {
 		t.Run(mode, func(t *testing.T) {
@@ -160,12 +168,22 @@ func TestSecretaryFullAgentNativeReviewAndAuto(t *testing.T) {
 			msg := secretaryMessage()
 			key := admitSecretary(t, manager, msg)
 			manager.process(t.Context(), key)
+			if mode == config.SecretaryModeApproval {
+				if manager.state.Jobs[key].Status != secretaryAwaiting || api.sends != 0 {
+					t.Fatal("reply sent without owner approval")
+				}
+				toast := manager.ReviewCallback(t.Context(), secretaryReviewQuery(manager, key, "send"))
+				if !strings.Contains(toast, "approved") {
+					t.Fatal(toast)
+				}
+				manager.process(t.Context(), key)
+			}
 			if runner.calls != 1 || len(api.actions) != 1 || api.actions[0].Context != msg.Context ||
 				api.actions[0].RequestID != "flock:"+key || api.actions[0].Text != "Agent reply" {
 				t.Fatal("full agent or native delivery missing")
 			}
 			if api.drafts != boolCount(mode == config.SecretaryModeApproval) ||
-				api.sends != boolCount(mode == config.SecretaryModeAuto) {
+				api.sends != 1 {
 				t.Fatal("wrong delivery mode")
 			}
 			opts := runner.opts[0]
@@ -451,7 +469,7 @@ func TestSecretaryRestartRejectsWrongBotAndCancelsOldMode(t *testing.T) {
 	}
 	api.err = nil
 	reloaded.process(t.Context(), key)
-	if runner.calls != 1 || len(api.actions) != 1 || reloaded.state.Jobs[key].Status != secretaryCancelled {
+	if runner.calls != 1 || len(api.actions) != 1 || reloaded.state.Jobs[key].Status != secretaryUnknown {
 		t.Fatal("old automatic mode replayed under owner-review configuration")
 	}
 }
@@ -485,7 +503,7 @@ func TestSecretarySessionIsolationAndTerminalFailure(t *testing.T) {
 	msg.Context.SourceMessageID = msg.ID
 	key = admitSecretary(t, manager, msg)
 	manager.process(t.Context(), key)
-	if len(api.actions) != 3 {
+	if api.drafts != 3 || api.sends != 0 {
 		t.Fatal("failed terminal result delivered")
 	}
 	if _, ok := manager.runtime.sessions.Get(secretarySessionKey(manager.state.Jobs[key])); ok {

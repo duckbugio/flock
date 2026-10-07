@@ -202,9 +202,11 @@ import the TypeScript SDK or reuse Telegram consent flags. Use a deployment with
 `lo_schema_version=1`, policy versions, independent `lo_rights` and delegated
 source contexts. Ordinary bot messages remain a separate path.
 
-Set `SECRETARY_MODE=approval` to propose a `manual_review` draft. The owner opens
-**Secretary → Replies for review** in LO and approves or discards it there. No
-Telegram callback approval buttons are used. Set `SECRETARY_MODE=auto` only when
+Set `SECRETARY_MODE=approval` to receive the exact proposed reply in the connection
+owner’s private chat with the bot. The owner selects **Send to chat <peer ID>** or
+**Discard** there. The decision is persisted before delegated delivery; native LO
+settings do not manage generated replies. Secretary buttons remain available when
+ordinary progress keyboards are disabled. Set `SECRETARY_MODE=auto` only when
 the owner wants automatic replies. `off` is the default. Both modes currently
 require the Claude backend, matching Flock's Telegram full-agent secretary.
 
@@ -222,6 +224,9 @@ owner, connection, conversation and policy version under
 this root in `secretary_workspace`. Host runs must set
 `LO_SECRETARY_TEMPLATE_PATH` to `core/CLAUDE.secretary-lo.md.tmpl`, plus the usual
 team paths. Changing the configured mode cancels retained work from the old mode.
+A delivery already attempted keeps an unknown-outcome tombstone instead of falsely
+claiming cancellation. Legacy version-1 native review proposals are never implicitly
+approved during upgrade.
 
 The private, atomically written `secretary-state.json` records admission before
 poll acknowledgement and stores each completed response before the delegated
@@ -281,3 +286,11 @@ node adapters/lo/testdata/generate-secretary-sdk.mjs /path/to/packages/bot-http-
 
 The merged Bot API also covers lossless string input in
 [`TestBusinessCanonicalStringIDsPreservePrecisionAndUseAuthenticatedGeneration`](https://git.lo.ink/LO/messenger/src/commit/9a667c7b8ff1a2f0655c8bed94b5511ee3c5e90a/bots/bot-api-service/internal/usecase/botmethod/business_test.go).
+
+Owner review expires with the source reply window (24 hours). Ordinary preview
+messages have no server idempotency contract: a lost response can duplicate the
+preview, but only the persisted notice message ID can authorize its delegated
+reply. After a possibly committed send, source invalidation or consent revocation
+stops retries and reports an unknown delivery outcome. Check the target chat; no
+receipt recovery after revocation is promised. Tombstones retain the request ID
+and source context while removing reply text.

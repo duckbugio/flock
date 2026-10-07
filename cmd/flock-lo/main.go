@@ -198,11 +198,13 @@ func run() int {
 	}
 	var handleSecretary func(context.Context, lo.Update) error
 	var secretaryError func() error
+	var secretaryCallback func(context.Context, *lo.CallbackQuery) string
 	if secretary != nil {
 		handleSecretary, secretaryError = secretary.Handle, secretary.err
+		secretaryCallback = secretary.ReviewCallback
 	}
 	receiver := lo.NewReceiver(lo.ReceiverConfig{
-		Secretary: handleSecretary, SecretaryError: secretaryError,
+		Secretary: handleSecretary, SecretaryError: secretaryError, SecretaryCallback: secretaryCallback,
 		Service:          svc,
 		Callbacks:        svc,
 		Client:           api,
