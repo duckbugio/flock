@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -10,19 +12,23 @@ import (
 	"github.com/duckbugio/flock/internal/config"
 )
 
+const (
+	secretaryReviewSenderRunes    = 80
+	secretaryReviewIncomingRunes  = 500
+	secretaryReviewReceiptTimeout = 5 * time.Second
+)
+
 // ReviewCallback records owner consent before the pump attempts a delegated send.
 // Callback handling stays outside agent admission and never runs tools.
-const secretaryReviewDiscard = "discard"
-
 func (m *secretaryManager) ReviewCallback(_ context.Context, q *lo.CallbackQuery) string {
 	const unavailable = "Reply is no longer available."
 	const saveFailed = "Reply could not be saved. Please try again later."
 	if !m.reviewCallbackAllowed(q) {
 		return unavailable
 	}
-	parts := strings.Split(q.Data, ":")
-	if len(parts) != 3 || parts[0] != "lo-secretary" ||
-		(parts[1] != "send" && parts[1] != secretaryReviewDiscard) || len(parts[2]) != 26 {
+	parts := strings.Split(strings.TrimPrefix(q.Data, lo.SecretaryCallbackPrefix), ":")
+	if !strings.HasPrefix(q.Data, lo.SecretaryCallbackPrefix) || len(parts) != 2 ||
+		(parts[0] != lo.SecretaryActionSend && parts[0] != lo.SecretaryActionDiscard) || !lo.ValidSecretaryReviewToken(parts[1]) {
 		return unavailable
 	}
 	m.mu.Lock()
@@ -31,8 +37,14 @@ func (m *secretaryManager) ReviewCallback(_ context.Context, q *lo.CallbackQuery
 		return saveFailed
 	}
 	for key, job := range m.state.Jobs {
-		if subtle.ConstantTimeCompare([]byte(job.ReviewToken), []byte(parts[2])) != 1 ||
-			job.Mode != config.SecretaryModeApproval || job.OwnerID != q.From.ID || job.NoticeID != q.Message.ID {
+		if subtle.ConstantTimeCompare([]byte(job.ReviewToken), []byte(parts[1])) != 1 ||
+			job.Mode != config.SecretaryModeApproval || job.OwnerID != q.From.ID {
+			continue
+		}
+		if job.Status == secretaryPrepared && job.NoticeID == 0 {
+			return "Review is being saved. Please try again."
+		}
+		if job.NoticeID != q.Message.ID {
 			continue
 		}
 		switch job.Status {
@@ -40,6 +52,8 @@ func (m *secretaryManager) ReviewCallback(_ context.Context, q *lo.CallbackQuery
 			return "Delivery outcome is unknown. Check the target chat."
 		case secretaryDone:
 			return "Reply sent."
+		case secretaryRejected:
+			return "LO rejected the reply; it was not sent."
 		case secretaryCancelled:
 			return unavailable
 		case secretaryApproved:
@@ -48,14 +62,14 @@ func (m *secretaryManager) ReviewCallback(_ context.Context, q *lo.CallbackQuery
 		default:
 			return unavailable
 		}
-		if job.Message.Date <= time.Now().Add(-24*time.Hour).Unix() {
+		if job.Message.Date <= time.Now().Add(-secretaryApprovalLifetime).Unix() {
 			m.invalidateLocked(key, job)
 			if m.saveLocked() != nil {
 				return saveFailed
 			}
 			return "Reply expired."
 		}
-		if parts[1] == secretaryReviewDiscard {
+		if parts[0] == lo.SecretaryActionDiscard {
 			job.Status = secretaryCancelled
 			m.state.Jobs[key] = compactSecretaryJob(job)
 		} else {
@@ -69,12 +83,87 @@ func (m *secretaryManager) ReviewCallback(_ context.Context, q *lo.CallbackQuery
 		case m.wake <- struct{}{}:
 		default:
 		}
-		if parts[1] == secretaryReviewDiscard {
+		if parts[0] == lo.SecretaryActionDiscard {
 			return "Reply discarded."
 		}
 		return "Reply approved; delivery is pending."
 	}
 	return unavailable
+}
+
+func secretaryReviewContext(message lo.SecretaryMessage, incoming string) string {
+	sender := fmt.Sprintf("LO #%d", message.From.ID)
+	if name := []rune(strings.TrimSpace(message.From.Username)); len(name) > 0 {
+		sender = "@" + string(name[:min(len(name), secretaryReviewSenderRunes)]) + " (" + sender + ")"
+	}
+	text := []rune(strings.TrimSpace(incoming))
+	if len(text) > secretaryReviewIncomingRunes {
+		text = append(text[:secretaryReviewIncomingRunes], '…')
+	}
+	if len(text) == 0 {
+		text = []rune("Incoming message content is unavailable.")
+	}
+	return fmt.Sprintf("Secretary · Chat %s · Incoming #%s\nFrom: %s\n\nIncoming:\n%s",
+		message.Chat.ID.String(), message.ID.String(), sender, string(text))
+}
+
+// Only the pump edits receipts, avoiding out-of-order writes from concurrent
+// completion and consent callbacks. A failed edit never retries delegated send.
+func (m *secretaryManager) syncReviewNotices(ctx context.Context) {
+	const batchLimit = 16
+	ctx, cancel := context.WithTimeout(ctx, secretaryReviewReceiptTimeout)
+	defer cancel()
+	m.mu.Lock()
+	jobs := make(map[string]secretaryJob)
+	if m.failure == nil {
+		for key, job := range m.state.Jobs {
+			// An invalidated send can still return a known success. Do not publish
+			// unknown before it settles: a timed-out edit may take effect later.
+			if job.Status == secretaryUnknown && m.active[key] != nil {
+				continue
+			}
+			if job.NoticeID > 0 && secretaryTerminal(job.Status) && job.NoticeStatus != job.Status &&
+				job.NoticeRetryAt <= time.Now().Unix() {
+				jobs[key] = job
+				if len(jobs) == batchLimit {
+					break
+				}
+			}
+		}
+	}
+	m.mu.Unlock()
+	for key, job := range jobs {
+		if ctx.Err() != nil {
+			return
+		}
+		status := "Reply discarded or no longer valid."
+		switch job.Status {
+		case secretaryDone:
+			status = "Reply sent to chat " + job.Message.Chat.ID.String() + "."
+		case secretaryRejected:
+			status = "LO rejected the reply; it was not sent."
+		case secretaryUnknown:
+			status = "Delivery outcome is unknown. Check chat " + job.Message.Chat.ID.String() + "."
+		}
+		err := m.api.CloseSecretaryReviewNotice(ctx, job.OwnerID, m.botID, job.NoticeID, status)
+		if err != nil {
+			slog.Warn("update LO secretary review receipt", "error", err)
+		}
+		m.mu.Lock()
+		current := m.state.Jobs[key]
+		if current.NoticeID == job.NoticeID && current.Status == job.Status && m.failure == nil {
+			if err == nil {
+				current.NoticeStatus, current.NoticeRetryAt = job.Status, 0
+			} else {
+				current.NoticeRetryAt = time.Now().Add(secretaryMaxRetryInterval).Unix()
+			}
+			m.state.Jobs[key] = current
+			if saveErr := m.saveLocked(); saveErr != nil {
+				slog.Error("persist LO secretary review receipt", "error", saveErr)
+			}
+		}
+		m.mu.Unlock()
+	}
 }
 
 func (m *secretaryManager) reviewCallbackAllowed(q *lo.CallbackQuery) bool {

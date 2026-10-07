@@ -14,6 +14,127 @@ import (
 	"github.com/duckbugio/flock/internal/config"
 )
 
+func TestSecretaryReviewContainsBoundedIncomingContext(t *testing.T) {
+	t.Parallel()
+	m, api, _ := secretaryFixture(t, config.SecretaryModeApproval)
+	message := secretaryMessage()
+	message.From.Username = "sender"
+	message.Text = strings.Repeat("😀", secretaryReviewIncomingRunes+20)
+	key := admitSecretary(t, m, message)
+	m.process(t.Context(), key)
+	if len(api.noticeContexts) != 1 || !strings.Contains(api.noticeContexts[0], "@sender (LO #77)") ||
+		!strings.Contains(api.noticeContexts[0], "Chat 77 · Incoming #12") ||
+		strings.Count(api.noticeContexts[0], "😀") != secretaryReviewIncomingRunes ||
+		m.state.Jobs[key].Action.Text != "Agent reply" {
+		t.Fatal("review lost source context, truncation bounds or exact reply")
+	}
+}
+
+func TestSecretaryDefinitiveRejectDoesNotHideEarlierUnknownSend(t *testing.T) {
+	t.Parallel()
+	for _, previousLost := range []bool{false, true} {
+		t.Run(map[bool]string{false: "first rejection", true: "earlier lost response"}[previousLost], func(t *testing.T) {
+			t.Parallel()
+			m, api, _ := secretaryFixture(t, config.SecretaryModeApproval)
+			key := admitSecretary(t, m, secretaryMessage())
+			m.process(t.Context(), key)
+			m.ReviewCallback(t.Context(), secretaryReviewQuery(m, key, lo.SecretaryActionSend))
+			if previousLost {
+				api.err = errors.New("lost response")
+				m.process(t.Context(), key)
+			}
+			api.err = &lo.APIError{Code: 403}
+			m.process(t.Context(), key)
+			want := secretaryRejected
+			if previousLost {
+				want = secretaryUnknown
+			}
+			if m.state.Jobs[key].Status != want {
+				t.Fatalf("status=%s want=%s", m.state.Jobs[key].Status, want)
+			}
+			m.syncReviewNotices(t.Context())
+			if len(api.noticeStatuses) != 1 || m.state.Jobs[key].NoticeStatus != want {
+				t.Fatal("terminal receipt not closed")
+			}
+			reloaded, err := newSecretaryManager(m.cfg, api, m.botID, m.runtime)
+			if err != nil || reloaded.state.Jobs[key].Status != want {
+				t.Fatalf("terminal outcome lost on restart: %v", err)
+			}
+		})
+	}
+}
+
+func TestSecretaryActiveInvalidatedSendWaitsForFinalReceipt(t *testing.T) {
+	t.Parallel()
+	m, api, _ := secretaryFixture(t, config.SecretaryModeApproval)
+	key := admitSecretary(t, m, secretaryMessage())
+	m.process(t.Context(), key)
+	m.ReviewCallback(t.Context(), secretaryReviewQuery(m, key, lo.SecretaryActionSend))
+	api.onSend = func() {
+		source := secretaryMessage()
+		if err := m.Handle(t.Context(), lo.Update{ID: 13, EditedBusinessMessage: &source}); err != nil {
+			t.Fatal(err)
+		}
+		if m.state.Jobs[key].Status != secretaryUnknown {
+			t.Fatal("in-flight invalidation lost uncertain outcome")
+		}
+		m.syncReviewNotices(t.Context())
+		if len(api.noticeStatuses) != 0 {
+			t.Fatal("published uncertain receipt before active send settled")
+		}
+	}
+	m.process(t.Context(), key)
+	m.syncReviewNotices(t.Context())
+	if api.sends != 1 || len(api.noticeStatuses) != 1 ||
+		m.state.Jobs[key].NoticeStatus != secretaryDone ||
+		!strings.Contains(api.noticeStatuses[0], "Reply sent") {
+		t.Fatal("late success did not publish the sole final receipt")
+	}
+}
+
+func TestSecretaryReceiptFailureNeverResendsReply(t *testing.T) {
+	t.Parallel()
+	m, api, _ := secretaryFixture(t, config.SecretaryModeApproval)
+	key := admitSecretary(t, m, secretaryMessage())
+	m.process(t.Context(), key)
+	query := secretaryReviewQuery(m, key, lo.SecretaryActionSend)
+	m.ReviewCallback(t.Context(), query)
+	m.process(t.Context(), key)
+	api.closeErr = errors.New("notice edit unavailable")
+	m.syncReviewNotices(t.Context())
+	if api.sends != 1 || m.state.Jobs[key].Status != secretaryDone || m.state.Jobs[key].NoticeStatus != "" {
+		t.Fatal("failed receipt changed delivery")
+	}
+	api.closeErr = nil
+	job := m.state.Jobs[key]
+	job.NoticeRetryAt = 0
+	m.state.Jobs[key] = job
+	m.syncReviewNotices(t.Context())
+	m.ReviewCallback(t.Context(), query)
+	m.process(t.Context(), key)
+	if api.sends != 1 || m.state.Jobs[key].NoticeStatus != secretaryDone || len(api.noticeStatuses) != 2 {
+		t.Fatal("receipt retry resent or lost outcome")
+	}
+}
+
+func TestSecretaryEarlyReviewClickWaitsWithoutApproving(t *testing.T) {
+	t.Parallel()
+	m, api, _ := secretaryFixture(t, config.SecretaryModeApproval)
+	key := admitSecretary(t, m, secretaryMessage())
+	api.onNotice = func() {
+		query := secretaryReviewQuery(m, key, lo.SecretaryActionSend)
+		query.Message.ID = 99
+		toast := m.ReviewCallback(t.Context(), query)
+		if !strings.Contains(toast, "being saved") || m.state.Jobs[key].Status != secretaryPrepared {
+			t.Fatal("early callback approved an unpersisted notice")
+		}
+	}
+	m.process(t.Context(), key)
+	if api.sends != 0 || m.state.Jobs[key].Status != secretaryAwaiting {
+		t.Fatal("early callback bypassed review")
+	}
+}
+
 const (
 	reviewNoticeTest = "notice"
 )
@@ -95,12 +216,12 @@ func TestSecretaryApprovedDeliveryRestartsWithSameAction(t *testing.T) {
 func TestSecretaryDiscardAndExpiredReviewNeverSend(t *testing.T) {
 	t.Parallel()
 	for _, expired := range []bool{false, true} {
-		t.Run(map[bool]string{false: secretaryReviewDiscard, true: "expired"}[expired], func(t *testing.T) {
+		t.Run(map[bool]string{false: lo.SecretaryActionDiscard, true: "expired"}[expired], func(t *testing.T) {
 			t.Parallel()
 			m, api, _ := secretaryFixture(t, config.SecretaryModeApproval)
 			key := admitSecretary(t, m, secretaryMessage())
 			m.process(t.Context(), key)
-			decision := secretaryReviewDiscard
+			decision := lo.SecretaryActionDiscard
 			if expired {
 				job := m.state.Jobs[key]
 				job.Message.Date = time.Now().Add(-24 * time.Hour).Unix()

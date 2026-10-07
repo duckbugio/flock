@@ -203,7 +203,7 @@ import the TypeScript SDK or reuse Telegram consent flags. Use a deployment with
 source contexts. Ordinary bot messages remain a separate path.
 
 Set `SECRETARY_MODE=approval` to receive the exact proposed reply in the connection
-owner’s private chat with the bot. The owner selects **Send to chat <peer ID>** or
+owner's private chat with the bot. The owner selects **Send to chat <peer ID>** or
 **Discard** there. The decision is persisted before delegated delivery; native LO
 settings do not manage generated replies. Secretary buttons remain available when
 ordinary progress keyboards are disabled. Set `SECRETARY_MODE=auto` only when

@@ -27,7 +27,7 @@ func (r *Receiver) handleCallback(ctx context.Context, query *CallbackQuery) {
 }
 
 func (r *Receiver) callbackToast(ctx context.Context, query *CallbackQuery) string {
-	if strings.HasPrefix(query.Data, "lo-secretary:") {
+	if strings.HasPrefix(query.Data, SecretaryCallbackPrefix) {
 		if r.cfg.SecretaryCallback != nil {
 			return r.cfg.SecretaryCallback(ctx, query)
 		}

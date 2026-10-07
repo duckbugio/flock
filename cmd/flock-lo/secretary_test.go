@@ -28,14 +28,17 @@ const (
 )
 
 type secretaryFakeAPI struct {
-	connection lo.SecretaryConnection
-	actions    []lo.SecretaryAction
-	drafts     int
-	sends      int
-	err        error
-	onLookup   func()
-	onNotice   func()
-	onSend     func()
+	connection     lo.SecretaryConnection
+	actions        []lo.SecretaryAction
+	drafts         int
+	sends          int
+	err            error
+	onLookup       func()
+	onNotice       func()
+	onSend         func()
+	noticeContexts []string
+	noticeStatuses []string
+	closeErr       error
 }
 
 func (api *secretaryFakeAPI) GetBusinessConnection(_ context.Context, _ string) (lo.SecretaryConnection, error) {
@@ -45,12 +48,18 @@ func (api *secretaryFakeAPI) GetBusinessConnection(_ context.Context, _ string) 
 	return api.connection, nil
 }
 
-func (api *secretaryFakeAPI) SendSecretaryReviewNotice(_ context.Context, _, _, _ int64, _, _ string) (int64, error) {
+func (api *secretaryFakeAPI) SendSecretaryReviewNotice(_ context.Context, _, _, _ int64, incoming, _, _ string) (int64, error) {
 	api.drafts++
+	api.noticeContexts = append(api.noticeContexts, incoming)
 	if api.onNotice != nil {
 		api.onNotice()
 	}
 	return 99, api.err
+}
+
+func (api *secretaryFakeAPI) CloseSecretaryReviewNotice(_ context.Context, _, _, _ int64, status string) error {
+	api.noticeStatuses = append(api.noticeStatuses, status)
+	return api.closeErr
 }
 
 func (api *secretaryFakeAPI) SendSecretaryText(_ context.Context, action lo.SecretaryAction, _ int64) error {
