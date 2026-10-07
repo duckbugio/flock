@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -105,6 +106,68 @@ func secretaryReviewContext(message lo.SecretaryMessage, incoming string) string
 	}
 	return fmt.Sprintf("Secretary · Chat %s · Incoming #%s\nFrom: %s\n\nIncoming:\n%s",
 		message.Chat.ID.String(), message.ID.String(), sender, string(text))
+}
+
+// Context is attempted once and its confirmed message ID is durable before
+// publishing controls. A lost context response cannot authorize a blind preview.
+// Preview attempts are durable and bounded because ordinary send has no dedupe.
+func (m *secretaryManager) publishReviewNotice(ctx context.Context, key string, job secretaryJob) {
+	if job.ContextNoticeID == 0 {
+		var ok bool
+		job, ok = m.publishReviewContext(ctx, key, job)
+		if !ok {
+			return
+		}
+	}
+	if ctx.Err() != nil || !m.live(key) {
+		return
+	}
+	if job.NoticeAttempts >= secretaryMaxNoticeAttempts {
+		m.finish(key, secretaryCancelled)
+		return
+	}
+	job.NoticeAttempts++
+	if !m.store(key, job) {
+		return
+	}
+	id, err := m.api.SendSecretaryReviewNotice(ctx, job.OwnerID, m.botID, int64(job.Message.Chat.ID),
+		job.Action.Text, job.ReviewToken)
+	if err == nil && id > 0 {
+		job.NoticeID, job.Status = id, secretaryAwaiting
+		m.store(key, job)
+		return
+	}
+	var apiErr *lo.APIError
+	if job.NoticeAttempts >= secretaryMaxNoticeAttempts ||
+		(errors.As(err, &apiErr) && apiErr.Code >= 400 && apiErr.Code < 500 && apiErr.Code != 429) {
+		m.finish(key, secretaryCancelled)
+	} else {
+		m.retry(key, err)
+	}
+	slog.Warn("LO secretary review preview failed", "update_id", job.UpdateID, "attempt", job.NoticeAttempts)
+}
+
+func (m *secretaryManager) publishReviewContext(ctx context.Context, key string, job secretaryJob) (secretaryJob, bool) {
+	if job.ContextAttempted {
+		m.finish(key, secretaryCancelled)
+		return job, false
+	}
+	job.ContextAttempted = true
+	if !m.store(key, job) {
+		return job, false
+	}
+	incoming := job.ReviewContext
+	if incoming == "" {
+		incoming = secretaryReviewContext(job.Message, strings.TrimSpace(job.Message.Text+"\n"+job.Message.Caption))
+	}
+	id, err := m.api.SendSecretaryReviewContext(ctx, job.OwnerID, m.botID, incoming)
+	if err != nil || id <= 0 {
+		m.finish(key, secretaryCancelled)
+		slog.Warn("LO secretary review context unconfirmed; reply cancelled", "update_id", job.UpdateID)
+		return job, false
+	}
+	job.ContextNoticeID = id
+	return job, m.store(key, job)
 }
 
 // Only the pump edits receipts, avoiding out-of-order writes from concurrent

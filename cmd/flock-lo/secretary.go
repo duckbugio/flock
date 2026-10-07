@@ -45,6 +45,7 @@ const (
 	secretaryRetryInterval        = 15 * time.Second
 	secretaryMaxRetryInterval     = 5 * time.Minute
 	secretaryRunTimeout           = 10 * time.Minute
+	secretaryMaxNoticeAttempts    = 3
 	secretaryQueued               = "queued"
 	secretaryRunning              = "running"
 	secretaryPrepared             = "prepared"
@@ -60,7 +61,8 @@ var errSecretaryConsent = errors.New("LO secretary consent or source is no longe
 
 type secretaryAPI interface {
 	GetBusinessConnection(ctx context.Context, id string) (lo.SecretaryConnection, error)
-	SendSecretaryReviewNotice(ctx context.Context, ownerID, botID, peerID int64, incoming, text, token string) (int64, error)
+	SendSecretaryReviewContext(ctx context.Context, ownerID, botID int64, incoming string) (int64, error)
+	SendSecretaryReviewNotice(ctx context.Context, ownerID, botID, peerID int64, text, token string) (int64, error)
 	CloseSecretaryReviewNotice(ctx context.Context, ownerID, botID, noticeID int64, status string) error
 	SendSecretaryText(ctx context.Context, action lo.SecretaryAction, ownerID int64) error
 }
@@ -75,6 +77,9 @@ type secretaryJob struct {
 	ReviewToken       string              `json:"reviewToken,omitempty"`
 	NoticeID          int64               `json:"noticeId,omitempty"`
 	ReviewContext     string              `json:"reviewContext,omitempty"`
+	ContextAttempted  bool                `json:"contextAttempted,omitempty"`
+	ContextNoticeID   int64               `json:"contextNoticeId,omitempty"`
+	NoticeAttempts    int                 `json:"noticeAttempts,omitempty"`
 	NoticeStatus      string              `json:"noticeStatus,omitempty"`
 	NoticeRetryAt     int64               `json:"noticeRetryAt,omitempty"`
 	DeliveryAttempted bool                `json:"deliveryAttempted,omitempty"`
@@ -261,6 +266,8 @@ func (m *secretaryManager) load() error {
 
 func (m *secretaryManager) validateJob(key string, job secretaryJob) error {
 	if !job.Message.Valid() || job.CreatedAt <= 0 || job.Attempts < 0 || job.NextAttemptAt < 0 ||
+		job.ContextNoticeID < 0 || job.NoticeAttempts < 0 || job.NoticeAttempts > secretaryMaxNoticeAttempts ||
+		(job.ContextNoticeID > 0 && !job.ContextAttempted) ||
 		key != secretaryJobKey(m.botID, job.Message) {
 		return errors.New("invalid persisted LO secretary job")
 	}
@@ -666,21 +673,8 @@ func (m *secretaryManager) process(ctx context.Context, key string) {
 	previousAttempt := job.DeliveryAttempted
 	switch {
 	case job.Mode == config.SecretaryModeApproval && job.Status == secretaryPrepared:
-		var id int64
-		incoming := job.ReviewContext
-		if incoming == "" {
-			incoming = secretaryReviewContext(job.Message, strings.TrimSpace(job.Message.Text+"\n"+job.Message.Caption))
-		}
-		id, err = m.api.SendSecretaryReviewNotice(ctx, job.OwnerID, m.botID, int64(job.Message.Chat.ID),
-			incoming, job.Action.Text, job.ReviewToken)
-		if err == nil && id <= 0 {
-			err = errors.New("LO review notice has no message ID")
-		}
-		if err == nil {
-			job.NoticeID, job.Status = id, secretaryAwaiting
-			m.store(key, job)
-			return
-		}
+		m.publishReviewNotice(ctx, key, job)
+		return
 	case job.Mode == config.SecretaryModeAuto || job.Status == secretaryApproved:
 		job.DeliveryAttempted, job.DeliveryRequestID = true, job.Action.RequestID
 		if !m.store(key, job) {

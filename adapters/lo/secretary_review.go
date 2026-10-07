@@ -32,18 +32,23 @@ func ValidSecretaryReviewToken(token string) bool {
 	return true
 }
 
+// SendSecretaryReviewContext posts source context without approval controls.
+func (c *Client) SendSecretaryReviewContext(ctx context.Context, ownerID, botID int64, incoming string) (int64, error) {
+	if ownerID <= 0 || botID < minSecretaryBotID || strings.TrimSpace(incoming) == "" || messageText(incoming) != nil {
+		return 0, errors.New("invalid secretary review context")
+	}
+	return c.secretaryOwnerMessage(ctx, "sendMessage", map[string]any{"chat_id": ownerID, "text": incoming},
+		ownerID, botID, incoming)
+}
+
 // SendSecretaryReviewNotice previews the exact reply in the owner's ordinary bot
 // dialog. The buttons are owned by Flock, never a native LO draft approval API.
 func (c *Client) SendSecretaryReviewNotice(ctx context.Context, ownerID, botID, peerID int64,
-	incoming, text, token string,
+	text, token string,
 ) (int64, error) {
 	if ownerID <= 0 || botID < minSecretaryBotID || peerID <= 0 || !ValidSecretaryReviewToken(token) ||
-		strings.TrimSpace(incoming) == "" || messageText(incoming) != nil || messageText(text) != nil {
+		messageText(text) != nil {
 		return 0, errors.New("invalid secretary review notice")
-	}
-	contextBody := map[string]any{"chat_id": ownerID, "text": incoming}
-	if _, err := c.secretaryOwnerMessage(ctx, "sendMessage", contextBody, ownerID, botID, incoming); err != nil {
-		return 0, err
 	}
 	body := map[string]any{
 		"chat_id": ownerID, "text": text,

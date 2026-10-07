@@ -5,8 +5,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-
-	"github.com/duckbugio/flock/adapters/lo"
 )
 
 func TestSecretaryReviewNoticeUsesOwnerDialogAndExactText(t *testing.T) {
@@ -48,7 +46,11 @@ func TestSecretaryReviewNoticeUsesOwnerDialogAndExactText(t *testing.T) {
 		reply(w, `{"ok":true,"result":{"message_id":99,"chat":{"id":1,"type":"private"},"from":{"id":1000000000000001,`+
 			`"is_bot":true},"text":"Exact **unformatted** reply."}}`)
 	})
-	id, err := api.SendSecretaryReviewNotice(t.Context(), 1, 1000000000000001, 77, incoming, text, token)
+	contextID, err := api.SendSecretaryReviewContext(t.Context(), 1, 1000000000000001, incoming)
+	if err != nil || contextID != 98 {
+		t.Fatalf("context = %d, %v", contextID, err)
+	}
+	id, err := api.SendSecretaryReviewNotice(t.Context(), 1, 1000000000000001, 77, text, token)
 	if err != nil || id != 99 {
 		t.Fatalf("notice = %d, %v", id, err)
 	}
@@ -80,7 +82,7 @@ func TestSecretaryReviewNoticeRejectsForeignResponseIdentity(t *testing.T) {
 				}
 				reply(w, fixture)
 			})
-			if _, err := api.SendSecretaryReviewNotice(t.Context(), 1, 1000000000000001, 77, "Context", "reply",
+			if _, err := api.SendSecretaryReviewNotice(t.Context(), 1, 1000000000000001, 77, "reply",
 				strings.Repeat("a", 26)); err == nil {
 				t.Fatal("foreign preview accepted")
 			}
@@ -88,7 +90,7 @@ func TestSecretaryReviewNoticeRejectsForeignResponseIdentity(t *testing.T) {
 	}
 }
 
-func TestSecretaryReviewContextFailureNeverSendsApprovalButtons(t *testing.T) {
+func TestSecretaryReviewContextFailureHasNoApprovalControls(t *testing.T) {
 	requests := 0
 	api := client(t, func(w http.ResponseWriter, r *http.Request) {
 		requests++
@@ -99,8 +101,7 @@ func TestSecretaryReviewContextFailureNeverSendsApprovalButtons(t *testing.T) {
 		}
 		reply(w, `{"ok":false,"error_code":503,"description":"unavailable"}`)
 	})
-	_, err := api.SendSecretaryReviewNotice(t.Context(), 1, 1000000000000001, 77, "Context", "reply",
-		strings.Repeat("a", lo.SecretaryReviewTokenLength))
+	_, err := api.SendSecretaryReviewContext(t.Context(), 1, 1000000000000001, "Context")
 	if err == nil || requests != 1 {
 		t.Fatalf("context failure: requests=%d error=%v", requests, err)
 	}

@@ -226,7 +226,13 @@ this root in `secretary_workspace`. Host runs must set
 team paths. Changing the configured mode cancels retained work from the old mode.
 A delivery already attempted keeps an unknown-outcome tombstone instead of falsely
 claiming cancellation. Legacy version-1 native review proposals are never implicitly
-approved during upgrade.
+approved during upgrade. Upgrading writes state version 2, which version-1
+runtimes cannot read. Keep a protected pre-upgrade state backup; after any v2
+activity, use a v2-compatible runtime or roll forward. Do not delete the state or
+restore an older checkpoint that loses approvals, attempts or update watermarks.
+Do not downgrade to an intermediate v2 runtime that ignores the context and
+preview attempt markers: it cannot preserve publication limits. Use the released
+runtime with these bounds or a newer compatible build.
 
 The private, atomically written `secretary-state.json` records admission before
 poll acknowledgement and stores each completed response before the delegated
@@ -288,9 +294,14 @@ The merged Bot API also covers lossless string input in
 [`TestBusinessCanonicalStringIDsPreservePrecisionAndUseAuthenticatedGeneration`](https://git.lo.ink/LO/messenger/src/commit/9a667c7b8ff1a2f0655c8bed94b5511ee3c5e90a/bots/bot-api-service/internal/usecase/botmethod/business_test.go).
 
 Owner review expires with the source reply window (24 hours). Ordinary preview
-messages have no server idempotency contract: a lost response can duplicate the
-preview, but only the persisted notice message ID can authorize its delegated
-reply. After a possibly committed send, source invalidation or consent revocation
+messages have no server idempotency contract. Source context is attempted once,
+with a durable attempt marker before sending and a confirmed message ID saved
+before publishing buttons. A failed or unconfirmed context cancels the reply;
+a restart never repeats that context or publishes a blind preview. The exact
+reply preview has at most three durable attempts across restarts. A lost response
+can therefore create a bounded duplicate preview, but only the persisted notice
+message ID can authorize its delegated reply. Exhausted or definitive preview
+failures cancel without sending or rerunning the agent. After a possibly committed send, source invalidation or consent revocation
 stops retries and reports an unknown delivery outcome. Check the target chat; no
 receipt recovery after revocation is promised. Tombstones retain the request ID
 and source context while removing reply text.

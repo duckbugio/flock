@@ -30,6 +30,126 @@ func TestSecretaryReviewContainsBoundedIncomingContext(t *testing.T) {
 	}
 }
 
+func TestSecretaryPreviewRetriesAreBoundedAndNeverRepeatContext(t *testing.T) {
+	t.Parallel()
+	m, api, runner := secretaryFixture(t, config.SecretaryModeApproval)
+	key := admitSecretary(t, m, secretaryMessage())
+	api.err = errors.New("lost preview response")
+	api.onNotice = func() {
+		data, err := os.ReadFile(m.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var disk secretaryState
+		if err := json.Unmarshal(data, &disk); err != nil {
+			t.Fatal(err)
+		}
+		job := disk.Jobs[key]
+		if job.ContextNoticeID != 98 || !job.ContextAttempted || job.NoticeAttempts != api.drafts {
+			t.Fatal("preview preceded durable context or attempt counter")
+		}
+	}
+	for range secretaryMaxNoticeAttempts + 2 {
+		m.process(t.Context(), key)
+		reloaded, err := newSecretaryManager(m.cfg, api, m.botID, m.runtime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m = reloaded
+	}
+	if len(api.noticeContexts) != 1 || api.drafts != secretaryMaxNoticeAttempts || api.sends != 0 ||
+		runner.calls != 1 || m.state.Jobs[key].Status != secretaryCancelled {
+		t.Fatal("preview retry flooded owner, reran agent or sent an unreviewed reply")
+	}
+}
+
+func TestSecretaryUnconfirmedContextNeverPublishesOrRepeats(t *testing.T) {
+	t.Parallel()
+	for _, crash := range []bool{false, true} {
+		t.Run(map[bool]string{false: "lost response", true: "crash before confirmed ID save"}[crash], func(t *testing.T) {
+			t.Parallel()
+			m, api, runner := secretaryFixture(t, config.SecretaryModeApproval)
+			path := m.path
+			key := admitSecretary(t, m, secretaryMessage())
+			api.onContext = func() {
+				data, err := os.ReadFile(path) //nolint:gosec // Fixed private state path from this test's temporary fixture.
+				if err != nil {
+					t.Fatal(err)
+				}
+				var disk secretaryState
+				if err := json.Unmarshal(data, &disk); err != nil {
+					t.Fatal(err)
+				}
+				if !disk.Jobs[key].ContextAttempted || disk.Jobs[key].ContextNoticeID != 0 {
+					t.Fatal("context preceded durable attempt marker")
+				}
+				if crash {
+					m.path = filepath.Join(t.TempDir(), "missing", "state.json")
+				}
+			}
+			if !crash {
+				api.contextErr = errors.New("lost context response")
+			}
+			m.process(t.Context(), key)
+			api.onContext, api.contextErr = nil, nil
+			reloaded, err := newSecretaryManager(m.cfg, api, m.botID, m.runtime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reloaded.process(t.Context(), key)
+			if len(api.noticeContexts) != 1 || api.drafts != 0 || api.sends != 0 ||
+				runner.calls != 1 || reloaded.state.Jobs[key].Status != secretaryCancelled {
+				t.Fatal("unconfirmed context repeated or authorized a blind preview")
+			}
+		})
+	}
+}
+
+func TestSecretaryContextInvalidationNeverPublishesControls(t *testing.T) {
+	t.Parallel()
+	m, api, _ := secretaryFixture(t, config.SecretaryModeApproval)
+	key := admitSecretary(t, m, secretaryMessage())
+	api.onContext = func() {
+		source := secretaryMessage()
+		if err := m.Handle(t.Context(), lo.Update{ID: 13, EditedBusinessMessage: &source}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.process(t.Context(), key)
+	if len(api.noticeContexts) != 1 || api.drafts != 0 || api.sends != 0 ||
+		m.state.Jobs[key].Status != secretaryCancelled {
+		t.Fatal("late context result resurrected invalidated review")
+	}
+}
+
+func TestSecretaryLoadRejectsCorruptPublicationBounds(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"negative attempts", "too many attempts", "unattempted context"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
+			m, api, _ := secretaryFixture(t, config.SecretaryModeApproval)
+			key := admitSecretary(t, m, secretaryMessage())
+			m.process(t.Context(), key)
+			job := m.state.Jobs[key]
+			switch kind {
+			case "negative attempts":
+				job.NoticeAttempts = -1
+			case "too many attempts":
+				job.NoticeAttempts = secretaryMaxNoticeAttempts + 1
+			case "unattempted context":
+				job.ContextAttempted = false
+			}
+			m.state.Jobs[key] = job
+			if err := m.saveLocked(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := newSecretaryManager(m.cfg, api, m.botID, m.runtime); err == nil {
+				t.Fatal("corrupt publication bounds loaded")
+			}
+		})
+	}
+}
+
 func TestSecretaryDefinitiveRejectDoesNotHideEarlierUnknownSend(t *testing.T) {
 	t.Parallel()
 	for _, previousLost := range []bool{false, true} {

@@ -35,6 +35,8 @@ type secretaryFakeAPI struct {
 	err            error
 	onLookup       func()
 	onNotice       func()
+	onContext      func()
+	contextErr     error
 	onSend         func()
 	noticeContexts []string
 	noticeStatuses []string
@@ -48,9 +50,16 @@ func (api *secretaryFakeAPI) GetBusinessConnection(_ context.Context, _ string) 
 	return api.connection, nil
 }
 
-func (api *secretaryFakeAPI) SendSecretaryReviewNotice(_ context.Context, _, _, _ int64, incoming, _, _ string) (int64, error) {
-	api.drafts++
+func (api *secretaryFakeAPI) SendSecretaryReviewContext(_ context.Context, _, _ int64, incoming string) (int64, error) {
 	api.noticeContexts = append(api.noticeContexts, incoming)
+	if api.onContext != nil {
+		api.onContext()
+	}
+	return 98, api.contextErr
+}
+
+func (api *secretaryFakeAPI) SendSecretaryReviewNotice(_ context.Context, _, _, _ int64, _, _ string) (int64, error) {
+	api.drafts++
 	if api.onNotice != nil {
 		api.onNotice()
 	}
