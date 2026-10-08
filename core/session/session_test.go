@@ -189,3 +189,78 @@ func TestConcurrentSetGetRace(t *testing.T) {
 		t.Fatalf("store corrupted under concurrency: %v", err)
 	}
 }
+
+func TestVersionedSessions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	old, err := OpenVersioned(path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Set("owner", "legacy"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := OpenVersioned(path, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := first.Get("owner"); ok {
+		t.Fatal("new config resumed legacy history")
+	}
+	if err := first.Set("owner", "new-session"); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenVersioned(path, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id, ok := reopened.Get("owner"); !ok || id != "new-session" {
+		t.Fatal("same config lost continuity")
+	}
+	second, err := OpenVersioned(path, "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := second.Get("owner"); ok {
+		t.Fatal("changed config reused history")
+	}
+	if err := reopened.Delete("owner"); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id, ok := legacy.Get("owner"); !ok || id != "legacy" {
+		t.Fatal("versioned reset removed legacy data")
+	}
+}
+
+func TestConfigTransitionsDoNotReviveRevokedContext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	legacy, err := OpenVersioned(path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Set("owner", "legacy-knowledge"); err != nil {
+		t.Fatal(err)
+	}
+	for _, revision := range []string{"enabled", "", "enabled"} {
+		store, err := OpenVersioned(path, revision)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := store.Get("owner"); ok {
+			t.Fatal("configuration transition revived previous context")
+		}
+		if err := store.Set("owner", "fresh-context"); err != nil {
+			t.Fatal(err)
+		}
+		reopened, err := OpenVersioned(path, revision)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id, ok := reopened.Get("owner"); !ok || id != "fresh-context" {
+			t.Fatal("unchanged restart lost continuity")
+		}
+	}
+}

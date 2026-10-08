@@ -142,19 +142,22 @@ func run() int {
 	// Per-chat workspaces (isolated /workspace/chat_<id> with a rendered CLAUDE.md
 	// + agents) and the dispatcher enforcing parallel-across-chats / serial-within.
 	ws := &workspace.Renderer{
-		BaseDir:          cfg.ApprovedDirectory,
-		TemplatePath:     cfg.TeamTemplatePath,
-		AgentsDir:        cfg.TeamAgentsDir,
-		SkillsDir:        cfg.TeamSkillsDir,
-		PrePRCycles:      cfg.PrePRCycles,
-		PrReviewCycles:   cfg.PrReviewCycles,
-		EnablePRReview:   cfg.EnablePRReview,
-		GitHost:          cfg.GitHost,
-		AutoApproveScope: cfg.AutoApproveScopeLevel(),
+		BaseDir:           cfg.ApprovedDirectory,
+		TemplatePath:      cfg.WorkspaceTemplatePath(),
+		InstructionsName:  cfg.WorkspaceInstructionsName(),
+		OwnerInstructions: cfg.BotOwnerInstructions,
+		KnowledgeEnabled:  cfg.DuckBugMCPEnabled(),
+		AgentsDir:         cfg.TeamAgentsDir,
+		SkillsDir:         cfg.TeamSkillsDir,
+		PrePRCycles:       cfg.PrePRCycles,
+		PrReviewCycles:    cfg.PrReviewCycles,
+		EnablePRReview:    cfg.EnablePRReview,
+		GitHost:           cfg.GitHost,
+		AutoApproveScope:  cfg.AutoApproveScopeLevel(),
 	}
 	// Durable per-chat session store: chatID -> session_id, reloaded on startup so
 	// conversations survive a restart and resumed via --resume (plan §4).
-	sessions, err := session.Open(cfg.SessionStoreFile())
+	sessions, err := session.OpenVersioned(cfg.SessionStoreFile(), cfg.AgentSessionRevision())
 	if err != nil {
 		logger.Error("open session store", "path", cfg.SessionStoreFile(), "error", err)
 		return 1

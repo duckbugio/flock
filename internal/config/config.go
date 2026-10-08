@@ -4,6 +4,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -22,6 +24,12 @@ import (
 // non-Telegram binary (e.g. cmd/duck-vk) can share the same Config without
 // demanding the Telegram token.
 var ErrMissingTelegramToken = errors.New("TELEGRAM_BOT_TOKEN is required")
+
+// Bot role names supported by the workspace agreement.
+const (
+	BotRoleDeveloper = "developer"
+	BotRoleAssistant = "assistant"
+)
 
 // Telegram business-message behaviors.
 const (
@@ -326,13 +334,19 @@ type Config struct {
 	FollowupStorePath  string `env:"FOLLOWUP_STORE_PATH"`
 	EnablePromiseNudge bool   `env:"ENABLE_PROMISE_NUDGE" envDefault:"true"`
 
-	// DuckBug MCP: wire the DuckBug (error & log monitoring) MCP server into
-	// every Claude run so the team can read the project's live errors/logs. The
+	// DuckBug MCP: wire the errors, logs and approved knowledge MCP server into
+	// every Claude run with the token's capabilities and scope. The
 	// TOKEN is the on/off switch (a sk-duck-api01-… API token from the DuckBug
 	// UI); the URL defaults to the cloud endpoint and self-hosted deployments
 	// override it with <their-duckbug>/api/mcp.
 	DuckBugMCPToken string `env:"DUCKBUG_MCP_TOKEN"`
 	DuckBugMCPURL   string `env:"DUCKBUG_MCP_URL" envDefault:"https://duckbug.io/api/mcp"`
+
+	// BotRole selects the direct-chat workflow; secretary transport rules remain separate.
+	BotRole string `env:"BOT_ROLE" envDefault:"developer"`
+	// BotOwnerInstructions are literal owner-provided preferences, never credentials.
+	BotOwnerInstructions  string `env:"BOT_OWNER_INSTRUCTIONS"`
+	AssistantTemplatePath string `env:"ASSISTANT_TEMPLATE_PATH" envDefault:"/opt/duck/CLAUDE.assistant.md.tmpl"`
 
 	// Source paths for the shared team config baked into the image (see the
 	// Dockerfile's /opt/duck layout). Rendered per chat by core/workspace.
@@ -417,7 +431,61 @@ func Load() (Config, error) {
 	if err := env.Parse(&cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
+	if err := cfg.ValidateBotInstructions(); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+// ValidateBotInstructions bounds owner configuration without reflecting its content in errors.
+func (c Config) ValidateBotInstructions() error {
+	switch c.BotRole {
+	case "", BotRoleDeveloper, BotRoleAssistant:
+	default:
+		return errors.New("BOT_ROLE must be developer or assistant")
+	}
+	if len(c.BotOwnerInstructions) > 8<<10 || strings.ContainsFunc(c.BotOwnerInstructions, func(r rune) bool {
+		return (r < 0x20 && r != '\n' && r != '\t') || r == 0x7f
+	}) {
+		return errors.New("BOT_OWNER_INSTRUCTIONS exceeds 8 KiB or contains unsupported control characters")
+	}
+	return nil
+}
+
+// WorkspaceTemplatePath selects the assistant agreement without replacing developer defaults.
+func (c Config) WorkspaceTemplatePath() string {
+	if c.BotRole == BotRoleAssistant {
+		return c.AssistantTemplatePath
+	}
+	return c.TeamTemplatePath
+}
+
+// WorkspaceInstructionsName selects the agreement recognized by the configured CLI.
+func (c Config) WorkspaceInstructionsName() string {
+	if backend, _ := c.AIBackendName(); backend == AIBackendCodex {
+		return "AGENTS.md"
+	}
+	return "CLAUDE.md"
+}
+
+// AgentSessionRevision starts fresh sessions after role, instructions or knowledge access changes.
+// The revision is opaque; credentials and owner instructions are never emitted.
+func (c Config) AgentSessionRevision() string {
+	backend, _ := c.AIBackendName()
+	if backend == AIBackendClaude && (c.BotRole == "" || c.BotRole == BotRoleDeveloper) &&
+		c.BotOwnerInstructions == "" && c.DuckBugMCPToken == "" {
+		return ""
+	}
+	role := c.BotRole
+	if role == "" {
+		role = BotRoleDeveloper
+	}
+	data := []byte(fmt.Sprintf("%q", []string{
+		backend, role, c.BotOwnerInstructions,
+		c.DuckBugMCPURL, c.DuckBugMCPToken,
+	}))
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
 }
 
 // AIBackendName normalizes AI_BACKEND. The bool is false for unknown values; the

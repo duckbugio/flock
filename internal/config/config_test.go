@@ -1061,3 +1061,63 @@ func TestDuckBugMCPEnabled(t *testing.T) {
 		t.Error("a blank URL must disable the DuckBug MCP")
 	}
 }
+
+func TestOwnerConfiguration(t *testing.T) {
+	c := Config{
+		BotRole: BotRoleAssistant, BotOwnerInstructions: "Use the FAQ.\nAnswer in Russian.",
+		AssistantTemplatePath: "/assistant", TeamTemplatePath: "/developer",
+	}
+	if err := c.ValidateBotInstructions(); err != nil {
+		t.Fatal(err)
+	}
+	if c.WorkspaceTemplatePath() != "/assistant" {
+		t.Fatal("assistant template not selected")
+	}
+	revision := c.AgentSessionRevision()
+	c.BotOwnerInstructions += "\nAsk before acting."
+	if revision == c.AgentSessionRevision() {
+		t.Fatal("instruction changes reused old sessions")
+	}
+	c.BotRole = BotRoleDeveloper
+	if c.WorkspaceTemplatePath() != "/developer" {
+		t.Fatal("developer template not selected")
+	}
+	for _, text := range []string{strings.Repeat("x", 8193), "hidden\x00instruction", "carriage\rreturn"} {
+		c.BotOwnerInstructions = text
+		if c.ValidateBotInstructions() == nil {
+			t.Fatal("unsafe instructions accepted")
+		}
+	}
+	c.BotOwnerInstructions = ""
+	c.BotRole = "unknown"
+	if c.ValidateBotInstructions() == nil {
+		t.Fatal("unknown role accepted")
+	}
+	if (Config{}).AgentSessionRevision() != "" {
+		t.Fatal("legacy session keys changed")
+	}
+}
+
+func TestKnowledgeAccessChangesSessionRevision(t *testing.T) {
+	c := Config{DuckBugMCPToken: "first-token", DuckBugMCPURL: "https://duckbug.io/api/mcp"}
+	first := c.AgentSessionRevision()
+	c.DuckBugMCPToken = "rotated-token"
+	if first == c.AgentSessionRevision() {
+		t.Fatal("credential rotation reused knowledge history")
+	}
+	if strings.Contains(c.AgentSessionRevision(), "token") {
+		t.Fatal("revision exposes credentials")
+	}
+}
+
+func TestProviderChangeDoesNotReuseForeignSessionIDs(t *testing.T) {
+	c := Config{BotRole: BotRoleAssistant}
+	claude := c.AgentSessionRevision()
+	c.AIBackend = AIBackendCodex
+	if claude == c.AgentSessionRevision() {
+		t.Fatal("provider switch reused foreign model session")
+	}
+	if c.WorkspaceInstructionsName() != "AGENTS.md" {
+		t.Fatal("Codex agreement not selected")
+	}
+}

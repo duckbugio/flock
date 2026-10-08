@@ -40,7 +40,39 @@ That pulls the prebuilt image `ghcr.io/duckbugio/flock-telegram` — no build, n
 
 Everything else in [`.env.example`](adapters/telegram/.env.example) has sensible defaults. Update later with `docker compose pull && docker compose up -d`.
 
-### Telegram Secretary Mode
+### Assistant role and knowledge answers
+
+`BOT_ROLE=assistant` selects a general assistant agreement for direct chats instead
+of the developer-team workflow. The default is `developer`, preserving existing
+bots. `BOT_OWNER_INSTRUCTIONS` accepts up to 8 KiB of literal text (LF and tab are
+supported) for context, tone and escalation rules. It also applies to LO and
+Telegram secretaries, whose transport/consent rules remain in force. Do not store
+credentials in instructions. Changing the provider, role, instructions or DuckBug credential
+starts a fresh agent session; prior session records and workspaces are retained.
+
+To use DuckBug knowledge today, configure `DUCKBUG_MCP_TOKEN` with
+`knowledge:read` and `DUCKBUG_MCP_URL` (cloud default: `https://duckbug.io/api/mcp`).
+The bot uses its own authorized MCP scope. The owner can narrow topics/projects
+through instructions, for example:
+
+> Answer service questions from the approved DuckBug FAQ. Search before answering,
+> read the relevant documents, and identify the source. If the answer is missing
+> or access fails, ask me instead of guessing. Only share information intended for
+> the correspondent; do not reveal internal procedures or credentials.
+
+The `duckbug-knowledge` skill discovers the compact tool catalog, then uses
+`kb_search` and `kb_get`. `knowledge_context` remains available for engineering
+work; its returned files are not installed as bot rules. Existing tokens may lack
+`knowledge:read`; use DuckBug's token/access flow to grant it. This MCP wiring is
+currently supported on the Claude backend.
+
+Roles and prompts are behavioral preferences, not an execution sandbox. The bot
+retains its configured tools. MCP capabilities enforce data access; a project
+credential can also expose shared organization documents. Use an appropriate
+corpus for external replies. Approval mode reviews the outgoing message only,
+not tool actions performed while drafting.
+
+## Telegram Secretary Mode
 
 Telegram can connect your bot to your account so it receives messages from selected
 private chats and may reply on your behalf. Enable **Secretary Mode** for the bot

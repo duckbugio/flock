@@ -391,3 +391,62 @@ func TestWorkspaceWithoutFileDeliveryDoesNotPromiseAttachments(t *testing.T) {
 		t.Fatal("unsupported attachment delivery promised")
 	}
 }
+
+func TestOwnerPreferencesAreLiteralAndPrecedeTransportRules(t *testing.T) {
+	r := newTestRenderer(t)
+	r.OwnerInstructions = "Answer from the FAQ.\nKeep ${GIT_HOST} and $(command) literal."
+	r.KnowledgeEnabled = true
+	role := filepath.Join(t.TempDir(), "secretary.md")
+	if err := os.WriteFile(role, []byte("Never approve a reply yourself."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.RolePath = role
+	ws, err := r.Ensure("secretary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(ws, "CLAUDE.md")) //nolint:gosec // controlled test path
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if !strings.Contains(text, r.OwnerInstructions) {
+		t.Fatal("owner instructions were interpolated or lost")
+	}
+	if strings.Index(text, r.OwnerInstructions) > strings.Index(text, "Never approve") {
+		t.Fatal("transport rules must follow owner preferences")
+	}
+	if !strings.Contains(text, "duckbug-knowledge") {
+		t.Fatal("knowledge retrieval instructions missing")
+	}
+	r.OwnerInstructions = ""
+	r.KnowledgeEnabled = false
+	if _, err := r.Ensure("secretary"); err != nil {
+		t.Fatal(err)
+	}
+	body, err = os.ReadFile(filepath.Join(ws, "CLAUDE.md")) //nolint:gosec // controlled test path
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "Answer from the FAQ") {
+		t.Fatal("removed instructions remained in workspace")
+	}
+}
+
+func TestCodexUsesNativeAgreement(t *testing.T) {
+	r := newTestRenderer(t)
+	r.InstructionsName = "AGENTS.md"
+	r.OwnerInstructions = "Answer as an assistant."
+	ws, err := r.Ensure("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(ws, "AGENTS.md")) //nolint:gosec // controlled test path
+	if err != nil || !strings.Contains(string(body), r.OwnerInstructions) {
+		t.Fatal("Codex owner preferences missing")
+	}
+	r.InstructionsName = "../outside"
+	if _, err := r.Ensure("codex"); err == nil {
+		t.Fatal("invalid instructions filename accepted")
+	}
+}

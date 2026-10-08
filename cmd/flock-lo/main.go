@@ -109,7 +109,10 @@ func run() int {
 		FileDeliveryDisabled: !cfg.LOEnableDocuments,
 		AutoApproveScope:     cfg.AutoApproveScopeLevel(),
 		BaseDir:              cfg.ApprovedDirectory,
-		TemplatePath:         cfg.TeamTemplatePath,
+		TemplatePath:         cfg.WorkspaceTemplatePath(),
+		InstructionsName:     cfg.WorkspaceInstructionsName(),
+		OwnerInstructions:    cfg.BotOwnerInstructions,
+		KnowledgeEnabled:     cfg.DuckBugMCPEnabled(),
 		AgentsDir:            cfg.TeamAgentsDir,
 		SkillsDir:            cfg.TeamSkillsDir,
 		PrePRCycles:          cfg.PrePRCycles,
@@ -117,7 +120,7 @@ func run() int {
 		EnablePRReview:       cfg.EnablePRReview,
 		GitHost:              cfg.GitHost,
 	}
-	sessions, err := session.Open(cfg.SessionStoreFile())
+	sessions, err := session.OpenVersioned(cfg.SessionStoreFile(), cfg.AgentSessionRevision())
 	if err != nil {
 		logger.Error("open sessions", "error", err)
 		return 1
