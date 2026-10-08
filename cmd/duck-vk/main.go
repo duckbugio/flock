@@ -139,16 +139,19 @@ func run() int {
 	}
 
 	ws := &workspace.Renderer{
-		BaseDir:        cfg.ApprovedDirectory,
-		TemplatePath:   cfg.TeamTemplatePath,
-		AgentsDir:      cfg.TeamAgentsDir,
-		SkillsDir:      cfg.TeamSkillsDir,
-		PrePRCycles:    cfg.PrePRCycles,
-		PrReviewCycles: cfg.PrReviewCycles,
-		EnablePRReview: cfg.EnablePRReview,
-		GitHost:        cfg.GitHost,
+		BaseDir:           cfg.ApprovedDirectory,
+		TemplatePath:      cfg.WorkspaceTemplatePath(),
+		InstructionsName:  cfg.WorkspaceInstructionsName(),
+		OwnerInstructions: cfg.BotOwnerInstructions,
+		KnowledgeEnabled:  cfg.DuckBugMCPEnabled(),
+		AgentsDir:         cfg.TeamAgentsDir,
+		SkillsDir:         cfg.TeamSkillsDir,
+		PrePRCycles:       cfg.PrePRCycles,
+		PrReviewCycles:    cfg.PrReviewCycles,
+		EnablePRReview:    cfg.EnablePRReview,
+		GitHost:           cfg.GitHost,
 	}
-	sessions, err := session.Open(cfg.SessionStoreFile())
+	sessions, err := session.OpenVersioned(cfg.SessionStoreFile(), cfg.AgentSessionRevision())
 	if err != nil {
 		logger.Error("open session store", "path", cfg.SessionStoreFile(), "error", err)
 		return 1

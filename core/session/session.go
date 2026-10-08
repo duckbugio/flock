@@ -11,6 +11,7 @@
 package session
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -67,6 +68,55 @@ func Open(path string) (*FileStore, error) {
 	}
 	return s, nil
 }
+
+// OpenVersioned starts a fresh generation on each observed owner-config change.
+// Returning to an earlier configuration never revives its old model history.
+// Legacy continuity is retained only on the initial default-config bootstrap.
+func OpenVersioned(path, revision string) (Store, error) {
+	store, err := Open(path)
+	if err != nil {
+		return nil, err
+	}
+	const configKey = "_flock_active_config"
+	var stamp configStamp
+	raw, exists := store.Get(configKey)
+	if exists {
+		if err := json.Unmarshal([]byte(raw), &stamp); err != nil {
+			return nil, errors.New("session: invalid active configuration marker")
+		}
+	}
+	if (!exists && revision != "") || (exists && stamp.Revision != revision) {
+		stamp.Prefix = "generation_" + rand.Text() + ":"
+	}
+	stamp.Revision = revision
+	data, err := json.Marshal(stamp)
+	if err != nil {
+		return nil, fmt.Errorf("session: encode active configuration: %w", err)
+	}
+	if err := store.Set(configKey, string(data)); err != nil {
+		return nil, err
+	}
+	if stamp.Prefix == "" {
+		return store, nil
+	}
+	return &versionedStore{store: store, prefix: stamp.Prefix}, nil
+}
+
+type configStamp struct {
+	Revision string `json:"revision"`
+	Prefix   string `json:"prefix"`
+}
+
+type versionedStore struct {
+	store  Store
+	prefix string
+}
+
+func (s *versionedStore) Get(chatID string) (string, bool) { return s.store.Get(s.prefix + chatID) }
+func (s *versionedStore) Set(chatID, sessionID string) error {
+	return s.store.Set(s.prefix+chatID, sessionID)
+}
+func (s *versionedStore) Delete(chatID string) error { return s.store.Delete(s.prefix + chatID) }
 
 // load reads and decodes the backing file. A non-existent file is not an error
 // (a fresh store). The on-disk format is a JSON object keyed by the chat id as a
