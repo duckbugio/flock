@@ -47,6 +47,14 @@ const initScanBuf = 64 * 1024
 const stderrTailBytes = 4096
 
 func (r *runner) Run(ctx context.Context, prompt string, o Options) (<-chan Event, error) {
+	cleanup := func() {}
+	if o.DelegatedReadOnly {
+		var err error
+		o, cleanup, err = prepareDelegated(ctx, o)
+		if err != nil {
+			return nil, err
+		}
+	}
 	// A run with image attachments is delivered via stdin as a stream-json user
 	// message; a plain text run keeps the trailing-prompt-arg path unchanged.
 	stdinMode := len(o.Images) > 0
@@ -74,22 +82,26 @@ func (r *runner) Run(ctx context.Context, prompt string, o Options) (<-chan Even
 		var err error
 		envelope, err = userMessageEnvelope(prompt, o.Images)
 		if err != nil {
+			cleanup()
 			return nil, fmt.Errorf("build user message: %w", err)
 		}
 		stdin, err = cmd.StdinPipe()
 		if err != nil {
+			cleanup()
 			return nil, fmt.Errorf("stdin pipe: %w", err)
 		}
 	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		cleanup()
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
 	stderrTail := newTail(stderrTailBytes)
 	cmd.Stderr = stderrTail
 
 	if err := cmd.Start(); err != nil {
+		cleanup()
 		return nil, fmt.Errorf("start %s: %w", r.bin, err)
 	}
 
@@ -106,7 +118,10 @@ func (r *runner) Run(ctx context.Context, prompt string, o Options) (<-chan Even
 	}
 
 	out := make(chan Event)
-	go r.stream(ctx, cmd, stdout, stderrTail, out)
+	go func() {
+		defer cleanup()
+		r.stream(ctx, cmd, stdout, stderrTail, out)
+	}()
 	return out, nil
 }
 
@@ -130,7 +145,7 @@ func buildArgs(o Options, prompt string, stdinMode bool) []string {
 	// directory, leaving the CLI with no input ("Input must be provided either
 	// through stdin or as a prompt argument when using --print"). Keeping a flag
 	// (--permission-mode at minimum) after its value stops the variadic in time.
-	if o.Workdir != "" {
+	if o.Workdir != "" && !o.DelegatedReadOnly {
 		args = append(args, "--add-dir", o.Workdir)
 	}
 	// --mcp-config is ALSO variadic (`--mcp-config <configs...>`); like --add-dir it
@@ -145,6 +160,13 @@ func buildArgs(o Options, prompt string, stdinMode bool) []string {
 	if o.MaxTurns > 0 {
 		args = append(args, "--max-turns", strconv.Itoa(o.MaxTurns))
 	}
+	if o.DelegatedReadOnly {
+		args = append(args, "--restricted", "--tools", "", "--strict-mcp-config",
+			"--setting-sources", "", "--settings", `{"disableAllHooks":true,"autoMemoryEnabled":false}`,
+			"--disable-slash-commands", "--allowedTools", "mcp__secretary_knowledge__kb_search",
+			"mcp__secretary_knowledge__kb_get", "mcp__secretary_knowledge__kb_list",
+			"--append-system-prompt-file", o.Workdir+"/instructions.txt")
+	}
 	args = applyEffort(args, o.Effort)
 	if o.AnswerOnly {
 		args = append(args, "--safe-mode", "--tools", "", "--strict-mcp-config")
@@ -152,6 +174,9 @@ func buildArgs(o Options, prompt string, stdinMode bool) []string {
 	permissionMode := "bypassPermissions"
 	if o.AnswerOnly {
 		permissionMode = "default"
+	}
+	if o.DelegatedReadOnly {
+		permissionMode = "dontAsk"
 	}
 	args = append(args, "--permission-mode", permissionMode)
 	if o.SessionID != "" {

@@ -63,6 +63,9 @@ type chatUsage struct {
 }
 
 func (r *runner) Run(ctx context.Context, prompt string, o agent.Options) (<-chan agent.Event, error) {
+	if o.DelegatedReadOnly {
+		return nil, errors.New("OpenAI-compatible backend does not support delegated knowledge runs")
+	}
 	out := make(chan agent.Event)
 	go r.run(ctx, prompt, o, out)
 	return out, nil

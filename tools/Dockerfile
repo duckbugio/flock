@@ -1,4 +1,4 @@
-FROM golang:1.26.6
+FROM golang:1.26.9
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates git curl && \

@@ -360,7 +360,7 @@ func TestClaudeSecretaryUsesFullFlockAgentAndResumesBusinessChat(t *testing.T) {
 	}
 	first := runner.options[0]
 	wantWorkdir := filepath.Join(base, "chat_"+secretaryChatKey(10, 200))
-	if first.AnswerOnly || first.MCPConfig != filepath.Join(base, "mcp.json") ||
+	if first.AnswerOnly || !first.DelegatedReadOnly || first.MCPConfig != filepath.Join(base, "mcp.json") ||
 		first.MaxTurns != 40 || first.Effort != "ultracode" || first.Model != "selected-model" ||
 		first.Workdir != wantWorkdir || first.SessionID != "" || len(first.Env) != 1 {
 		t.Fatalf("secretary did not inherit full agent options: %+v", first)

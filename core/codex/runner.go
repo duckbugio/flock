@@ -61,6 +61,9 @@ const initScanBuf = 64 * 1024
 const stderrTailBytes = 4096
 
 func (r *runner) Run(ctx context.Context, prompt string, o agent.Options) (<-chan agent.Event, error) {
+	if o.DelegatedReadOnly {
+		return nil, errors.New("codex does not support delegated knowledge runs")
+	}
 	if o.AnswerOnly {
 		return r.answerOnly(ctx, prompt, o)
 	}

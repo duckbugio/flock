@@ -8,7 +8,7 @@
 # --- Build stage: compile the Go binary ---------------------------------------
 # Build on the native BUILDPLATFORM and cross-compile to TARGETARCH (CGO off), so
 # multi-arch builds don't pay for emulation.
-FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.2-bookworm AS build
 
 WORKDIR /src
 
@@ -61,7 +61,7 @@ RUN set -eux; \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list; \
     apt-get update; \
     apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin docker-buildx-plugin; \
-    npm install -g @anthropic-ai/claude-code; \
+    npm install -g @anthropic-ai/claude-code@2.1.294; \
     npm cache clean --force; \
     apt-get clean; rm -rf /var/lib/apt/lists/*
 

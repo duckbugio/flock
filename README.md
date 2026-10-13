@@ -69,8 +69,9 @@ currently supported on the Claude backend.
 Roles and prompts are behavioral preferences, not an execution sandbox. The bot
 retains its configured tools. MCP capabilities enforce data access; a project
 credential can also expose shared organization documents. Use an appropriate
-corpus for external replies. Approval mode reviews the outgoing message only,
-not tool actions performed while drafting.
+corpus for external replies. Direct chats keep normal tools. Delegated Secretary runs instead enforce a
+read-only knowledge tool policy; changing a role or prompt cannot add tools.
+Approval mode reviews the outgoing reply, and the host alone sends it.
 
 ## Telegram Secretary Mode
 
@@ -87,23 +88,27 @@ for Ansible deployments set `secretary_mode` in the inventory variables.
 `SECRETARY_MODE` controls reply approval, while the bot's `AI_BACKEND` and model
 remain separately configured. For now, Secretary Mode is available only when
 `AI_BACKEND=claude`; other providers leave the Telegram bot running without
-Business message handling. Business messages run through the normal Flock agent
-with its selected model, tools, MCP servers, skills, and rendered
-workspace. Each Business chat has its own durable workspace and session.
-People in chats granted to the bot can request actions through Flock's tools.
-In `approval` mode the owner approves the outgoing Telegram reply; agent tool
-actions happen during drafting and are not deferred by that approval.
-Grant access only to people you trust with Flock's normal tools and MCP. A
-Business message can trigger tool actions before you approve its reply, and
-canceling a run cannot undo completed actions. Business workspaces default to
-`SECRETARY_WORKSPACE_DIR=/workspace-business` and should be mounted persistently;
-the separate directory reduces accidental cross-chat access but is not a
-security boundary for an agent with shell tools.
+Business message handling. Delegated messages use the selected Claude model
+and rendered owner instructions with only authorized `kb_search`, `kb_get` and
+`kb_list` tools. The trusted host discovers and validates these read-only
+operations using this bot's existing MCP credential; the model receives only a
+short-lived local proxy capability. It cannot access shell, files, coding skills,
+subagents, arbitrary MCP dispatchers or send messages directly. Unsupported
+providers fail closed. Explicit `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`
+is required; implicit keychain/credential-file authentication is not inherited.
+The runtime pins Claude Code 2.1.294 to qualify these tool-policy flags. This is
+an application tool restriction, not an OS sandbox.
+
+Each delegated chat has separate private history and a `readonly_v1` session
+namespace; ordinary coding sessions and old unrestricted secretary sessions
+are never resumed. Business workspaces default to
+`SECRETARY_WORKSPACE_DIR=/workspace-business` and must be mounted persistently.
+
 Set a spending limit with your provider before enabling automatic replies. The
 bot caps requests per minute and applies its configured cost cap to Business
 runs. Flock resumes each Business chat's earlier conversation. Approval
 draft replies and routing metadata are stored in `secretary-state.json` under
-`APPROVED_DIRECTORY`, which the coding agent can read. Edited or deleted messages
+`APPROVED_DIRECTORY`; delegated runs receive no file-access tools. Edited or deleted messages
 cancel unsent approval drafts; the bot does not generate a replacement reply for
 an edit. Approval buttons expire after
 24 hours; Telegram may reject a reply earlier if its business reply window has
