@@ -99,7 +99,7 @@ is required; implicit keychain/credential-file authentication is not inherited.
 The runtime pins Claude Code 2.1.294 to qualify these tool-policy flags. This is
 an application tool restriction, not an OS sandbox.
 
-Each delegated chat has separate private history and a `readonly_v1` session
+Each delegated chat has separate private history and a `readonly_v2` session
 namespace; ordinary coding sessions and old unrestricted secretary sessions
 are never resumed. Business workspaces default to
 `SECRETARY_WORKSPACE_DIR=/workspace-business` and must be mounted persistently.
