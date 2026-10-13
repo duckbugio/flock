@@ -66,6 +66,12 @@ work; its returned files are not installed as bot rules. Existing tokens may lac
 `knowledge:read`; use DuckBug's token/access flow to grant it. This MCP wiring is
 currently supported on the Claude backend.
 
+Delegated runs use the effective catalog of the current credential, including
+deployment availability. If no authorized KB operations are present, ordinary
+replies still work, but the agent is told that the knowledge base is unavailable
+and must not promise a lookup or invent document sources. Product MCP documents
+and app-admin document pickers are not substitutes for the owner's knowledge base.
+
 Roles and prompts are behavioral preferences, not an execution sandbox. The bot
 retains its configured tools. MCP capabilities enforce data access; a project
 credential can also expose shared organization documents. Use an appropriate

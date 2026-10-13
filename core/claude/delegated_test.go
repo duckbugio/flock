@@ -4,11 +4,15 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestDelegatedLaunchExcludesCredentialsAndOrdinaryWorkspace(t *testing.T) {
@@ -68,6 +72,11 @@ func TestDelegatedLaunchExcludesCredentialsAndOrdinaryWorkspace(t *testing.T) {
 	if err != nil || string(config) != `{"mcpServers":{}}` {
 		t.Fatal("empty scope inherited other MCP servers")
 	}
+	instructions, err := os.ReadFile(filepath.Join(prepared.Workdir, "instructions.txt"))
+	if err != nil || !strings.Contains(string(instructions), "no authorized knowledge-base tools are available") ||
+		!strings.Contains(string(instructions), "Owner disclosure rules") {
+		t.Fatal("unavailable knowledge or owner policy was not communicated")
+	}
 	cleanup()
 	if _, err := os.Stat(prepared.Workdir); !os.IsNotExist(err) {
 		t.Fatal("temporary run files retained")
@@ -85,5 +94,40 @@ func TestDelegatedLaunchFailsClosedWithoutExplicitAuthentication(t *testing.T) {
 	_, cleanup, err = prepareDelegated(t.Context(), Options{DelegatedReadOnly: true, AnswerOnly: true})
 	if err == nil || cleanup != nil {
 		t.Fatal("conflicting execution policies were permitted")
+	}
+}
+
+func TestDelegatedLaunchExplainsEmptyAuthorizedKnowledgeCatalog(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "1"}, nil)
+	server.AddTool(&mcp.Tool{Name: "discover_tools", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return &mcp.CallToolResult{StructuredContent: map[string]any{"tools": []any{}}}, nil
+		})
+	upstream := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server },
+		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true}))
+	t.Cleanup(upstream.Close)
+	owner := t.TempDir()
+	if err := os.WriteFile(filepath.Join(owner, "CLAUDE.md"), []byte("Owner disclosure rules"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(owner, "mcp.json")
+	if _, err := WriteMCPConfig(config, map[string]MCPServer{"duckbug": {URL: upstream.URL, BearerToken: "fixture"}}); err != nil {
+		t.Fatal(err)
+	}
+	prepared, cleanup, err := prepareDelegated(t.Context(), Options{
+		Workdir: owner, MCPConfig: config,
+		Env: []string{"ANTHROPIC_API_KEY=synthetic-provider"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cleanup)
+	instructions, err := os.ReadFile(filepath.Join(prepared.Workdir, "instructions.txt"))
+	if err != nil || !strings.Contains(string(instructions), "no authorized knowledge-base tools are available") {
+		t.Fatal("empty discovery was hidden from the delegated agent")
+	}
+	data, err := os.ReadFile(prepared.MCPConfig)
+	if err != nil || string(data) != `{"mcpServers":{}}` {
+		t.Fatal("empty discovery inherited other MCP access")
 	}
 }

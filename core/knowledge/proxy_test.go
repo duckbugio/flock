@@ -73,6 +73,26 @@ func proxyClient(t *testing.T, proxy *Proxy) *mcp.ClientSession {
 	return session
 }
 
+func TestProxyReportsEmptyAuthorizedCatalog(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "1"}, nil)
+	server.AddTool(&mcp.Tool{Name: "discover_tools", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return &mcp.CallToolResult{StructuredContent: map[string]any{"tools": []any{}}}, nil
+		})
+	upstream := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server },
+		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true}))
+	t.Cleanup(upstream.Close)
+	proxy, err := Start(t.Context(), upstream.URL, "Bearer fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(proxy.Close)
+	listed, err := proxyClient(t, proxy).ListTools(t.Context(), nil)
+	if err != nil || len(listed.Tools) != 0 || proxy.Available {
+		t.Fatal("empty knowledge catalog reported as available")
+	}
+}
+
 func TestProxyOnlyReadsKnowledgeAndPreservesBotScope(t *testing.T) {
 	endpoint, calls, mu := fakeKnowledge(t, false)
 	proxy, err := Start(t.Context(), endpoint, "Bearer upstream-fixture")
@@ -82,7 +102,7 @@ func TestProxyOnlyReadsKnowledgeAndPreservesBotScope(t *testing.T) {
 	t.Cleanup(proxy.Close)
 	client := proxyClient(t, proxy)
 	listed, err := client.ListTools(t.Context(), nil)
-	if err != nil || len(listed.Tools) != 3 {
+	if err != nil || len(listed.Tools) != 3 || !proxy.Available {
 		t.Fatalf("tools = %v, error %v", listed, err)
 	}
 	for _, tool := range listed.Tools {

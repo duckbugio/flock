@@ -29,9 +29,10 @@ var leaves = [...]string{"kb_search", "kb_get", "kb_list"}
 
 // Proxy keeps the upstream credential inside the trusted host process.
 type Proxy struct {
-	URL   string
-	Token string
-	close func()
+	URL       string
+	Token     string
+	Available bool
+	close     func()
 }
 
 // Close releases the local listener and its upstream session.
@@ -104,7 +105,7 @@ func Start(ctx context.Context, endpoint, authorization string) (*Proxy, error) 
 	}
 	discoveryCtx, cancel := context.WithTimeout(ctx, operationTimeout)
 	defer cancel()
-	server, err := readServer(discoveryCtx, session)
+	server, available, err := readServer(discoveryCtx, session)
 	if err != nil {
 		_ = session.Close()
 		return nil, err
@@ -133,7 +134,7 @@ func Start(ctx context.Context, endpoint, authorization string) (*Proxy, error) 
 	}
 	go func() { _ = host.Serve(listener) }()
 	var once sync.Once
-	return &Proxy{URL: "http://" + listener.Addr().String() + "/mcp", Token: token, close: func() {
+	return &Proxy{URL: "http://" + listener.Addr().String() + "/mcp", Token: token, Available: available, close: func() {
 		once.Do(func() {
 			_ = host.Close()
 			_ = session.Close()
@@ -150,40 +151,41 @@ type catalogTool struct {
 	InputSchema json.RawMessage `json:"inputSchema"`
 }
 
-func readServer(ctx context.Context, session *mcp.ClientSession) (*mcp.Server, error) {
+func readServer(ctx context.Context, session *mcp.ClientSession) (*mcp.Server, bool, error) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "flock-secretary-knowledge", Version: "1"}, nil)
+	available := false
 	for _, leaf := range leaves {
 		response, err := session.CallTool(ctx, &mcp.CallToolParams{
 			Name:      "discover_tools",
 			Arguments: map[string]any{"name": leaf, "includeSchema": true},
 		})
 		if err != nil {
-			return nil, errors.New("knowledge discovery failed")
+			return nil, false, errors.New("knowledge discovery failed")
 		}
 		var discovery struct {
 			Tools []catalogTool `json:"tools"`
 		}
 		if err := resultJSON(response, &discovery); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if len(discovery.Tools) == 0 {
-			continue // The bot token does not authorize this operation.
+			continue // This operation is absent from the effective catalog.
 		}
 		if len(discovery.Tools) != 1 {
-			return nil, errors.New("ambiguous knowledge tool")
+			return nil, false, errors.New("ambiguous knowledge tool")
 		}
 		tool := discovery.Tools[0]
 		if tool.Name != leaf || tool.Mutates == nil || *tool.Mutates || tool.Execution != "read" ||
 			tool.Surface != "catalog" || tool.DirectOnly {
-			return nil, errors.New("knowledge tool is not an authorized catalog read")
+			return nil, false, errors.New("knowledge tool is not an authorized catalog read")
 		}
 		var schema jsonschema.Schema
 		if err := json.Unmarshal(tool.InputSchema, &schema); err != nil || schema.Type != "object" {
-			return nil, errors.New("invalid knowledge tool schema")
+			return nil, false, errors.New("invalid knowledge tool schema")
 		}
 		resolved, err := schema.Resolve(&jsonschema.ResolveOptions{ValidateDefaults: true})
 		if err != nil {
-			return nil, errors.New("unsupported knowledge tool schema")
+			return nil, false, errors.New("unsupported knowledge tool schema")
 		}
 		// Low-level registration deliberately uses the pre-resolved schema so a
 		// malformed upstream schema cannot panic or fetch external references.
@@ -215,8 +217,9 @@ func readServer(ctx context.Context, session *mcp.ClientSession) (*mcp.Server, e
 			}
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(envelope.Result)}}}, nil
 		})
+		available = true
 	}
-	return server, nil
+	return server, available, nil
 }
 
 func resultJSON(result *mcp.CallToolResult, target any) error {
