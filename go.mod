@@ -7,4 +7,4 @@ require (
 	github.com/go-telegram/bot v1.27.0
 )
 
-require golang.org/x/sync v0.23.0
+require golang.org/x/sync v0.24.0
