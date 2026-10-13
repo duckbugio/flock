@@ -40,6 +40,12 @@ func prepareDelegated(ctx context.Context, o Options) (Options, func(), error) {
 	if err != nil {
 		return o, nil, err
 	}
+	if len(servers) == 0 {
+		instructions = append(instructions, []byte("\n\nCurrent run: no authorized knowledge-base tools are available. "+
+			"Answer ordinary requests within the owner's rules, but if an answer requires knowledge-base documents, "+
+			"say that this knowledge source is currently unavailable. Do not promise a lookup, fabricate sources, "+
+			"or claim to have read documents.\n")...)
+	}
 	dir, err := os.MkdirTemp("", "flock-secretary-")
 	if err != nil {
 		closeKnowledge()
@@ -130,6 +136,10 @@ func delegatedServers(ctx context.Context, path string) (map[string]MCPServer, f
 	proxy, err := knowledge.Start(ctx, upstream.URL, upstream.Headers["Authorization"])
 	if err != nil {
 		return nil, nil, errors.New("delegated knowledge connection unavailable")
+	}
+	if !proxy.Available {
+		proxy.Close()
+		return servers, cleanup, nil
 	}
 	servers["secretary_knowledge"] = MCPServer{URL: proxy.URL, BearerToken: proxy.Token}
 	return servers, proxy.Close, nil

@@ -115,6 +115,11 @@ func TestIntegration_DelegatedCLIReadOnlyAndScopedResume(t *testing.T) {
 			if step == 0 {
 				block["input"] = map[string]any{"query": "recipient-safe fixture"}
 			}
+		} else if step == 5 {
+			block = map[string]any{
+				"type": fixtureToolUse, "id": "resumed_read", "name": "mcp__secretary_knowledge__kb_search",
+				"input": map[string]any{"query": "resumed recipient-safe fixture"},
+			}
 		}
 		writeModelFixture(t, w, block)
 	}))
@@ -167,7 +172,7 @@ func TestIntegration_DelegatedCLIReadOnlyAndScopedResume(t *testing.T) {
 	run("recipient-B-marker", options)
 	mu.Lock()
 	defer mu.Unlock()
-	if reads != 1 || deliveries != 0 || len(requests) < 7 {
+	if reads != 2 || deliveries != 0 || len(requests) < 8 {
 		t.Fatalf("read/resume requests = %d/%d", reads, len(requests))
 	}
 	assertDelegatedInventory(t, inventories)
