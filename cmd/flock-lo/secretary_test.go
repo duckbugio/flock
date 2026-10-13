@@ -205,7 +205,7 @@ func TestSecretaryFullAgentBotReviewAndAuto(t *testing.T) {
 				t.Fatal("wrong delivery mode")
 			}
 			opts := runner.opts[0]
-			if opts.AnswerOnly || opts.MaxTurns != 7 || opts.Model != "selected-model" ||
+			if opts.AnswerOnly || !opts.DelegatedReadOnly || opts.MaxTurns != 7 || opts.Model != "selected-model" ||
 				!inside(manager.runtime.workspace.BaseDir, opts.Workdir) {
 				t.Fatalf("agent options: %+v", opts)
 			}

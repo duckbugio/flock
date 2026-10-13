@@ -77,6 +77,9 @@ type Options struct {
 	// AnswerOnly disables agent tools for delegated chat messages. No current
 	// adapter uses it; retain the runner capability for future transports.
 	AnswerOnly bool
+	// DelegatedReadOnly permits knowledge retrieval, never local or mutating tools.
+	// Providers without this policy must reject the run instead of falling back.
+	DelegatedReadOnly bool
 }
 
 // Runner runs prompts through a provider.
