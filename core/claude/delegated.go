@@ -49,7 +49,7 @@ func prepareDelegated(ctx context.Context, o Options) (Options, func(), error) {
 		closeKnowledge()
 		_ = os.RemoveAll(dir)
 	}
-	// The adapter's readonly_v1 workspace is scoped to one owner and recipient.
+	// The adapter's versioned read-only workspace is scoped to one owner and recipient.
 	// LO additionally separates connection and policy generations.
 	// Preserve only its isolated CLI history; never resume ordinary agent sessions.
 	configDir := filepath.Join(o.Workdir, ".secretary-config")
