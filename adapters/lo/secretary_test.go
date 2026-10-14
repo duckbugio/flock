@@ -87,52 +87,27 @@ func TestSecretaryRejectsAmbiguousOrInvalidUpdatesWithoutBotFallback(t *testing.
 
 func TestSecretaryDelegatedWritesUseExactContextAndIdempotency(t *testing.T) {
 	t.Parallel()
-	for _, draft := range []bool{false, true} {
-		t.Run(strconv.FormatBool(draft), func(t *testing.T) {
-			t.Parallel()
-			action := lo.SecretaryAction{
-				ConnectionID: secretaryConnectionID, RequestID: "flock:durable-key",
-				Context: secretaryScope(), ChatID: 77, Text: "reply",
-			}
-			if draft {
-				action.Reason = "manual_review"
-			}
-			api := client(t, func(w http.ResponseWriter, r *http.Request) {
-				var received lo.SecretaryAction
-				if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
-					t.Error(err)
-				}
-				if received != action {
-					t.Errorf("wrong delegated body: %+v", received)
-				}
-				if draft {
-					if !strings.HasSuffix(r.URL.Path, "/proposeBusinessDraft") {
-						t.Error("wrong method")
-					}
-					reply(w, `{"ok":true,"result":{"lo_draft_id":"69417813-99f5-4dc5-a6a8-4c45151b1e5c`+
-						`","business_connection_id":"`+secretaryConnectionID+
-						`","lo_conversation_id":19,"chat_id":77,"lo_source_message_id":"922337203`+
-						`6854775806","text":"reply","state":"draft","mode":"review","lo_revision"`+
-						`:1,"lo_secretary_bot_id":1000000000000001,"reason":"manual_review","date`+`":1,"expires_at":2}}`)
-				} else {
-					if !strings.HasSuffix(r.URL.Path, "/sendMessage") {
-						t.Error("wrong method")
-					}
-					reply(w, `{"ok":true,"result":{"message_id":2,"business_connection_id":"`+secretaryConnectionID+
-						`","chat":{"id":77,"type":"private"},"from":{"id":1,"is_bot":false},"lo_s`+
-						`ecretary_bot_id":1000000000000001,"text":"reply"}}`)
-				}
-			})
-			if draft {
-				if _, err := api.ProposeBusinessDraft(t.Context(), action); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				if err := api.SendSecretaryText(t.Context(), action, 1); err != nil {
-					t.Fatal(err)
-				}
-			}
-		})
+	action := lo.SecretaryAction{
+		ConnectionID: secretaryConnectionID, RequestID: "flock:durable-key",
+		Context: secretaryScope(), ChatID: 77, Text: "reply",
+	}
+	api := client(t, func(w http.ResponseWriter, r *http.Request) {
+		var received lo.SecretaryAction
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Error(err)
+		}
+		if received != action {
+			t.Errorf("wrong delegated body: %+v", received)
+		}
+		if !strings.HasSuffix(r.URL.Path, "/sendMessage") {
+			t.Error("wrong method")
+		}
+		reply(w, `{"ok":true,"result":{"message_id":2,"business_connection_id":"`+secretaryConnectionID+
+			`","chat":{"id":77,"type":"private"},"from":{"id":1,"is_bot":false},`+
+			`"lo_secretary_bot_id":1000000000000001,"text":"reply"}}`)
+	})
+	if err := api.SendSecretaryText(t.Context(), action, 1); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -205,9 +180,9 @@ func TestSecretaryVoiceUsesNestedNativeAttachment(t *testing.T) {
 	}
 }
 
-func TestSecretaryRequestsMatchRealSDK02Fixtures(t *testing.T) {
+func TestSecretaryRequestsMatchRealSDK06Fixtures(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile("testdata/secretary-sdk-0.2.json")
+	data, err := os.ReadFile("testdata/secretary-sdk-0.6.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +197,7 @@ func TestSecretaryRequestsMatchRealSDK02Fixtures(t *testing.T) {
 	if err := json.Unmarshal(data, &corpus); err != nil {
 		t.Fatal(err)
 	}
-	if len(corpus.Fixtures) != 3 {
+	if len(corpus.Fixtures) != 2 {
 		t.Fatal("missing SDK fixtures")
 	}
 	for _, fixture := range corpus.Fixtures {
@@ -240,7 +215,7 @@ func TestSecretaryRequestsMatchRealSDK02Fixtures(t *testing.T) {
 					t.Error(err)
 				}
 				if !reflect.DeepEqual(got, want) {
-					t.Errorf("request differs from pinned SDK 0.2: %v", got)
+					t.Errorf("request differs from pinned SDK 0.6: %v", got)
 				}
 				reply(w, `{"ok":true,"result":`+string(fixture.Result)+`}`)
 			})
@@ -259,10 +234,21 @@ func TestSecretaryRequestsMatchRealSDK02Fixtures(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else {
-				if _, err := api.ProposeBusinessDraft(t.Context(), action); err != nil {
-					t.Fatal(err)
-				}
+				t.Fatal("unknown SDK fixture operation")
 			}
 		})
+	}
+}
+
+func TestSecretaryLegacyProposalCannotBecomeDelegatedSend(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	api := client(t, func(http.ResponseWriter, *http.Request) { calls++ })
+	action := lo.SecretaryAction{
+		ConnectionID: secretaryConnectionID, RequestID: "flock:legacy-key",
+		Context: secretaryScope(), ChatID: 77, Text: "legacy proposal", Reason: "manual_review",
+	}
+	if err := api.SendSecretaryText(t.Context(), action, 1); err == nil || calls != 0 {
+		t.Fatal("legacy proposal was admitted as a new delegated send")
 	}
 }

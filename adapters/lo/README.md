@@ -279,15 +279,18 @@ server/client rollout, enable the pilot owner and bot capability, grant rights i
 LO, then test review, automatic reply, voice, edit/delete and revoke while running.
 Local HTTP contract and race tests do not establish production readiness.
 
-Contract regression fixtures in `testdata/secretary-sdk-0.2.json` are generated
-by the actual [SDK 0.2 HTTP adapter](https://github.com/lo-ink/lo-platform-adapters/blob/3cd0095a27467ed4f494b329158a365c44951daa/packages/bot-http-lo/src/secretary.ts).
-The generator validates native receipts with that adapter before writing the
-fixtures. Go tests compare delegated request bodies against those
-fixtures, including IDs above JavaScript's safe integer range. Regenerate after
-building the pinned SDK revision:
+Contract regression fixtures in `testdata/secretary-sdk-0.6.json` are generated
+by the published [Bot SDK 0.6.0](https://github.com/LO-ink/lo-bot-sdk/tree/b9525c01079d165ee8ac171c2fe936a4a072cf08)
+public secretary client with a synthetic HTTP recorder. The SDK validates each
+native receipt before the golden file is written. Go tests compare delegated
+requests, including IDs above JavaScript's safe integer range. The obsolete
+native proposal API is removed; persisted legacy reasons still refuse a direct
+send and are never converted into new approved work.
+
+Create an isolated consumer with exactly `@lo-ink/bot-sdk@0.6.0` installed, then:
 
 ```sh
-node adapters/lo/testdata/generate-secretary-sdk.mjs /path/to/packages/bot-http-lo/dist/secretary.js
+node adapters/lo/testdata/generate-secretary-sdk.mjs /path/to/consumer
 ```
 
 The merged Bot API also covers lossless string input in
