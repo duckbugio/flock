@@ -1,4 +1,4 @@
-//nolint:tagliatelle // LO Bot API uses snake_case wire keys, matching the native SDK 0.2 transport.
+//nolint:tagliatelle // LO Bot API uses snake_case wire keys, matching the native SDK 0.6 transport.
 package lo
 
 import (
@@ -11,9 +11,9 @@ import (
 	"strings"
 )
 
-// Native SDK 0.2 bounds (human and bot namespaces differ):
-// https://github.com/lo-ink/lo-platform-adapters/tree/3cd0095a27467ed4f494b329158a365c44951daa
-// See packages/bot-http-lo/src/secretary.ts and the generated fixtures in testdata/.
+// Native SDK 0.6 bounds (human and bot namespaces differ):
+// https://github.com/LO-ink/lo-bot-sdk/tree/b9525c01079d165ee8ac171c2fe936a4a072cf08
+// See src/http/ and the generated fixtures in testdata/.
 const (
 	maxSecretaryConversationID = 2147483647
 	maxSecretaryUserID         = 999999999999999
@@ -40,7 +40,7 @@ func (n *SecretaryNumber) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalJSON keeps int64 IDs lossless across JSON gateways and the SDK 0.2 transport.
+// MarshalJSON keeps int64 IDs lossless across JSON gateways and the SDK 0.6 transport.
 func (n SecretaryNumber) MarshalJSON() ([]byte, error) { return json.Marshal(n.String()) }
 
 // String returns a lossless decimal ID.
@@ -208,24 +208,6 @@ type SecretaryAction struct {
 	Reason       string           `json:"lo_draft_reason,omitempty"`
 }
 
-// SecretaryDraft is reviewed by the account owner in LO, never by third-party callback buttons.
-type SecretaryDraft struct {
-	ID              string           `json:"lo_draft_id"`
-	ConnectionID    string           `json:"business_connection_id"`
-	ConversationID  SecretaryNumber  `json:"lo_conversation_id"`
-	ChatID          SecretaryNumber  `json:"chat_id"`
-	SourceMessageID SecretaryNumber  `json:"lo_source_message_id"`
-	Text            string           `json:"text"`
-	State           string           `json:"state"`
-	Mode            string           `json:"mode"`
-	Revision        SecretaryNumber  `json:"lo_revision"`
-	BotID           SecretaryNumber  `json:"lo_secretary_bot_id"`
-	Reason          string           `json:"reason"`
-	Date            int64            `json:"date"`
-	ExpiresAt       int64            `json:"expires_at"`
-	MessageID       *SecretaryNumber `json:"message_id,omitempty"`
-}
-
 // WithSecretary enables native event subscription before polling starts.
 func (c *Client) WithSecretary(enabled bool) *Client { c.secretaryEnabled = enabled; return c }
 
@@ -250,30 +232,6 @@ func (action SecretaryAction) Valid() bool {
 		len(action.RequestID) >= 8 && len(action.RequestID) <= 128 &&
 		strings.IndexFunc(action.RequestID, func(r rune) bool { return r < 33 || r > 126 }) == -1 &&
 		messageText(action.Text) == nil
-}
-
-// ProposeBusinessDraft uses native server-side owner review; Flock cannot approve the draft.
-func (c *Client) ProposeBusinessDraft(ctx context.Context, action SecretaryAction) (SecretaryDraft, error) {
-	var result SecretaryDraft
-	if !action.Valid() || action.Reason != "manual_review" {
-		return result, errors.New("invalid LO secretary draft")
-	}
-	if err := c.call(ctx, "proposeBusinessDraft", action, &result); err != nil {
-		return result, err
-	}
-	if !ValidSecretaryConnectionID(result.ID) || result.ConnectionID != action.ConnectionID ||
-		result.ConversationID != action.Context.ConversationID || result.ChatID != action.ChatID ||
-		result.SourceMessageID != action.Context.SourceMessageID || result.Revision <= 0 || result.BotID < minSecretaryBotID ||
-		result.BotID > maxSecretarySafeInteger || result.Date <= 0 || result.ExpiresAt <= result.Date ||
-		(result.State == "sent") != (result.MessageID != nil) ||
-		!slices.Contains([]string{
-			"manual_review", "owner_cancelled", "policy_changed", "source_changed",
-			"manual_takeover", "superseded",
-		}, result.Reason) || result.Text != action.Text || result.Mode != "review" ||
-		!slices.Contains([]string{"draft", "approved", "sent", "cancelled", "expired"}, result.State) {
-		return SecretaryDraft{}, errors.New("invalid LO secretary draft response")
-	}
-	return result, nil
 }
 
 // SendSecretaryText sends one idempotent message from the human account, not a normal bot chat reply.
