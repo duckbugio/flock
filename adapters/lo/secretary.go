@@ -40,7 +40,7 @@ func (n *SecretaryNumber) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalJSON keeps int64 IDs lossless across JSON gateways and the SDK 0.2 transport.
+// MarshalJSON keeps int64 IDs lossless across JSON gateways and the SDK 0.6 transport.
 func (n SecretaryNumber) MarshalJSON() ([]byte, error) { return json.Marshal(n.String()) }
 
 // String returns a lossless decimal ID.

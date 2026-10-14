@@ -197,7 +197,7 @@ server, and a compatible native client.
 
 ## Native LO secretary
 
-The Go adapter implements the native SDK 0.2 wire contract directly; it does not
+The Go adapter implements the native SDK 0.6 wire contract directly; it does not
 import the TypeScript SDK or reuse Telegram consent flags. Use a deployment with
 `lo_schema_version=1`, policy versions, independent `lo_rights` and delegated
 source contexts. Ordinary bot messages remain a separate path.
@@ -217,8 +217,10 @@ Consent and source policy are checked again before transcription, agent executio
 and delivery. Edits, deletion and connection changes cancel pending work. Native
 server guards remain authoritative for races with manual takeover or revocation.
 
-Secretary runs use normal Flock tools and configured MCP servers. Approval gates
-the outgoing reply, not tool actions. Workspaces and sessions are isolated by
+Secretary runs use only authorized read-only knowledge tools (`kb_search`,
+`kb_get`, `kb_list`) through the validated knowledge proxy and a `readonly_v2`
+session. The model receives no shell, write or message-sending tool authority.
+Owner approval authorizes only the exact final reply. Workspaces and sessions are isolated by
 owner, connection, conversation and policy version under
 `<SECRETARY_WORKSPACE_DIR>/lo`, outside `APPROVED_DIRECTORY`. Compose persists
 this root in `secretary_workspace`. Host runs must set
