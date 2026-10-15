@@ -32,7 +32,7 @@ import (
 
 const (
 	secretaryRetryMultiplier      = 2
-	secretaryStateVersion         = 2
+	secretaryStateVersion         = 3
 	secretaryMaxJobs              = 10000
 	secretaryMaxConnections       = 1024
 	secretaryMaxStateBytes        = 32 << 20
@@ -90,12 +90,13 @@ type secretaryJob struct {
 }
 
 type secretaryState struct {
-	UpdateFloor int64                             `json:"updateFloor"`
-	Version     int                               `json:"version"`
-	BotID       int64                             `json:"botId"`
-	Jobs        map[string]secretaryJob           `json:"jobs"`
-	Connections map[string]lo.SecretaryConnection `json:"connections"`
-	Invalid     map[string]int64                  `json:"invalid"`
+	UpdateFloor   int64                             `json:"updateFloor"`
+	Version       int                               `json:"version"`
+	BotID         int64                             `json:"botId"`
+	Jobs          map[string]secretaryJob           `json:"jobs"`
+	Connections   map[string]lo.SecretaryConnection `json:"connections"`
+	Invalid       map[string]int64                  `json:"invalid"`
+	ManualReplies map[string]secretaryManualReply   `json:"manualReplies"`
 }
 
 type secretaryRuntime struct {
@@ -148,6 +149,7 @@ func newSecretaryManager(cfg config.Config, api secretaryAPI, botID int64, runti
 		state: secretaryState{
 			Version: secretaryStateVersion, BotID: botID, Jobs: map[string]secretaryJob{},
 			Connections: map[string]lo.SecretaryConnection{}, Invalid: map[string]int64{},
+			ManualReplies: map[string]secretaryManualReply{},
 		},
 	}
 	if err := manager.load(); err != nil {
@@ -212,6 +214,9 @@ func (m *secretaryManager) load() error {
 	if info.Size() > secretaryMaxStateBytes {
 		return errors.New("LO secretary state exceeds size limit")
 	}
+	// Existing v3 files must carry their replay fence explicitly. Older schema
+	// versions initialize it only through the migration below.
+	m.state.ManualReplies = nil
 	if err := json.NewDecoder(file).Decode(&m.state); err != nil {
 		return fmt.Errorf("decode LO secretary state: %w", err)
 	}
@@ -225,12 +230,13 @@ func (m *secretaryManager) load() error {
 				m.state.Jobs[key] = compactSecretaryJob(job)
 			}
 		}
-		m.state.Version = secretaryStateVersion
 	}
-	if m.state.UpdateFloor < 0 || m.state.Version != secretaryStateVersion || m.state.BotID != m.botID || m.state.Jobs == nil ||
-		m.state.Connections == nil || m.state.Invalid == nil || len(m.state.Invalid) > secretaryMaxJobs ||
-		len(m.state.Jobs) > secretaryMaxJobs || len(m.state.Connections) > secretaryMaxConnections {
-		return errors.New("invalid LO secretary state identity or bounds")
+	if legacy || m.state.Version == 2 {
+		m.state.Version = secretaryStateVersion
+		m.state.ManualReplies = map[string]secretaryManualReply{}
+	}
+	if err := m.validateState(); err != nil {
+		return err
 	}
 	for key, job := range m.state.Jobs {
 		if err := m.validateJob(key, job); err != nil {
@@ -263,6 +269,21 @@ func (m *secretaryManager) load() error {
 	}
 	m.pruneLocked()
 	return m.saveLocked()
+}
+
+func (m *secretaryManager) validateState() error {
+	if m.state.UpdateFloor < 0 || m.state.Version != secretaryStateVersion || m.state.BotID != m.botID || m.state.Jobs == nil ||
+		m.state.Connections == nil || m.state.Invalid == nil || m.state.ManualReplies == nil ||
+		len(m.state.ManualReplies) > secretaryMaxJobs || len(m.state.Invalid) > secretaryMaxJobs ||
+		len(m.state.Jobs) > secretaryMaxJobs || len(m.state.Connections) > secretaryMaxConnections {
+		return errors.New("invalid LO secretary state identity or bounds")
+	}
+	for key, marker := range m.state.ManualReplies {
+		if !marker.valid() || key != marker.key() {
+			return errors.New("invalid persisted LO manual reply watermark")
+		}
+	}
+	return nil
 }
 
 func (m *secretaryManager) validateJob(key string, job secretaryJob) error {
@@ -343,6 +364,12 @@ func (m *secretaryManager) err() error {
 func (m *secretaryManager) pruneLocked() bool {
 	changed := false
 	cutoff := time.Now().Add(-secretaryLifetime).Unix()
+	for key, marker := range m.state.ManualReplies {
+		if marker.ObservedAt < cutoff {
+			delete(m.state.ManualReplies, key)
+			changed = true
+		}
+	}
 	for key, at := range m.state.Invalid {
 		if at < cutoff {
 			delete(m.state.Invalid, key)
@@ -364,7 +391,24 @@ func (m *secretaryManager) pruneLocked() bool {
 }
 
 // Handle persists the native update watermark and changes before polling acknowledgement.
-func (m *secretaryManager) Handle(_ context.Context, update lo.Update) (err error) {
+func (m *secretaryManager) Handle(ctx context.Context, update lo.Update) (err error) {
+	m.mu.Lock()
+	failure := m.failure
+	duplicate := update.ID > 0 && update.ID <= m.state.UpdateFloor
+	m.mu.Unlock()
+	if failure != nil || duplicate {
+		return failure
+	}
+	// A direction candidate must be authenticated before it can invalidate jobs.
+	// Never perform the connection lookup while holding the state lock.
+	var manualConnection *lo.SecretaryConnection
+	if msg := update.BusinessMessage; isSecretaryManualCandidate(msg) {
+		conn, lookupErr := m.api.GetBusinessConnection(ctx, msg.ConnectionID)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		manualConnection = &conn
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failure != nil {
@@ -396,6 +440,9 @@ func (m *secretaryManager) Handle(_ context.Context, update lo.Update) (err erro
 	if deleted := update.DeletedBusinessMessages; deleted != nil {
 		m.invalidateSourceLocked(deleted.ConnectionID, deleted.Context, deleted.MessageIDs)
 		return nil
+	}
+	if manualConnection != nil {
+		return m.observeManualReplyLocked(*update.BusinessMessage, *manualConnection)
 	}
 	m.admitLocked(update)
 	return nil
@@ -451,6 +498,9 @@ func (m *secretaryManager) admitLocked(update lo.Update) {
 	}
 	if conn, exists := m.state.Connections[msg.ConnectionID]; exists &&
 		conn.PolicyVersion >= msg.Context.PolicyVersion && !conn.CanReply(msg.Context) {
+		job.Status = secretaryCancelled
+	}
+	if conn, exists := m.state.Connections[msg.ConnectionID]; exists && m.manuallyAnsweredLocked(conn.User.ID, job) {
 		job.Status = secretaryCancelled
 	}
 	if !m.admissionFitsLocked(job) {
@@ -810,7 +860,7 @@ func (m *secretaryManager) connection(ctx context.Context, key string, job secre
 	// A newer poll snapshot can revoke an in-flight lookup; an older one cannot reject a fresh generation.
 	latest, exists := m.state.Connections[conn.ID]
 	current := m.state.Jobs[key]
-	if m.failure != nil || secretaryTerminal(current.Status) ||
+	if m.failure != nil || secretaryTerminal(current.Status) || m.manuallyAnsweredLocked(conn.User.ID, current) ||
 		(exists && latest.PolicyVersion >= conn.PolicyVersion &&
 			(!latest.CanReply(job.Message.Context) || latest.User.ID != conn.User.ID)) {
 		return conn, errSecretaryConsent

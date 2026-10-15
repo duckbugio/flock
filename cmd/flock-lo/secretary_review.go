@@ -133,8 +133,7 @@ func (m *secretaryManager) publishReviewNotice(ctx context.Context, key string, 
 	id, err := m.api.SendSecretaryReviewNotice(ctx, job.OwnerID, m.botID, int64(job.Message.Chat.ID),
 		job.Action.Text, job.ReviewToken)
 	if err == nil && id > 0 {
-		job.NoticeID, job.Status = id, secretaryAwaiting
-		m.store(key, job)
+		m.recordReviewNotice(key, job.ReviewToken, id)
 		return
 	}
 	var apiErr *lo.APIError
@@ -145,6 +144,29 @@ func (m *secretaryManager) publishReviewNotice(ctx context.Context, key string, 
 		m.retry(key, err)
 	}
 	slog.Warn("LO secretary review preview failed", "update_id", job.UpdateID, "attempt", job.NoticeAttempts)
+}
+
+// A confirmed preview can return after cancellation. Retain its receipt without
+// restoring the draft, so the pump can remove its now-invalid callback buttons.
+func (m *secretaryManager) recordReviewNotice(key, token string, id int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job, exists := m.state.Jobs[key]
+	if !exists || m.failure != nil || job.ReviewToken != token || job.NoticeID != 0 {
+		return
+	}
+	job.NoticeID = id
+	if job.Status == secretaryPrepared {
+		job.Status = secretaryAwaiting
+	}
+	m.state.Jobs[key] = job
+	if err := m.saveLocked(); err != nil {
+		slog.Error("persist LO secretary review receipt", "error", err)
+	}
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
 }
 
 func (m *secretaryManager) publishReviewContext(ctx context.Context, key string, job secretaryJob) (secretaryJob, bool) {

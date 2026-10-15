@@ -214,7 +214,13 @@ The connection owner must be in `LO_ALLOWED_USERS` and independently grant both
 `receive_messages` and `send_messages`. The peer is not checked against the bot
 command allow-list. Owner messages and delegated bot echoes never trigger replies.
 Consent and source policy are checked again before transcription, agent execution
-and delivery. Edits, deletion and connection changes cancel pending work. Native
+and delivery. Edits, deletion, connection changes and authenticated owner manual replies cancel pending work.
+A manual reply cancels unsent work only within its owner, connection, conversation,
+peer and policy scope, up to its conversation `source_revision`. Message IDs are
+identities, not an ordering fence. No-text manual messages also count. The bot
+persists the highest observed revision for 48 hours, so delayed older sources and
+replayed events cannot regenerate the cancelled reply after restart. Attempted
+sends keep their exact retry/idempotency and known-or-unknown receipt semantics. Native
 server guards remain authoritative for races with manual takeover or revocation.
 
 Secretary runs use only authorized read-only knowledge tools (`kb_search`,
@@ -228,13 +234,16 @@ this root in `secretary_workspace`. Host runs must set
 team paths. Changing the configured mode cancels retained work from the old mode.
 A delivery already attempted keeps an unknown-outcome tombstone instead of falsely
 claiming cancellation. Legacy version-1 native review proposals are never implicitly
-approved during upgrade. Upgrading writes state version 2, which version-1
-runtimes cannot read. Keep a protected pre-upgrade state backup; after any v2
-activity, use a v2-compatible runtime or roll forward. Do not delete the state or
+approved during upgrade. Upgrading writes state version 3, migrating versions 1
+and 2; older runtimes reject version 3 before processing. Keep a protected
+pre-upgrade state backup; after any v3 activity, use a v3-compatible runtime or
+roll forward. Do not delete the state or
 restore an older checkpoint that loses approvals, attempts or update watermarks.
-Do not downgrade to an intermediate v2 runtime that ignores the context and
-preview attempt markers: it cannot preserve publication limits. Use the released
-runtime with these bounds or a newer compatible build.
+Deploy this Flock runtime before enabling backend delivery of owner manual
+`business_message` events. Keep the previous private state backup for recovery,
+but do not blindly restore it after new approvals, attempts or manual watermarks:
+that would lose their safety fences. Older runtimes do reject owner messages
+before generation, but cannot immediately retire earlier pending review buttons.
 
 The private, atomically written `secretary-state.json` records admission before
 poll acknowledgement and stores each completed response before the delegated
@@ -244,12 +253,14 @@ backoff starts at 15 seconds and doubles to five minutes; a larger server
 `retry_after` is respected up to the 48-hour lifetime. A crashed agent run is
 cancelled instead of replaying potentially completed tool actions.
 
-State is bounded to 10,000 jobs/invalidation keys, 1,024 connection snapshots
+State is bounded to 10,000 jobs/invalidation keys and manual watermarks, 1,024 connection snapshots
 and 32 MiB, including reserved space for eventual replies and metadata. Capacity
 pressure evicts the oldest terminal jobs, invalidations or inactive connections;
 if live jobs or reserved bytes fill the queue, only the incoming message is
 logged and skipped, with polling acknowledgement preserved. Live prepared
-responses and their request IDs are never evicted for new work. Owners outside
+responses and their request IDs are never evicted for new work. A full manual
+watermark store pauses acknowledgement of a new takeover until expired entries
+can be reclaimed; it never silently loses that replay fence. Owners outside
 `LO_ALLOWED_USERS` do not occupy connection snapshots. Terminal payloads are
 compacted, and the persisted native update watermark rejects acknowledged update
 redelivery after compaction/restart. Deduplication and invalidation records are
