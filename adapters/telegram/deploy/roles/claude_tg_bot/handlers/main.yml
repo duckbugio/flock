@@ -1,6 +1,10 @@
 ---
-# Convenience handler (e.g. for `--tags restart`). The main converge task
-# already runs `docker compose up -d --build`, which is idempotent.
+# Not reachable as the role stands, and no invocation restores it: no task notifies this
+# handler and none carries a `restart` tag, so `--tags restart` would select no task at all,
+# and tagging the handler would not help either — a handler runs only when notified. It is
+# kept as the restart entry point for a task that comes to need one. Nothing is lost in the
+# meantime: converging already restarts the stack, because the "(Re)start the bot on its
+# current image" task runs `docker compose up -d --force-recreate`, which is idempotent.
 - name: Restart claude-tg-bot
   ansible.builtin.command:
     cmd: docker compose restart
