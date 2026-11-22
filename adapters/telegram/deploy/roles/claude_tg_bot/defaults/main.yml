@@ -117,12 +117,19 @@ gitea_poll_interval: 90
 enable_dind: true
 dind_image: "docker:27-dind"
 
-# Weekly reclaim of unused Docker images + build cache via a systemd timer. Only prunes
-# things OLDER than docker_prune_keep_hours, so a recently-pulled image stays for rollback;
-# images in use by a running container are never touched. Set enable_docker_prune: false to skip.
+# Reclaim unused Docker images + build cache via a systemd timer. Only prunes things
+# OLDER than docker_prune_keep_hours, so recently-pulled images stay available for rollback;
+# images in use by a running container and Docker volumes are never touched. A lightweight
+# pressure timer triggers the same cleanup early when the root filesystem crosses the limit.
+# Set enable_docker_prune: false to skip all Docker/runner host maintenance units.
 enable_docker_prune: true
-docker_prune_schedule: "weekly"   # systemd OnCalendar (weekly | daily | "Sun *-*-* 04:00:00")
-docker_prune_keep_hours: 168      # keep anything newer than this many hours (168 = 7 days)
+docker_prune_schedule: "daily"    # systemd OnCalendar (daily | "Sun *-*-* 04:00:00")
+docker_prune_keep_hours: 48       # keep anything newer than this many hours
+docker_prune_pressure_interval: "15min"
+docker_prune_pressure_used_percent: 85
+github_runner_diag_keep_days: 3
+journald_system_max_use: "512M"
+journald_system_keep_free: "10G"
 
 # MCP tools (Claude backend only). context7 = live library docs (free, no key).
 # DuckBug MCP activates when vault_duckbug_mcp_token is set in vault.yml — the team

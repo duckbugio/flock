@@ -1,10 +1,11 @@
 # Managed by Ansible — schedule for docker-prune.service.
 [Unit]
-Description=Weekly Docker prune
+Description=Scheduled Docker and runner log cleanup
 
 [Timer]
 OnCalendar={{ docker_prune_schedule }}
 Persistent=true
+RandomizedDelaySec=30min
 
 [Install]
 WantedBy=timers.target

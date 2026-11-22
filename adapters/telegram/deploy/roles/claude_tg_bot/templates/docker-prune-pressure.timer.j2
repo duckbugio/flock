@@ -1,0 +1,12 @@
+# Managed by Ansible — inexpensive disk-pressure check for runner hosts.
+[Unit]
+Description=Check runner disk pressure
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec={{ docker_prune_pressure_interval }}
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
