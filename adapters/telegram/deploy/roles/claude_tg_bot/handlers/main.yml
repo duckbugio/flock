@@ -5,3 +5,8 @@
   ansible.builtin.command:
     cmd: docker compose restart
     chdir: "{{ app_dir }}"
+
+- name: Restart systemd-journald
+  ansible.builtin.systemd:
+    name: systemd-journald
+    state: restarted

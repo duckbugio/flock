@@ -82,9 +82,10 @@
     state: started
     enabled: true
 
-# ───────────────────────── Docker auto-prune (weekly systemd timer) ─────────────────────────
+# ───────────────────────── Runner host disk maintenance ─────────────────────────
 - name: Install Docker auto-prune systemd units
   when: enable_docker_prune | bool
+  tags: [maintenance]
   block:
     - name: Render docker-prune service unit
       ansible.builtin.template:
@@ -98,12 +99,41 @@
         dest: /etc/systemd/system/docker-prune.timer
         mode: "0644"
 
-    - name: Enable + start the docker-prune timer
+    - name: Render Docker prune pressure service unit
+      ansible.builtin.template:
+        src: docker-prune-pressure.service.j2
+        dest: /etc/systemd/system/docker-prune-pressure.service
+        mode: "0644"
+
+    - name: Render Docker prune pressure timer unit
+      ansible.builtin.template:
+        src: docker-prune-pressure.timer.j2
+        dest: /etc/systemd/system/docker-prune-pressure.timer
+        mode: "0644"
+
+    - name: Create journald drop-in directory
+      ansible.builtin.file:
+        path: /etc/systemd/journald.conf.d
+        state: directory
+        mode: "0755"
+
+    - name: Limit persistent journal disk usage
+      ansible.builtin.template:
+        src: journald-retention.conf.j2
+        dest: /etc/systemd/journald.conf.d/duckbug-retention.conf
+        mode: "0644"
+      notify: Restart systemd-journald
+
+    - name: Enable and restart Docker maintenance timers
       ansible.builtin.systemd:
-        name: docker-prune.timer
+        name: "{{ item }}"
         enabled: true
-        state: started
+        state: restarted
         daemon_reload: true
+      when: not ansible_check_mode
+      loop:
+        - docker-prune.timer
+        - docker-prune-pressure.timer
 
 # ───────────────────────── app deploy ─────────────────────────
 - name: Create application directory

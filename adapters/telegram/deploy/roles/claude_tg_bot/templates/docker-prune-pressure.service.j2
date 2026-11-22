@@ -1,0 +1,10 @@
+# Managed by Ansible — trigger cleanup before the root filesystem fills completely.
+[Unit]
+Description=Trigger Docker cleanup under disk pressure
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecCondition=/bin/sh -c 'used=$(/bin/df --output=pcent / | /usr/bin/tail -n1 | /usr/bin/tr -dc 0-9); test "$used" -ge {{ docker_prune_pressure_used_percent }}'
+ExecStart=/bin/systemctl start --no-block docker-prune.service
